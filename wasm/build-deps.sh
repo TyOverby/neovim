@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# wasm/build-deps.sh - Cross-compile Neovim's bundled dependencies to
+# WebAssembly with Emscripten.
+#
+# Produces static wasm libraries + headers under .deps-wasm/usr:
+#   libuv, lua (PUC 5.1), lpeg, luv, unibilium, utf8proc, tree-sitter
+#   and the bundled tree-sitter parsers.
+#
+# Key differences from the native deps build (cmake.deps):
+#   * USE_BUNDLED_LUAJIT=OFF / USE_BUNDLED_LUA=ON
+#       LuaJIT cannot target wasm; we use portable PUC Lua 5.1 instead. This is
+#       exactly what Neovim's PREFER_LUA mode expects.
+#   * ENABLE_WASMTIME=OFF
+#       The tree-sitter wasm-parser feature needs wasmtime (a native runtime);
+#       irrelevant when nvim itself is wasm.
+#   * EMCC_CFLAGS force-includes wasm/shim.h into every compile (see that file).
+#
+# Run from anywhere; paths are resolved relative to the repo root.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPS_BIN="${ROOT}/.deps-wasm"
+DOWNLOADS="${DEPS_BIN}/build/downloads"
+
+# Force-include the wasm shim into every emcc invocation, and use wasm-native
+# setjmp/longjmp. The latter is REQUIRED for JSPI: the default emscripten
+# setjmp/longjmp uses JS `invoke_*` trampolines, and those JS stack frames make
+# JSPI suspension fail with "trying to suspend JS frames". Lua (and nvim) use
+# longjmp for error handling, so deps must be built with the same model as nvim.
+export EMCC_CFLAGS="-include ${ROOT}/wasm/shim.h -sSUPPORT_LONGJMP=wasm ${EMCC_CFLAGS:-}"
+
+echo "==> Seeding download cache (reuse native deps tarballs, no network needed)"
+mkdir -p "${DOWNLOADS}"
+if [ -d "${ROOT}/.deps/build/downloads" ]; then
+  cp -rn "${ROOT}/.deps/build/downloads/." "${DOWNLOADS}/" 2>/dev/null || true
+fi
+
+echo "==> Configuring wasm deps (.deps-wasm)"
+emcmake cmake \
+  -S "${ROOT}/cmake.deps" \
+  -B "${DEPS_BIN}" \
+  -G Ninja \
+  -D CMAKE_BUILD_TYPE=Release \
+  -D USE_BUNDLED_LUAJIT=OFF \
+  -D USE_BUNDLED_LUA=ON \
+  -D ENABLE_WASMTIME=OFF
+
+echo "==> Building wasm deps"
+cmake --build "${DEPS_BIN}"
+
+echo "==> Done. Wasm deps installed under ${DEPS_BIN}/usr"
+ls -la "${DEPS_BIN}/usr/lib" || true

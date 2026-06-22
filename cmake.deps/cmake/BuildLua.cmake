@@ -34,6 +34,13 @@ set(LUA_CONFIGURE_COMMAND
       -e "s@-lreadline@@g"
       -e "s@-lhistory@@g"
       -e "s@-lncurses@@g"
+      # Use the CMake-configured archiver/ranlib so cross builds work. This
+      # matters for the Emscripten/wasm build: GNU `ar`/`ranlib` cannot produce
+      # a valid symbol index for wasm object files, so there CMAKE_AR is `emar`
+      # and CMAKE_RANLIB is `emranlib`. For native builds these expand to the
+      # absolute paths of the system tools (an effective no-op).
+      -e "/^AR/s@ar @${CMAKE_AR} @"
+      -e "/^RANLIB/s@ranlib@${CMAKE_RANLIB}@"
       -i ${DEPS_BUILD_DIR}/src/lua/src/Makefile &&
   sed -e "/#define LUA_USE_READLINE/d"
       -e "s@\\(#define LUA_ROOT[ 	]*\"\\)/usr/local@\\1${DEPS_INSTALL_DIR}@"

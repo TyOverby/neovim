@@ -769,6 +769,42 @@ if(STATIC_BUILD)
 endif()
 target_link_libraries(nvim_bin PRIVATE main_lib PUBLIC libuv)
 
+# ---------------------------------------------------------------------------
+# Emscripten / WebAssembly build glue.
+#
+# Keeps all wasm-specific sources/flags in one guarded block. These files live
+# under <repo>/wasm/ (outside the globbed source dirs) so they never affect a
+# native build. See wasm/ for the full porting notes.
+# ---------------------------------------------------------------------------
+if(EMSCRIPTEN)
+  target_sources(nvim_bin PRIVATE
+    ${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c)
+  target_link_options(nvim_bin PRIVATE
+    # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
+    # suspend on async JS promises via WebAssembly stack-switching.
+    -sJSPI
+    # Wasm-native setjmp/longjmp: the default emscripten model uses JS invoke_*
+    # trampolines whose JS stack frames break JSPI suspension. Must match the
+    # model the deps were built with (see wasm/build-deps.sh).
+    -sSUPPORT_LONGJMP=wasm
+    # Use Node's real filesystem directly so nvim can read $VIMRUNTIME and edit
+    # real files (instead of the in-memory MEMFS).
+    -sNODERAWFS=1
+    -sALLOW_MEMORY_GROWTH=1
+    # nvim recurses deeply (regex, syntax); the 64KB default stack is too small.
+    -sSTACK_SIZE=8MB
+    -sEXIT_RUNTIME=1
+    -sENVIRONMENT=node
+    # Boot-time JS that configures argv ($VIMRUNTIME, the `node nvim.js -- args`
+    # convention) and the runtime environment (Emscripten does not inherit
+    # process.env). Runs inside the module so it can read the real process.
+    --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
+    # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js)
+  set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/pre.js")
+endif()
+
 install_helper(TARGETS nvim_bin)
 if(MSVC)
   install(FILES $<TARGET_PDB_FILE:nvim_bin> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
