@@ -27,7 +27,13 @@ What works today (`node nvim.js -- <args>`):
 ## Prerequisites
 
 - Emscripten (`emcc`) ≥ 3.1.6x (has `-sJSPI`).
-- Node ≥ 22 (JSPI / `WebAssembly.Suspending` available by default; v26 tested).
+- Node with JSPI (`WebAssembly.Suspending`):
+  - **v24+** (v26 tested): on by default, no flag.
+  - **v22**: pass `--experimental-wasm-jspi` (e.g.
+    `node --experimental-wasm-jspi build-wasm/bin/nvim.js -- file.txt`). The engine
+    worker inherits `process.execArgv`, so the flag only goes on the top-level node.
+  - **v20 and older**: unsupported (only the older `WebAssembly.Suspender` API).
+  The `nvim` wrapper in `build-wasm/bin/` adds the flag automatically when needed.
 - A **native** build in `build/` providing the host codegen helper
   `build/lib/libnlua0.so` (`cmake --build build --target nlua0`), plus a host
   Lua 5.1 / LuaJIT interpreter. See *How cross-compilation works*.

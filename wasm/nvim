@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# wasm/nvim - launcher for the WebAssembly build of Neovim.
+#
+# Runs nvim.js under Node with JSPI (WebAssembly.Suspending) enabled, which the
+# event loop needs to suspend the main-thread UI client. JSPI is on by default in
+# Node 24+, but Node 22/23 gate it behind --experimental-wasm-jspi. The engine
+# worker inherits process.execArgv, so the flag only needs to go here.
+#
+# Usage:  wasm/nvim [nvim args]      e.g.  wasm/nvim /tmp/foo.txt
+# Override the interpreter with $NODE.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NODE="${NODE:-node}"
+
+major="$("$NODE" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')"
+flags=()
+if [ "$major" -ge 24 ]; then
+  :  # JSPI on by default
+elif [ "$major" -ge 22 ]; then
+  flags+=(--experimental-wasm-jspi)
+else
+  echo "wasm/nvim: Node $major is too old for this build; use Node >= 22." >&2
+fi
+
+exec "$NODE" "${flags[@]}" "$DIR/nvim.js" -- "$@"

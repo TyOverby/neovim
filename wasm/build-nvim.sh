@@ -71,6 +71,8 @@ cmake --build "${BUILD}" --target nvim_bin
 # linked into nvim.js; these are the shared-memory client/worker harness).
 echo "==> Installing JS helpers next to nvim.js"
 cp "${ROOT}/wasm/sab.js" "${ROOT}/wasm/worker.js" "${ROOT}/wasm/demo-rpc.js" "${BUILD}/bin/"
+cp "${ROOT}/wasm/nvim" "${BUILD}/bin/nvim"
+chmod +x "${BUILD}/bin/nvim"
 
 echo "==> Done."
 echo "    Headless / RPC:   node ${BUILD}/bin/nvim.js -- <nvim args>"
