@@ -80,8 +80,14 @@ class Ring {
   }
 
   // Consumer: main-thread-safe async wait. Returns a Promise<boolean>.
+  //
+  // NB: Atomics.waitAsync works correctly here (verified on Node 20 and 26 — it
+  // wakes on a cross-thread Atomics.notify). nvim_io.js's client poll uses a
+  // small interval instead, but only because it must wait on stdin + channel +
+  // timeout + close together; this method is a fine building block if that poll
+  // is ever reworked to wait on the ring directly (see stage3.md).
   waitReadableAsync(timeout) {
-    if (this.available() > 0) return Promise.resolve(true);
+    if (this.available() > 0 || this.isClosed()) return Promise.resolve(true);
     const head = Atomics.load(this.ctrl, HEAD);
     const r = Atomics.waitAsync(this.ctrl, HEAD, head,
                                 timeout === undefined ? Infinity : timeout);

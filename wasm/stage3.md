@@ -24,9 +24,16 @@ it to the **browser** and cleans up the rough edges. Prereq reading: `stage2.md`
 4. **Engine stderr.** It's dropped unless `NVIM_WASM_ENGINE_LOG` is set. Consider a
    ring/console bridge so engine panics are visible without env wiring.
 
-5. **Drop dependence on `Atomics.waitAsync`.** It's documented as unreliable here
-   and we poll a 3 ms interval instead. Revisit on newer V8 — a working
-   `waitAsync` removes the busy-interval entirely.
+5. **Replace the 3 ms client poll with `Atomics.waitAsync` for the ring.**
+   `waitAsync` works correctly (verified on Node 20 and 26 — an earlier note that
+   it was "unreliable" was a misattribution; the real stage-1 bug was the engine
+   not booting, so nothing ever called `notify`). The client poll uses a 3 ms
+   interval only because one wait must cover ring + stdin + timeout + close
+   together. Switching the ring part to `waitAsync` cuts idle wakeups and redraw
+   latency, but the **closed-ring case still needs macrotask pacing** (resolving
+   on `isClosed()` via an immediate microtask reintroduces the `os_hrtime` freeze
+   from stage 2). So: `Promise.race(waitAsync, stdinPromise, setTimeout)`, with a
+   `setTimeout`-paced path once the ring is closed.
 
 ## Browser stage
 

@@ -213,8 +213,13 @@ addToLibrary({
 
     // CLIENT: async (non-blocking) wait used by __syscall_poll on the main
     // thread. Resolves when the channel ring or terminal stdin becomes readable,
-    // or the libuv timeout elapses. We poll the ring on a short interval rather
-    // than Atomics.waitAsync, which does not reliably wake on notify here.
+    // or the libuv timeout elapses. We poll the ring on a short interval because
+    // a single wait must cover three sources at once -- the channel ring, the
+    // terminal stdin (a Node 'data' event, not a memory location), and the
+    // timeout -- and the interval handles all of them plus channel-close
+    // uniformly. (Atomics.waitAsync works fine here -- see sab.js -- and could
+    // replace the ring part, but the closed-ring case would still need macrotask
+    // pacing to avoid the os_hrtime freeze noted below; see stage3.md.)
     pollWaitAsync: function (timeout) {
       return new Promise(function (resolve) {
         var done = false;

@@ -41,8 +41,8 @@ Not in stage 1 (see stage2.md / README): interactive TUI; process spawning
 
 - `emcc` 3.1.69 (has `-sJSPI`), `emar`/`emranlib` = llvm-ar 19.
 - Node v26 — `WebAssembly.Suspending`/`promising` available by default (JSPI), no
-  flags. `Atomics.wait` wakes across worker_threads; **`Atomics.waitAsync` does
-  NOT resolve on notify in this build** (worked around — see §8).
+  flags. `Atomics.wait` wakes across worker_threads. (An earlier note here claimed
+  `Atomics.waitAsync` did not resolve on notify — that was wrong; see §8.)
 - Host **PUC Lua 5.1** (`/usr/bin/lua5.1`) + dev headers, and bundled LuaJIT at
   `.deps/usr/bin/luajit`.
 - A complete native `build/` (provides generated headers + host `nlua0`).
@@ -212,9 +212,13 @@ main-thread ⇄ SAB contract is identical either way. See stage2.md §"FS rework
 
 ## 8. Gotchas worth remembering
 
-- `Atomics.waitAsync` does **not** wake on `notify` in this Node build; the
-  worker bridge polls the ring instead. The *engine* blocks fine with
-  synchronous `Atomics.wait` (off the main thread).
+- `Atomics.waitAsync` **does** wake on a cross-thread `notify` (verified on Node
+  20 and 26). An earlier version of this doc claimed otherwise — that was a
+  misattribution: the real stage-1 failure was the engine not booting, so nothing
+  ever wrote to the ring or called `notify`, and `waitAsync` correctly never
+  fired. The client poll uses a small interval for other reasons (it also waits on
+  stdin + timeout + close); see stage3.md. The *engine* blocks with synchronous
+  `Atomics.wait` off the main thread.
 - The **main/UI thread must never `Atomics.wait`** — in Node it also stalls the
   worker's console forwarding; in the browser it's outright forbidden. The client
   stays event-driven.
