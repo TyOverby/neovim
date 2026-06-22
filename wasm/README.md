@@ -75,6 +75,24 @@ The page (`wasm/web/`) runs `nvim --embed` in a Web Worker and renders the
 thread — **no wasm and no JSPI on the page**, only in the Worker. Click the grid
 and type. See `stage3.md` for the design and `wasm/web/` for the code.
 
+### Deploy to a static host (GitHub Pages)
+
+The site is fully static — no backend. The only requirement is that the page be
+*cross-origin isolated* (for `SharedArrayBuffer`). On hosts that can send headers,
+set COOP `same-origin` + COEP `require-corp`. On hosts that can't (GitHub Pages),
+`index.html` loads `coi-serviceworker.js`, which injects those headers via a
+service worker (one extra reload on first visit; a no-op when headers are already
+present, so the dev server is unaffected).
+
+```sh
+wasm/web/build-site.sh _site   # gather the flat, relative-path bundle into _site/
+```
+
+`.github/workflows/deploy-wasm-pages.yml` does this automatically on every push to
+`wasm-build`: it builds the native host helpers, cross-compiles the deps + nvim to
+wasm, assembles the site, and deploys to Pages. Enable it once under
+**Settings → Pages → Source: GitHub Actions**.
+
 ## How cross-compilation works
 
 Neovim generates a lot of C from Lua at build time. Those generators are
@@ -103,7 +121,7 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `sab.js` | `SharedArrayBuffer` ring-buffer byte transport (Node + browser; dual export). |
 | `worker.js` | Node engine endpoint: hosts `nvim --embed` wasm in a worker_thread, fd 0/1 backed by the SAB. |
 | `demo-rpc.js` | End-to-end proof of shared-memory RPC (client ↔ worker). |
-| `web/` | Browser target: `index.html`, `ui.js` (main-thread grid UI + msgpack-RPC client), `engine-worker.js` (Web Worker engine host), `serve.js` (COOP/COEP dev server). Uses `@msgpack/msgpack` (npm). |
+| `web/` | Browser target: `index.html`, `ui.js` (main-thread grid UI + msgpack-RPC client), `engine-worker.js` (Web Worker engine host), `serve.js` (COOP/COEP dev server), `coi-serviceworker.js` (header shim for header-less hosts), `build-site.sh` (assemble the static bundle). Uses `@msgpack/msgpack` (npm). |
 | `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)

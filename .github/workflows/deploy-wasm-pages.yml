@@ -1,0 +1,102 @@
+# Build the WebAssembly port and deploy the browser grid UI (wasm/web/) to
+# GitHub Pages. See wasm/README.md and wasm/stage3.md for the architecture.
+#
+# Pages setup (one-time, in the repo): Settings -> Pages -> Build and deployment
+#   -> Source: "GitHub Actions".
+name: Deploy wasm to Pages
+
+on:
+  push:
+    branches: [wasm-build]
+    # Only rebuild when something that affects the wasm build/site changes.
+    paths:
+      - 'wasm/**'
+      - 'src/**'
+      - 'cmake.deps/**'
+      - 'cmake/**'
+      - 'runtime/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/deploy-wasm-pages.yml'
+  workflow_dispatch:
+
+# Needed by actions/deploy-pages (OIDC) and to publish the Pages artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a newer push cancel an in-flight build.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      EM_VERSION: 3.1.69
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gettext cmake unzip curl build-essential
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Emscripten, pinned to the version the wasm build was developed against.
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EM_VERSION }}
+          actions-cache-folder: emsdk-cache-${{ env.EM_VERSION }}
+
+      # The cross build needs two host helpers produced by a native build:
+      # the bundled host luajit (.deps/usr/bin/luajit) and the nlua0 Lua C-module
+      # (build/lib/libnlua0.so) that drives Neovim's C-from-Lua codegen.
+      - name: Cache native deps (.deps)
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: native-deps-${{ runner.os }}-${{ hashFiles('cmake.deps/**') }}
+
+      - name: Build native deps + nlua0 host helper
+        run: |
+          cmake -S cmake.deps -B .deps -G Ninja -D CMAKE_BUILD_TYPE=Release
+          cmake --build .deps
+          cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=Release
+          cmake --build build --target nlua0
+
+      - name: Cache wasm deps (.deps-wasm)
+        uses: actions/cache@v4
+        with:
+          path: .deps-wasm
+          key: wasm-deps-${{ runner.os }}-${{ env.EM_VERSION }}-${{ hashFiles('cmake.deps/**', 'wasm/build-deps.sh', 'wasm/shim.h') }}
+
+      - name: Cross-compile bundled deps to wasm
+        run: wasm/build-deps.sh
+
+      - name: Cross-compile Neovim to wasm
+        run: wasm/build-nvim.sh
+
+      - name: Assemble the static site
+        run: wasm/web/build-site.sh "${GITHUB_WORKSPACE}/_site"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
