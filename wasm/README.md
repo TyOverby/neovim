@@ -1,8 +1,10 @@
-# Neovim on WebAssembly (Emscripten + Node)
+# Neovim on WebAssembly (Emscripten + Node / Browser)
 
 This directory contains everything needed to cross-compile Neovim to WebAssembly
-with Emscripten and run it under Node.js (with JSPI — JavaScript Promise
-Integration — and a `SharedArrayBuffer`-based UI transport).
+with Emscripten and run it either **under Node.js** (interactive builtin TUI) or
+**in a browser** (a custom JavaScript grid UI on the page). Both use JSPI —
+JavaScript Promise Integration — where wasm runs, and a `SharedArrayBuffer`-based
+transport between the editor and its UI.
 
 It is **additive**: the normal native build is unchanged. Every change to the
 shared build files (`CMakeLists.txt`, `cmake.deps/…`) is guarded by
@@ -17,7 +19,7 @@ What works today (`node nvim.js -- <args>`):
 | Cross-compile nvim + all deps to wasm | ✅ |
 | `--version`, `--headless`, `-l script.lua` | ✅ |
 | Full Lua + `vim.api` + bundled runtime (`$VIMRUNTIME`) | ✅ |
-| Real filesystem access (NODERAWFS) | ✅ |
+| Real filesystem access (MEMFS + NODEFS under Node) | ✅ |
 | `nvim --embed` msgpack-RPC server | ✅ |
 | Engine in a worker + client over `SharedArrayBuffer` | ✅ (see `demo-rpc.js`) |
 | **Interactive built-in TUI** (`node nvim.js -- file.txt`) | ✅ (stage 2 — see `stage2.md`) |
@@ -34,6 +36,9 @@ What works today (`node nvim.js -- <args>`):
     worker inherits `process.execArgv`, so the flag only goes on the top-level node.
   - **v20 and older**: unsupported (only the older `WebAssembly.Suspender` API).
   The `nvim` wrapper in `build-wasm/bin/` adds the flag automatically when needed.
+- For the **browser** UI: a JSPI-capable browser (Chrome ≥ 137, on by default) and
+  Node (for `serve.js` and the `@msgpack/msgpack` npm dep — installed automatically
+  by `build-nvim.sh`).
 - A **native** build in `build/` providing the host codegen helper
   `build/lib/libnlua0.so` (`cmake --build build --target nlua0`), plus a host
   Lua 5.1 / LuaJIT interpreter. See *How cross-compilation works*.
@@ -168,6 +173,52 @@ impossible in single-threaded wasm, so we keep the split but change the
   for the real terminal and talking to the engine over the SAB. Stage 2 made this
   fully interactive (`node nvim.js -- file.txt`); see `stage2.md` for the design
   and the hard problems solved. `demo-rpc.js` still exercises the raw RPC path.
+
+### Architecture: the browser web UI (`wasm/web/`)
+
+The browser target keeps the same engine-over-SAB split but replaces the wasm
+builtin-TUI client with a **custom UI written in plain JavaScript**. The result is
+actually *simpler* than the Node TUI: the page runs **no wasm and no JSPI at all**.
+
+```
+   page main thread (wasm/web/ui.js)            Web Worker (engine-worker.js)
+   ┌───────────────────────────────┐   SAB     ┌──────────────────────────┐
+   │ keydown → nvim_input  ─────────┼──ring────▶│ nvim --embed (wasm)      │
+   │ redraw  → char grid → <pre> ◀──┼──ring─────┤ editor + ext_linegrid    │
+   └───────────────────────────────┘           └──────────────────────────┘
+       pure JS, no wasm, no JSPI                 blocks in poll() via Atomics.wait
+```
+
+- **Engine in a Web Worker** (`engine-worker.js`) — the browser analogue of
+  `worker.js`. It `importScripts('sab.js','nvim.js')`, backs fd 0/1 with the SAB
+  ring, and sets `__nvimCanBlockSync=true` so the engine blocks in `poll()` via
+  `Atomics.wait` (allowed off the main thread). The same `nvim.wasm` serves both
+  Node and browser (`-sENVIRONMENT=node,web,worker`).
+- **Pure-JS UI on the page** (`ui.js`) — a msgpack-RPC client (`@msgpack/msgpack`)
+  that:
+  1. `nvim_ui_attach`es with `{ ext_linegrid: true }`;
+  2. decodes `redraw` notifications (`grid_resize`, `grid_line`, `grid_scroll`,
+     `grid_cursor_goto`, `flush`) into a 2-D character grid;
+  3. renders that grid into a `<pre>` — **no fg/bg colour**, just a cursor outline.
+     The command line and messages are drawn by Neovim into the bottom grid rows
+     (we don't request `ext_cmdline`/`ext_messages`), so `:`, `:w`, etc. show up;
+  4. maps DOM `keydown` → `nvim_input`.
+
+  Because no wasm runs on the page, there is nothing to suspend, so **no JSPI is
+  needed main-thread**: the reverse ring is read with `Atomics.waitAsync`. Only
+  the Worker instantiates a JSPI module (its poll import is suspending even though
+  it never actually suspends), so the *browser* must support JSPI (Chrome ≥ 137).
+- **Filesystem** — no host FS, so `$VIMRUNTIME` is preloaded into MEMFS at build
+  time (see below). `-u NONE -i NONE` by default (no config, no shada).
+- **Cross-origin isolation** — `SharedArrayBuffer` requires the page to be
+  cross-origin isolated (COOP `same-origin` + COEP `require-corp`). The dev server
+  `serve.js` sends those headers; for header-less hosts the vendored
+  `coi-serviceworker.js` injects them via a service worker (see *Deploy*).
+- **Testing hook** — `window.nvim.input(keys)`, `.gridText()`, `.resize(c,r)` and
+  `.state()` are exposed for driving/asserting from automation or the console.
+
+`stage3.md` records the design, what shipped, and the remaining browser follow-ups
+(trim the ~22 MB preloaded runtime, live resize, IDBFS for real files).
 
 ### Filesystem: MEMFS + NODEFS (not NODERAWFS)
 
