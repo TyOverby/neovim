@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neovim (wasm) — grid UI</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 1rem;
+    font-family: ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    background: #1e1e1e; color: #dcdcdc;
+  }
+  h1 { font-size: 1rem; font-weight: 600; margin: 0 0 .5rem; }
+  #status { font-size: .8rem; opacity: .7; margin-bottom: .5rem; min-height: 1.2em; }
+  #screen {
+    margin: 0;
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1.2;
+    letter-spacing: 0;
+    white-space: pre;
+    background: #000;
+    color: #d4d4d4;
+    padding: 8px;
+    border: 1px solid #444;
+    display: inline-block;
+    outline: none;
+    tab-size: 8;
+  }
+  /* Cursor: an outline only — no fg/bg colouring of the character itself. */
+  #screen .cursor { outline: 1px solid #d4d4d4; outline-offset: -1px; }
+  .hint { font-size: .75rem; opacity: .55; margin-top: .5rem; }
+</style>
+</head>
+<body>
+  <h1>Neovim → WebAssembly — character-grid UI</h1>
+  <div id="status">loading…</div>
+  <pre id="screen" aria-label="Neovim screen"></pre>
+  <div class="hint">
+    Engine (<code>nvim --embed</code>) runs in a Web Worker; this page is a pure-JS
+    msgpack-RPC client rendering the <code>ext_linegrid</code> grid. Click the grid, then type.
+  </div>
+
+  <!-- order matters: globals (RingChannel, MessagePack) before the UI -->
+  <script src="sab.js"></script>
+  <script src="msgpack.min.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>

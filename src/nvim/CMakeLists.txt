@@ -799,10 +799,15 @@ if(EMSCRIPTEN)
     # nvim recurses deeply (regex, syntax); the 64KB default stack is too small.
     -sSTACK_SIZE=8MB
     -sEXIT_RUNTIME=1
-    -sENVIRONMENT=node
-    # Boot-time JS that configures argv ($VIMRUNTIME, the `node nvim.js -- args`
-    # convention) and the runtime environment (Emscripten does not inherit
-    # process.env). Runs inside the module so it can read the real process.
+    # Run in Node (worker_thread engine / builtin-TUI client) AND in the browser
+    # (Web Worker engine driven by a pure-JS UI on the page). One binary, both.
+    -sENVIRONMENT=node,web,worker
+    # The browser has no host filesystem, so bundle $VIMRUNTIME into MEMFS. Under
+    # Node the preloaded copy also wins (pre.js skips the /usr NODEFS mount). The
+    # data lands in nvim.data next to nvim.js/.wasm.
+    --preload-file=${PROJECT_SOURCE_DIR}/runtime@/usr/share/nvim/runtime
+    # Boot-time JS that configures argv, the SAB channel globals, $VIMRUNTIME and
+    # the runtime environment (Emscripten does not inherit the host environment).
     --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
     # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
     --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js)

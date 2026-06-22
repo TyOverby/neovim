@@ -4,6 +4,54 @@ Stage 2 produced a working interactive editor under **Node** (builtin TUI on the
 main thread, engine in a worker_thread, over a `SharedArrayBuffer`). Stage 3 takes
 it to the **browser** and cleans up the rough edges. Prereq reading: `stage2.md`.
 
+## ✅ Done: browser grid UI (`wasm/web/`)
+
+Neovim now runs in the browser. The architecture is *simpler* than the Node TUI:
+the page drops the wasm builtin-TUI client entirely and instead drives the engine
+with a **custom UI written in plain JavaScript**.
+
+```
+   page main thread (wasm/web/ui.js)            Web Worker (engine-worker.js)
+   ┌───────────────────────────────┐   SAB     ┌──────────────────────────┐
+   │ keydown → nvim_input  ─────────┼──ring────▶│ nvim --embed (wasm)      │
+   │ redraw  → char grid → <pre> ◀──┼──ring─────┤ editor + ext_linegrid    │
+   └───────────────────────────────┘           └──────────────────────────┘
+       pure JS, no wasm, no JSPI                 blocks in poll via Atomics.wait
+```
+
+- **Engine in a Web Worker** (`engine-worker.js`): the browser analogue of
+  `worker.js`. `importScripts('sab.js','nvim.js')`, fd 0/1 backed by the SAB ring,
+  `__nvimCanBlockSync=true` so it blocks in `poll()` via `Atomics.wait` (allowed
+  off the main thread). One binary serves both Node and browser.
+- **Pure-JS UI on the page** (`ui.js`): a msgpack-RPC client (`@msgpack/msgpack`)
+  that `nvim_ui_attach`es with `ext_linegrid`, decodes `redraw` (`grid_resize`,
+  `grid_line`, `grid_scroll`, `grid_cursor_goto`, `flush`) into a 2-D char grid,
+  and renders it into a `<pre>` — no fg/bg colour, just a cursor outline. Keyboard
+  via `keydown → nvim_input`. The reverse channel is read with `Atomics.waitAsync`
+  (no JSPI needed because no wasm runs on the page).
+- **Filesystem**: `$VIMRUNTIME` is `--preload-file`'d into MEMFS (`nvim.data`);
+  `pre.js` grew a browser path (no `process`, no NODEFS).
+- **Headers**: `serve.js` sends COOP/COEP so the page is cross-origin isolated
+  and `SharedArrayBuffer` is available. The wasm artifacts are routed to
+  `build-wasm/bin/`, so the page JS can be edited and reloaded without rebuilding.
+
+Validated in Chrome (via the isolated-chrome harness): attach + initial redraw,
+insert-mode typing, multi-line editing, command-line mode (`:` drawn into the
+bottom grid rows), `:s` substitution, and `<Esc>` cursor semantics — both through
+real keystrokes and the `window.nvim.input()` test hook.
+
+### Browser follow-ups (not yet done)
+
+- **Trim the preloaded runtime.** `nvim.data` is ~22 MB (the whole `runtime/`).
+  A `-u NONE` editing demo needs little beyond `runtime/lua`; prune to shrink it.
+- **Live resize.** The grid is fixed 80×24. Measure the `<pre>` and call
+  `nvim_ui_try_resize` on window resize (`window.nvim.resize(c,r)` already exists).
+- **User files / persistence.** No host FS in the browser; wire IDBFS or the File
+  System Access API for real files, and a writable state dir for shada.
+- **JSPI fallback.** The Worker still instantiates a JSPI module (the poll import
+  is suspending even though the Worker never suspends). Browsers without JSPI need
+  an Asyncify fallback build, or a Worker-only non-JSPI variant.
+
 ## Remaining polish (Node, do first — cheap and independently testable)
 
 1. **Live resize / SIGWINCH.** Today the initial terminal size is read via
@@ -35,7 +83,11 @@ it to the **browser** and cleans up the rough edges. Prereq reading: `stage2.md`
    from stage 2). So: `Promise.race(waitAsync, stdinPromise, setTimeout)`, with a
    `setTimeout`-paced path once the ring is closed.
 
-## Browser stage
+## Browser stage (original plan — mostly realised above)
+
+This was the forward plan before the work; the ✅ section above is what shipped.
+Notably we chose the second UI option (a DOM grid renderer fed by the redraw RPC)
+over xterm.js, and the page runs **no wasm** at all. Kept here for the rationale.
 
 The main-thread ⇄ SAB ⇄ engine contract is already browser-shaped; the changes are
 at the edges:

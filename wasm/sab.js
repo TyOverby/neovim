@@ -119,4 +119,11 @@ class RingChannel {
   }
 }
 
-module.exports = { RingChannel, Ring };
+// Dual export: CommonJS for Node (worker.js / demo-rpc.js), and globals for the
+// browser, where classic <script>/importScripts has no module system.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { RingChannel, Ring };
+} else if (typeof globalThis !== 'undefined') {
+  globalThis.RingChannel = RingChannel;
+  globalThis.Ring = Ring;
+}

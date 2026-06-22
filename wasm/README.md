@@ -21,7 +21,7 @@ What works today (`node nvim.js -- <args>`):
 | `nvim --embed` msgpack-RPC server | ✅ |
 | Engine in a worker + client over `SharedArrayBuffer` | ✅ (see `demo-rpc.js`) |
 | **Interactive built-in TUI** (`node nvim.js -- file.txt`) | ✅ (stage 2 — see `stage2.md`) |
-| Browser (Web Worker + xterm.js / canvas) | 🚧 next (see `stage3.md`) |
+| **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `stage3.md`, `wasm/web/`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed (no spawn in wasm) |
 
 ## Prerequisites
@@ -63,6 +63,18 @@ node build-wasm/bin/nvim.js -- -u NONE --headless -l script.lua
 ( cd build-wasm/bin && node demo-rpc.js )   # shared-memory RPC round-trip
 ```
 
+### Browser (engine in a Web Worker + pure-JS grid UI)
+
+```sh
+node wasm/web/serve.js          # COOP/COEP static server (default :8000)
+# then open http://localhost:8000/  in a JSPI-capable browser (Chrome ≥ 137)
+```
+
+The page (`wasm/web/`) runs `nvim --embed` in a Web Worker and renders the
+`ext_linegrid` grid into a `<pre>` with a small msgpack-RPC client on the main
+thread — **no wasm and no JSPI on the page**, only in the Worker. Click the grid
+and type. See `stage3.md` for the design and `wasm/web/` for the code.
+
 ## How cross-compilation works
 
 Neovim generates a lot of C from Lua at build time. Those generators are
@@ -86,12 +98,13 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `build-nvim.sh` | Configure + build nvim to wasm; install launcher/helpers. |
 | `shim.h` | Force-included into every emcc compile (`EMCC_CFLAGS`); small libc gap fills (pthread thread-name stubs). |
 | `uv_stubs.c` | libuv / libc functions the Emscripten builds omit (sys-info, `uv_exepath`, `sched_*`, `pthread_*_np`). Linked into nvim only for wasm. |
-| `pre.js` | Emscripten `--pre-js`: argv (`node nvim.js -- args`), `$VIMRUNTIME`, env, and the NODEFS mounts of the host FS. |
+| `pre.js` | Emscripten `--pre-js`: argv, the SAB-channel globals, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS; browser path uses the preloaded runtime in MEMFS. |
 | `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll`, SAB-backed channel fds for both roles, host-terminal stdio + winsize + raw mode, and the engine-spawn glue. |
-| `sab.js` | `SharedArrayBuffer` ring-buffer byte transport (browser-compatible). |
-| `worker.js` | Engine endpoint: hosts `nvim --embed` wasm directly in a worker, fd 0/1 backed by the SAB. |
+| `sab.js` | `SharedArrayBuffer` ring-buffer byte transport (Node + browser; dual export). |
+| `worker.js` | Node engine endpoint: hosts `nvim --embed` wasm in a worker_thread, fd 0/1 backed by the SAB. |
 | `demo-rpc.js` | End-to-end proof of shared-memory RPC (client ↔ worker). |
-| `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and the forward plan (browser). |
+| `web/` | Browser target: `index.html`, `ui.js` (main-thread grid UI + msgpack-RPC client), `engine-worker.js` (Web Worker engine host), `serve.js` (COOP/COEP dev server). Uses `@msgpack/msgpack` (npm). |
+| `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
 
@@ -104,6 +117,7 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
   upstream, so it otherwise builds with no I/O backend.
 - `src/nvim/CMakeLists.txt` — one `if(EMSCRIPTEN)` block: link `uv_stubs.c`,
   the JSPI / `FORCE_FILESYSTEM` + `nodefs.js` / `SUPPORT_LONGJMP=wasm` link flags,
+  `ENVIRONMENT=node,web,worker`, `--preload-file` of the runtime into MEMFS,
   `--pre-js`, `--js-library`.
 - `src/nvim/channel.c` / `channel.h` — `channel_from_fds()` (RPC over two explicit
   fds, for the TUI client); skip the embedded dup-dance on Emscripten.
@@ -144,8 +158,9 @@ The wasm build uses MEMFS with a NODEFS mount of the host filesystem (set up in
 makes purely-virtual fds (the in-worker SAB channel, the client's RPC fds)
 impossible. With MEMFS the channel fds are first-class virtual streams backed by
 the `SharedArrayBuffer` ring (`nvim_io.js`), while real files stay reachable
-through the NODEFS mount. The browser stage swaps NODEFS for a fetched/IDBFS
-virtual FS — same channel ops.
+through the NODEFS mount. In the **browser** there is no host FS, so `$VIMRUNTIME`
+is bundled into MEMFS at build time (`--preload-file runtime@/usr/share/nvim/runtime`,
+shipped as `nvim.data`) and `pre.js` skips the NODEFS mounts — same channel ops.
 
 ## Known limitations
 

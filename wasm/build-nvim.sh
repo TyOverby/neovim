@@ -74,7 +74,19 @@ cp "${ROOT}/wasm/sab.js" "${ROOT}/wasm/worker.js" "${ROOT}/wasm/demo-rpc.js" "${
 cp "${ROOT}/wasm/nvim" "${BUILD}/bin/nvim"
 chmod +x "${BUILD}/bin/nvim"
 
+# Browser target: the page UI (wasm/web/) is served straight from the source
+# tree by wasm/web/serve.js (which also points /nvim.js,/nvim.wasm,/nvim.data at
+# this build dir), so nothing is copied. It only needs the msgpack dependency.
+if command -v npm >/dev/null 2>&1; then
+  if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ]; then
+    echo "==> Installing wasm/web npm deps (@msgpack/msgpack)"
+    ( cd "${ROOT}/wasm/web" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
+      || echo "    (npm install failed; run it manually in wasm/web before serving)"
+  fi
+fi
+
 echo "==> Done."
 echo "    Headless / RPC:   node ${BUILD}/bin/nvim.js -- <nvim args>"
 echo "    Shared-mem demo:  (cd ${BUILD}/bin && node demo-rpc.js)"
+echo "    Browser grid UI:  node ${ROOT}/wasm/web/serve.js   # then open http://localhost:8000/"
 ls -la "${BUILD}/bin/" || true
