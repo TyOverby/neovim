@@ -166,10 +166,10 @@ target needs (page ↔ Worker, no pipes).
 
 ```
    main thread (UI client)            worker_thread (engine)
-   ┌─────────────────────┐           ┌──────────────────────┐
-   │ terminal in/out      │  msgpack  │ nvim --embed (wasm)  │
-   │ TUI render + input ──┼──RPC──────┼─> editor             │
-   └─────────┬───────────┘  over SAB  └──────────┬───────────┘
+   ┌─────────────────────┐            ┌──────────────────────┐
+   │ terminal in/out     │  msgpack   │ nvim --embed (wasm)  │
+   │ TUI render + input ─┼──RPC─────  ┼─> editor             │
+   └─────────┬───────────┘  over SAB  └───────────┬──────────┘
              └───────────  SharedArrayBuffer  ────┘
                        (two SPSC ring buffers + Atomics)
 ```

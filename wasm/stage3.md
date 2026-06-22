@@ -13,8 +13,8 @@ with a **custom UI written in plain JavaScript**.
 ```
    page main thread (wasm/web/ui.js)            Web Worker (engine-worker.js)
    ┌───────────────────────────────┐   SAB     ┌──────────────────────────┐
-   │ keydown → nvim_input  ─────────┼──ring────▶│ nvim --embed (wasm)      │
-   │ redraw  → char grid → <pre> ◀──┼──ring─────┤ editor + ext_linegrid    │
+   │ keydown → nvim_input  ────────┼──ring────▶│ nvim --embed (wasm)      │
+   │ redraw  → char grid → <pre> ◀─┼──ring─────┤ editor + ext_linegrid    │
    └───────────────────────────────┘           └──────────────────────────┘
        pure JS, no wasm, no JSPI                 blocks in poll via Atomics.wait
 ```
