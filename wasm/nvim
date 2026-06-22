@@ -8,6 +8,10 @@
 #
 # Usage:  wasm/nvim [nvim args]      e.g.  wasm/nvim /tmp/foo.txt
 # Override the interpreter with $NODE.
+#
+# Until the wasm build is more complete, this defaults to a clean session: no
+# user config (-u NONE) and no shada (-i NONE). Override the defaults with
+# $NVIM_WASM_DEFAULTS (set it empty to pass nothing).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,4 +27,11 @@ else
   echo "wasm/nvim: Node $major is too old for this build; use Node >= 22." >&2
 fi
 
-exec "$NODE" "${flags[@]}" "$DIR/nvim.js" -- "$@"
+# Default args (no user config / no shada), overridable via $NVIM_WASM_DEFAULTS.
+# shellcheck disable=SC2206
+default_args=(${NVIM_WASM_DEFAULTS--u NONE -i NONE})
+
+# The `[@]+...` idiom expands to nothing (instead of erroring under `set -u`) when
+# an array is empty, e.g. no flags on Node 24+ or NVIM_WASM_DEFAULTS="".
+exec "$NODE" ${flags[@]+"${flags[@]}"} "$DIR/nvim.js" -- \
+  ${default_args[@]+"${default_args[@]}"} "$@"

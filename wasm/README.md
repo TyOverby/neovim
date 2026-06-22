@@ -50,9 +50,13 @@ wasm/build-nvim.sh     # cross-compiles nvim -> build-wasm/bin/nvim.js (+ .wasm)
 Then:
 
 ```sh
-# Interactive editor (builtin TUI on the main thread, engine in a worker):
+# Interactive editor (builtin TUI on the main thread, engine in a worker).
+# The `nvim` wrapper enables JSPI as needed and, for now, defaults to a clean
+# session (-u NONE -i NONE); override with $NVIM_WASM_DEFAULTS.
+build-wasm/bin/nvim file.txt
+
+# Or invoke node directly (Node 22/23 need the JSPI flag; 24+ don't):
 node build-wasm/bin/nvim.js -- file.txt
-# (on a read-only HOME, add `-i NONE` to disable shada — see stage2.md)
 
 node build-wasm/bin/nvim.js -- --version
 node build-wasm/bin/nvim.js -- -u NONE --headless -l script.lua
