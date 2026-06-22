@@ -51,7 +51,9 @@
 # define LOG_CALLSTACK_TO_FILE(fp) log_callstack_to_file(fp, __func__, __LINE__)
 #endif
 
-#ifndef NVIM_LOG_DEBUG
+#if defined(__EMSCRIPTEN__) && defined(NVIM_WASM_TRACE)
+EXTERN int g_min_log_level INIT( = 0);  // TEMP wasm debug: log everything
+#elif !defined(NVIM_LOG_DEBUG)
 EXTERN int g_min_log_level INIT( = LOGLVL_WRN);
 #else
 EXTERN int g_min_log_level INIT( = 0);

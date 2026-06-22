@@ -787,9 +787,14 @@ if(EMSCRIPTEN)
     # trampolines whose JS stack frames break JSPI suspension. Must match the
     # model the deps were built with (see wasm/build-deps.sh).
     -sSUPPORT_LONGJMP=wasm
-    # Use Node's real filesystem directly so nvim can read $VIMRUNTIME and edit
-    # real files (instead of the in-memory MEMFS).
-    -sNODERAWFS=1
+    # Filesystem: use MEMFS (the default in-memory FS) with a NODEFS mount of the
+    # host filesystem (set up in wasm/pre.js). Unlike NODERAWFS, this keeps fd 0/1
+    # as first-class *virtual* streams, which is what lets wasm/nvim_io.js back
+    # them with the SharedArrayBuffer RPC channel (the engine runs in a worker
+    # with no real stdin/stdout). NODEFS still gives access to $VIMRUNTIME and
+    # real files. See wasm/stage2.md.
+    -sFORCE_FILESYSTEM=1
+    -lnodefs.js
     -sALLOW_MEMORY_GROWTH=1
     # nvim recurses deeply (regex, syntax); the 64KB default stack is too small.
     -sSTACK_SIZE=8MB

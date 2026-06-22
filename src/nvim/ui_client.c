@@ -45,8 +45,31 @@ static bool tui_rgb = false;
 #include "ui_events_client.generated.h"
 // uncrustify:on
 
+#ifdef __EMSCRIPTEN__
+// JS glue (wasm/nvim_io.js): spawns the engine (`nvim --embed`) in a worker,
+// wires its stdio to a SharedArrayBuffer channel, installs the client side of
+// that channel on two fresh fds, switches this (client) process's terminal into
+// raw mode, and writes the client-side read/write fds to *in_fd / *out_fd.
+extern void nvim_wasm_start_engine(int *in_fd, int *out_fd);
+#endif
+
 uint64_t ui_client_start_server(const char *exepath, size_t argc, char **argv)
 {
+#ifdef __EMSCRIPTEN__
+  // wasm: there is no process spawning. The engine runs in a worker and we talk
+  // to it over shared memory; the builtin TUI runs here on the main thread.
+  // See wasm/stage2.md.
+  (void)exepath;
+  (void)argc;
+  (void)argv;
+  int in_fd = -1;
+  int out_fd = -1;
+  nvim_wasm_start_engine(&in_fd, &out_fd);
+  if (in_fd < 0 || out_fd < 0) {
+    return 0;
+  }
+  return channel_from_fds(in_fd, out_fd);
+#else
   char **args = xmalloc((2 + argc) * sizeof(char *));
   int args_idx = 0;
   args[args_idx++] = xstrdup(argv[0]);
@@ -81,6 +104,7 @@ uint64_t ui_client_start_server(const char *exepath, size_t argc, char **argv)
   }
 
   return channel->id;
+#endif
 }
 
 /// Attaches this client to the UI channel, and sets its client info.

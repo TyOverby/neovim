@@ -1,151 +1,138 @@
-# Stage 2 — Interactive built-in TUI over the SAB channel
+# Stage 2 — Interactive built-in TUI over the SAB channel  ✅ DONE
 
-Goal: a real interactive editor with `node nvim.js` (no `--embed`) — keystrokes
-in the terminal, rendered screen out — using **nvim's own built-in TUI**
-(`src/nvim/tui/`) on the main thread, talking to the engine (in a worker) over
-the `SharedArrayBuffer` channel built in stage 1.
-
-Decision (chosen): reuse the built-in TUI rather than write a JS grid renderer.
-It reuses nvim's battle-tested terminal handling (terminfo, key parsing,
-true-color, grid diffing) and keeps the C protocol unchanged.
-
-Prereq reading: `stage1.md` §5 (architecture) and §8 (gotchas).
-
----
-
-## Target topology
+Goal (achieved): a real interactive editor with `node nvim.js -- file.txt` — the
+builtin TUI renders to the terminal, keystrokes edit the buffer, `:w`/`:wq` save,
+`:q` restores the terminal — using **nvim's own builtin TUI** (`src/nvim/tui/`)
+on the main thread, talking to the engine (`nvim --embed`, in a worker_thread)
+over the `SharedArrayBuffer` channel from stage 1.
 
 ```
-  main thread = TUI client (nvim, built-in UI)      worker = engine (nvim --embed)
-  - real terminal fd0/fd1 (raw tty in/out)          - stdin/stdout = SAB channel
-  - ui_client_channel_id = SAB channel  <--- msgpack RPC over SharedArrayBuffer --->
-  - non-blocking (JSPI) poll                         - blocks in poll() via Atomics.wait
+  main thread = TUI client (nvim builtin UI)        worker = engine (nvim --embed)
+  - real terminal fd 0/1/2 (raw tty in/out)         - fd 0/1 = SAB channel (virtual)
+  - RPC channel on fresh fds 9/10  <--- msgpack-RPC over SharedArrayBuffer --->
+  - non-blocking poll (JSPI suspend)                - blocks in poll() via Atomics.wait
 ```
 
-Two **separate wasm instances**: the client runs the TUI; the engine runs the
-editor. They share only the SAB. `node nvim.js` (main) is the client; it asks JS
-to spawn the engine worker.
+Two **separate wasm instances** sharing only the SAB. `node nvim.js -- file` is
+the client; it asks JS to spawn the engine worker.
+
+What works, validated end-to-end (via a Python `pty` harness, `wasm/` has no test
+runner): boot + initial render, truecolor output, keyboard input round-trip
+(insert mode, typing, `:` commands), multi-line editing, motions (`gg`), operators
+(`dd`), `:w`/`:wq` writing the file, and `:q`/`:wq` exiting with the terminal
+fully restored (leaves alt-screen, shows cursor, raw mode off). The stage-1
+`demo-rpc.js` still passes, now with the engine hosted **directly** in the worker.
 
 ---
 
-## Work items (in order)
+## What was built (by the stage-1 plan's steps)
 
-### Step 1 — Switch the ENGINE build off NODERAWFS → MEMFS + NODEFS
+### Step 1 — Engine off NODERAWFS → MEMFS + NODEFS  ✅
+`-sNODERAWFS=1` → `-sFORCE_FILESYSTEM=1 -lnodefs.js` (`src/nvim/CMakeLists.txt`).
+`wasm/pre.js` now mounts each existing host top-level dir (`/home`, `/usr`, `/tmp`,
+…) via NODEFS onto the same path, so absolute host paths ($VIMRUNTIME, cwd, file
+args) resolve unchanged, and `FS.chdir(process.cwd())`. This makes fd 0/1 *virtual*
+streams so they can be backed by the SAB channel. `wasm/worker.js` now hosts the
+engine wasm **directly** (`require('./nvim.js')` with `globalThis.__nvim*` set) —
+the stage-1 child-process + pipe bridge is gone. `channel_from_stdio()`
+(`src/nvim/channel.c`) skips the embedded-mode dup/redirect dance on Emscripten and
+uses fd 0/1 directly (where the channel stream ops live).
 
-Why: NODERAWFS routes fd I/O straight to Node fds, so the in-worker SAB channel
-(which must be a *virtual* fd 0/1) doesn't work — the worker has no stdin stream,
-and `--embed`'s `channel_from_stdio` dups fd0/1 and `uv_guess_handle` does a
-path-based `fstat`. With default FS (MEMFS) we can install **custom stream ops**
-on fd 0/1 (already written in `nvim_io.js` `installChannelStream`), while real
-file access comes from a `NODEFS` mount.
+### Step 2 — `ui_client_start_server()` Emscripten path  ✅
+`src/nvim/ui_client.c` has an `#ifdef __EMSCRIPTEN__` branch that calls JS glue
+`nvim_wasm_start_engine()` (in `wasm/nvim_io.js`) and then `channel_from_fds()`.
+`channel_from_fds(in_fd, out_fd)` (new, `src/nvim/channel.c`, declared in
+`channel.h`) opens an RPC channel over two explicit fds — like
+`channel_from_stdio()` but not tied to fd 0/1 and not gated on headless/embedded;
+it reuses `kChannelStreamStdio` (the client has no other stdio channel). The JS
+glue allocates the SAB, spawns the engine worker, installs the client side of the
+channel on two fresh fds, switches the terminal to raw mode, and returns the fds.
 
-- Replace `-sNODERAWFS=1` with `-sFORCE_FILESYSTEM=1` for the engine; in
-  `pre.js`/a preRun, `FS.mkdir('/host'); FS.mount(NODEFS, { root: '/' }, '/host')`
-  (or mount `/` if the platform allows), then `FS.chdir(process.cwd under /host)`
-  and point `$VIMRUNTIME` at the mounted runtime path.
-- Keep NODERAWFS for the *client* if convenient (its fd0/1 are the real tty), or
-  unify both on MEMFS+NODEFS. Cleanest: one build, MEMFS+NODEFS, used by both
-  roles. Decide based on how the client's tty fds behave under MEMFS (may need a
-  TTY device for fd0/1 — Emscripten provides `TTY` ops).
-- Re-verify stage-1 paths (`--headless`, `-l`, `--embed` over pipes) after the
-  FS switch — file reads/writes and `$VIMRUNTIME` lookup must still work.
+### Step 3 — Non-blocking (JSPI) `__syscall_poll`  ✅
+`__syscall_poll` is now `__async: true`. The engine (off main thread) still blocks
+synchronously via `Atomics.wait`. The client (main thread) suspends via JSPI:
+`NvimIO.pollWaitAsync()` returns a Promise that resolves when terminal stdin or the
+channel ring becomes readable, or the libuv timeout elapses. fd 0 reads a queue fed
+by `process.stdin.on('data')` (raw mode); fd 1/2 write raw bytes to
+`process.stdout`/`stderr`.
 
-Acceptance: `demo-rpc.js` still PASSes, but now with the engine's fd0/1 backed by
-the SAB **directly in the worker** (no child process / pipe bridge). At that
-point `worker.js` drops `child_process` and instead `require('./nvim.js')` with
-`globalThis.__nvimServerChannel` set (the hooks already exist in `pre.js` +
-`nvim_io.js`); the engine blocks in `poll()` via `Atomics.wait` (works).
+### Step 4 — Terminal sizing, raw mode, lifecycle  ✅
+`ioctl(TIOCGWINSZ)` reports the real `process.stdout.{rows,columns}` (we patch the
+terminal streams' `tty.ops.ioctl_tiocgwinsz`). Raw mode via
+`process.stdin.setRawMode(true)`, restored on exit. On engine quit, `worker.js`
+closes the rings so the client sees EOF → `exit_on_closed_chan` → `os_exit` →
+`tui_stop` restores the terminal. (Live resize / SIGWINCH is not wired yet — see
+stage 3.)
 
-### Step 2 — `ui_client_start_server()` Emscripten path (no spawn)
-
-In `src/nvim/ui_client.c`, add an `#ifdef __EMSCRIPTEN__` branch that, instead of
-`channel_job_start()`:
-
-1. Calls a JS glue function (add to `nvim_io.js`, e.g. `nvim_wasm_start_engine`)
-   that: allocates the SAB, spawns the engine worker with it + the same argv, and
-   returns the client-side fd numbers for the channel (read fd / write fd backed
-   by SAB stream ops installed via `installChannelStream`).
-2. Creates an nvim RPC channel over those fds. Add a small
-   `channel_from_fds(in_fd, out_fd)` helper next to `channel_from_stdio()` in
-   `channel.c` (same `kChannelStreamStdio` + `rstream_init_fd`/`wstream_init_fd`
-   + `rpc_start`, minus the embedded-mode dup dance).
-3. Returns that channel id as `ui_client_channel_id`.
-
-Keep `EM_JS`/library-call plumbing minimal; the heavy lifting (SAB, worker
-lifecycle) stays in JS.
-
-### Step 3 — Non-blocking (JSPI) `__syscall_poll` for the main thread
-
-The client must not `Atomics.wait`. Make `__syscall_poll` `__async: true` (JSPI)
-and, when nothing is ready and `timeout != 0`, `await` a race of:
-
-- terminal stdin readability — a Promise resolved by a `process.stdin.on('data')`
-  handler that buffers bytes (raw mode) into a JS queue;
-- SAB channel readability — **poll the ring** (NOT `Atomics.waitAsync`, which is
-  broken here — see stage1 §8), e.g. a short `setTimeout` retry loop, or a
-  microtask that checks `channel.in.available()`;
-- the libuv `timeout` via `setTimeout`.
-
-Then recompute readiness and return. Engine (worker) keeps the synchronous
-`Atomics.wait` path (`NvimIO.canBlockSync`). Branch on
-`!Module.nvimCanBlockSync` for the async path.
-
-Wire the client's stdin: `installChannelStream`-style ops for fd 0 (read side =
-the JS stdin queue) and fd 1/2 (write side = `process.stdout/err.write`). Raw
-mode via `process.stdin.setRawMode(true)` (NvimIO.enableRawMode already exists);
-restore on exit.
-
-### Step 4 — Terminal sizing, signals, lifecycle
-
-- Window size: nvim queries `uv_tty_get_winsize`. Provide it from
-  `process.stdout.{columns,rows}`; feed resize via a `process.stdout.on('resize')`
-  handler → `nvim_ui_try_resize` (the client already does this in
-  `ui_client.c`). May need a tty `ioctl(TIOCGWINSZ)` shim in `nvim_io.js`.
-- `os_isatty`/`uv_guess_handle` for fd0/1 must report TTY so the builtin UI is
-  used. Under MEMFS, register fd0/1 as TTY devices (Emscripten `TTY`), or shim
-  `uv_guess_handle`.
-- SIGINT/SIGWINCH: map to Node `process.on('SIGINT'/'SIGWINCH')` if needed (most
-  signal handling already degrades gracefully).
-- Clean teardown: restore raw mode + alternate screen on exit (the TUI emits the
-  sequences; ensure `EXIT_RUNTIME`/atexit runs them and `restoreTerminal` fires).
-
-### Step 5 — End-to-end bring-up
-
-- `node build-wasm/bin/nvim.js -- file.txt` should show the editor. Expect to
-  iterate on: initial `nvim_ui_attach` options, redraw decoding, key encoding,
-  and timing (engine init vs first attach).
-- Add a non-interactive smoke test: drive the client's stdin with a scripted byte
-  sequence (`iHELLO<Esc>:wq<CR>`) and assert the file contents — gives a
-  regression test without a real TTY.
+### Step 5 — End-to-end bring-up  ✅  (see "What works" above)
 
 ---
 
-## Risks / open questions
+## Hard problems and fixes (the non-obvious ones)
 
-- **MEMFS+NODEFS performance & path mapping** — large repos, symlinks, cwd. Mount
-  point vs `/` and how `$VIMRUNTIME`/cwd resolve. Biggest unknown; do Step 1 first
-  and re-validate everything.
-- **TTY under MEMFS for the client** — getting `isatty`, winsize, and raw mode
-  right may need an Emscripten TTY device or targeted shims in `nvim_io.js`.
-- **JSPI async poll correctness** — racing stdin/SAB/timeout without busy-spin or
-  missed wakeups; ensure the engine's redraw latency is acceptable.
-- **Two wasm instances, memory** — each instance is ~5 MB wasm + heap; fine for
-  Node, watch for the browser.
+1. **Channel install ran too early.** Installing channel stream ops in `preRun`
+   no-ops: `FS.init()` creates the standard streams (fd 0/1/2) during
+   `initRuntime`, *after* preRun. Moved to `onRuntimeInitialized` (after
+   `createStandardStreams`). Symptom: engine read fd 0 EOF immediately →
+   `chan_close_on_err: closed by the peer` → silent exit 1.
 
-## Browser stage (after Node interactive works)
+2. **`uv_guess_handle` → UV_FILE.** We used to clear `stream.tty`; that makes
+   `isatty(fd)` false, so libuv classifies the channel fd as a non-tty char device
+   = `UV_FILE` and reads it as a *file* (immediate EOF). Fix: keep `stream.tty`
+   set (FS routes read/write through our `stream_ops` regardless); isatty stays
+   true → `UV_TTY` → the pipe path. Same trick for the client's fresh fds
+   (`FS.open('/dev/null')` for a real char-device node, then swap in channel ops).
 
-- `worker_thread` → `Worker`; `child_process` already gone after Step 1.
-- Main page hosts the UI: either keep the built-in TUI driving an xterm.js
-  terminal, or swap the client for a DOM/canvas grid renderer fed by the same RPC.
-- Requires COOP/COEP headers for `SharedArrayBuffer`.
-- `$VIMRUNTIME` + user files come from a virtual FS (IDBFS / fetched bundle)
-  instead of NODEFS.
+3. **`Module['arguments']` mutated.** Emscripten's `callMain()` does
+   `args.unshift(thisProgram)` in place, so by the time the client glue reads it,
+   the engine would get `["--embed","/usr/bin/nvim","file"]`. Fix: `pre.js` stashes
+   a pristine `Module['nvimUserArgs']`.
 
-## Quick reference — validated building blocks (don't re-derive)
+4. **Busy-spin froze the exit timeout.** `pollWaitAsync` resolved *synchronously*
+   when the channel was closed (`isClosed()` stays true forever), creating a
+   microtask-only tight loop that starved Node's macrotask queue and froze the
+   wall-clock — so `tui_stop`'s 1 s DA1-wait (`LOOP_PROCESS_EVENTS_UNTIL`, which
+   measures elapsed time with `os_hrtime`) never timed out, and the terminal was
+   never restored. Fix: never resolve synchronously; pace every wake through a 3 ms
+   `setInterval` (a real macrotask). stdin still wakes instantly via `NvimIO.wake`.
 
-- wasm nvim runs as `--embed` RPC server (stage 1).
-- `wasm/sab.js` SPSC ring transport works across worker_threads.
-- Synchronous `Atomics.wait` wakes off-main-thread; `Atomics.waitAsync` does not.
-- `installChannelStream` + the `__syscall_poll` blocking branch already implement
-  the server-role SAB fds; reuse for the client role with the async variant.
-- `pre.js` already reads `globalThis.__nvimServerChannel` / `__nvimArgs`.
+5. **Client never saw the engine die.** The new in-worker engine exits via
+   `process.exit()`; nothing closed the SAB rings, so the client never got EOF.
+   Fix: `worker.js` closes the rings on the worker's `process.on('exit')`.
+
+---
+
+## Gotchas / environment notes
+
+- **shada on a read-only state dir.** If `$XDG_STATE_HOME` / `~/.local/state` is
+  read-only (as in some sandboxes), shada writes fail `EROFS` (or, headless, can
+  hang); this clutters exit and can delay the timed teardown. Not a wasm bug — run
+  with `-i NONE` to disable shada. In a normal writable HOME it just works.
+- **No real DA1 response.** `tui_stop` sends a DA1 query and waits ≤1 s for the
+  terminal's reply before restoring. A real terminal answers instantly; a bare pty
+  (or the browser) won't, so exit takes ~1 s. Acceptable.
+- **Engine logs.** `worker.js` redirects the engine's `$NVIM_LOG_FILE` to
+  `<path>.engine` (worker_threads inherit env, else both instances interleave).
+  Set `NVIM_WASM_ENGINE_LOG` to capture the engine's stray stdout/stderr; set
+  `NVIM_WASM_IO_LOG` for the JS I/O layer's trace; build with
+  `-DNVIM_WASM_TRACE` (wasm only) to lower nvim's log level to DEBUG.
+- **One build, two roles.** The same `nvim.js` is both client and engine; the role
+  is chosen at boot (engine if `globalThis.__nvimServerChannel` is set, else the
+  builtin-UI client wires itself up in `nvim_wasm_start_engine`).
+
+---
+
+## Files changed in stage 2
+
+| File | Change |
+|---|---|
+| `src/nvim/CMakeLists.txt` | `-sNODERAWFS=1` → `-sFORCE_FILESYSTEM=1 -lnodefs.js`. |
+| `src/nvim/channel.c` | New `channel_from_fds()`; skip the embedded dup-dance on Emscripten. |
+| `src/nvim/channel.h` | Declare `channel_from_fds()` (wasm). |
+| `src/nvim/ui_client.c` | Emscripten `ui_client_start_server()` path (no spawn). |
+| `src/nvim/log.h` | `-DNVIM_WASM_TRACE` (wasm) lowers the min log level (debug aid). |
+| `wasm/pre.js` | NODEFS mounts + cwd; pristine `nvimUserArgs`; pass `NVIM_LOG_FILE`. |
+| `wasm/nvim_io.js` | Channel ops refactor, client fds, host-terminal stdio, winsize, raw mode, engine-spawn glue, async JSPI poll. |
+| `wasm/worker.js` | Host the engine wasm directly; close rings on exit; split engine log. |
+
+See `stage3.md` for the browser stage and remaining polish.

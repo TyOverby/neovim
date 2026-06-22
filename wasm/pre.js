@@ -36,6 +36,10 @@
     }
   }
   Module['arguments'] = args;
+  // Keep a pristine copy: Emscripten's callMain() does args.unshift(thisProgram),
+  // mutating Module['arguments'] in place before user code runs. The wasm client
+  // (nvim_wasm_start_engine) needs the original nvim args to pass to the engine.
+  Module['nvimUserArgs'] = args.slice();
   Module['thisProgram'] = '/usr/bin/nvim';
 
   function findRuntime() {
@@ -61,6 +65,29 @@
 
   Module['preRun'] = Module['preRun'] || [];
   Module['preRun'].push(function () {
+    // Mount the host filesystem. Unlike NODERAWFS, MEMFS+NODEFS keeps fd 0/1 as
+    // virtual streams (so they can be backed by the SAB RPC channel), while real
+    // files remain reachable. We mount each existing top-level host directory
+    // onto the same path inside the wasm FS, so *absolute* host paths
+    // ($VIMRUNTIME, the cwd, file arguments) resolve transparently and unchanged.
+    try {
+      var NODEFS = FS.filesystems.NODEFS;
+      var roots = ['/home', '/usr', '/etc', '/opt', '/var', '/root', '/mnt',
+                   '/tmp', '/lib', '/lib64', '/bin', '/sbin', '/srv', '/run'];
+      for (var r = 0; r < roots.length; r++) {
+        var d = roots[r];
+        try {
+          if (!fs.existsSync(d)) { continue; }
+          try { FS.mkdir(d); } catch (e) { /* may already exist (e.g. /tmp) */ }
+          FS.mount(NODEFS, { root: d }, d);
+        } catch (e) { /* skip dirs we can't mount */ }
+      }
+      try { FS.chdir(process.cwd()); } catch (e) { /* stay at default cwd */ }
+    } catch (e) {
+      // No NODEFS (or mount failed): fall back to plain MEMFS. Real file access
+      // will be unavailable, but headless/self-contained runs still work.
+    }
+
     // ENV is the Emscripten runtime's environment map (used by getenv()).
     ENV['VIMRUNTIME'] = VIMRUNTIME;
     ENV['PWD'] = process.cwd();
@@ -69,6 +96,7 @@
       'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'PATH',
       'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME',
       'XDG_RUNTIME_DIR', 'NVIM_APPNAME', 'COLORTERM', 'NO_COLOR',
+      'NVIM_LOG_FILE', '__NVIM_TEST_LOG',
     ];
     for (var j = 0; j < passthrough.length; j++) {
       var k = passthrough[j];

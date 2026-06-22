@@ -1,51 +1,45 @@
-// wasm/worker.js - Neovim server endpoint, run in a Node worker_thread.
+// wasm/worker.js - Neovim engine endpoint, run in a Node worker_thread.
 //
-// Exposes an `nvim --embed` msgpack-RPC server to the main thread over the
-// shared-memory RingChannel (wasm/sab.js). The main thread only ever touches
-// the SharedArrayBuffer; it never shares fds or pipes with the engine. That is
-// the property we need for the browser target (page <-> Worker over a SAB).
+// Hosts the Neovim engine wasm (`nvim --embed`) *directly* in this worker and
+// backs its stdin/stdout (fd 0/1) with a shared-memory RingChannel (wasm/sab.js)
+// instead of real pipes. The main thread only ever touches the
+// SharedArrayBuffer; it never shares fds or pipes with the engine. That is the
+// property the browser target needs (page <-> Worker over a SAB), and it is what
+// stage 2 switched to (see wasm/stage2.md): MEMFS+NODEFS makes fd 0/1 virtual
+// streams, so wasm/nvim_io.js can install ring-channel stream ops on them and
+// the engine blocks in poll() via Atomics.wait (allowed off the main thread).
 //
-// Node-stage implementation note
-// ------------------------------
-// Today the engine is launched as a child `node nvim.js --embed` process and
-// this worker bridges its stdio pipes to the SAB (the pipe-based RPC path is
-// already working). The browser stage instead hosts the engine wasm *directly*
-// in this worker and backs its stdin/stdout fds with the SAB (see
-// wasm/nvim_io.js installChannelStream), blocking in poll() via Atomics.wait -
-// at which point the child process and this bridge disappear, but the
-// main-thread/SAB contract is unchanged.
+// (Stage 1 launched the engine as a child `node nvim.js --embed` process and
+// bridged its stdio pipes to the SAB. That child + bridge are gone now.)
 'use strict';
 
 const { workerData } = require('worker_threads');
-const { spawn } = require('child_process');
 const path = require('path');
 const { RingChannel } = require(path.join(__dirname, 'sab.js'));
 
+// 'server' role: out=engine->client ring, in=client->engine ring.
 const channel = new RingChannel(workerData.sab, workerData.cap, 'server');
 
-const child = spawn(process.execPath,
-  [path.join(__dirname, 'nvim.js'), '--', '--embed'].concat(workerData.args || []),
-  { stdio: ['pipe', 'pipe', 'inherit'] });
+// worker_threads inherit the parent's env, so the engine would otherwise share
+// the client's $NVIM_LOG_FILE and interleave logs. Give the engine its own.
+if (process.env.NVIM_LOG_FILE) {
+  process.env.NVIM_LOG_FILE = process.env.NVIM_LOG_FILE + '.engine';
+}
 
-// engine stdout -> client (over shared memory)
-child.stdout.on('data', (d) => {
-  let off = 0;
-  while (off < d.length) {
-    off += channel.out.write(d, off, d.length - off);
-  }
+// Hand the channel + argv to the engine wasm. pre.js reads these globals (it
+// can't see a require()-set Module because Emscripten's own `var Module`
+// shadows it). canBlockSync=true: we are off the main thread, so the engine may
+// Atomics.wait in poll().
+globalThis.__nvimServerChannel = channel;
+globalThis.__nvimCanBlockSync = true;
+globalThis.__nvimArgs = ['--embed'].concat(workerData.args || []);
+
+// When the engine exits (e.g. `:q`), close the rings so the client sees EOF on
+// its channel and runs its own teardown (restoring the terminal). The engine
+// quits via process.exit() inside this worker, so hook the worker's exit.
+process.on('exit', function () {
+  try { channel.out.close(); channel.in.close(); } catch (e) { /* ignore */ }
 });
-child.on('exit', (code) => { channel.out.close(); process.exit(code || 0); });
 
-// client (shared memory) -> engine stdin. Polled on the worker's event loop so
-// child.stdout 'data' keeps flowing. (The browser stage blocks in the engine's
-// poll() via Atomics.wait instead of polling here.)
-const inbuf = Buffer.alloc(workerData.cap);
-const timer = setInterval(() => {
-  if (channel.in.isClosed()) { clearInterval(timer); child.stdin.end(); return; }
-  if (channel.in.available() > 0) {
-    const n = channel.in.read(inbuf, 0, inbuf.length);
-    if (n > 0) {
-      child.stdin.write(Buffer.from(inbuf.subarray(0, n)));
-    }
-  }
-}, 2);
+// Booting the (non-MODULARIZE) Emscripten module starts the engine immediately.
+require(path.join(__dirname, 'nvim.js'));

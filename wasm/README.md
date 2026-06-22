@@ -18,9 +18,10 @@ What works today (`node nvim.js -- <args>`):
 | `--version`, `--headless`, `-l script.lua` | ✅ |
 | Full Lua + `vim.api` + bundled runtime (`$VIMRUNTIME`) | ✅ |
 | Real filesystem access (NODERAWFS) | ✅ |
-| `nvim --embed` msgpack-RPC server (over pipes) | ✅ |
+| `nvim --embed` msgpack-RPC server | ✅ |
 | Engine in a worker + client over `SharedArrayBuffer` | ✅ (see `demo-rpc.js`) |
-| Interactive built-in TUI | 🚧 in progress (see *Architecture*) |
+| **Interactive built-in TUI** (`node nvim.js -- file.txt`) | ✅ (stage 2 — see `stage2.md`) |
+| Browser (Web Worker + xterm.js / canvas) | 🚧 next (see `stage3.md`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed (no spawn in wasm) |
 
 ## Prerequisites
@@ -43,6 +44,10 @@ wasm/build-nvim.sh     # cross-compiles nvim -> build-wasm/bin/nvim.js (+ .wasm)
 Then:
 
 ```sh
+# Interactive editor (builtin TUI on the main thread, engine in a worker):
+node build-wasm/bin/nvim.js -- file.txt
+# (on a read-only HOME, add `-i NONE` to disable shada — see stage2.md)
+
 node build-wasm/bin/nvim.js -- --version
 node build-wasm/bin/nvim.js -- -u NONE --headless -l script.lua
 ( cd build-wasm/bin && node demo-rpc.js )   # shared-memory RPC round-trip
@@ -71,11 +76,12 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `build-nvim.sh` | Configure + build nvim to wasm; install launcher/helpers. |
 | `shim.h` | Force-included into every emcc compile (`EMCC_CFLAGS`); small libc gap fills (pthread thread-name stubs). |
 | `uv_stubs.c` | libuv / libc functions the Emscripten builds omit (sys-info, `uv_exepath`, `sched_*`, `pthread_*_np`). Linked into nvim only for wasm. |
-| `pre.js` | Emscripten `--pre-js`: argv (`node nvim.js -- args`), `$VIMRUNTIME`, env (Emscripten doesn't inherit `process.env`). |
-| `nvim_io.js` | Emscripten `--js-library`: a `__syscall_poll` that doesn't crash under NODERAWFS, and SAB-backed stdin/stdout for the server role. |
+| `pre.js` | Emscripten `--pre-js`: argv (`node nvim.js -- args`), `$VIMRUNTIME`, env, and the NODEFS mounts of the host FS. |
+| `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll`, SAB-backed channel fds for both roles, host-terminal stdio + winsize + raw mode, and the engine-spawn glue. |
 | `sab.js` | `SharedArrayBuffer` ring-buffer byte transport (browser-compatible). |
-| `worker.js` | Server endpoint: runs `nvim --embed`, exposed to the main thread over the SAB. |
+| `worker.js` | Engine endpoint: hosts `nvim --embed` wasm directly in a worker, fd 0/1 backed by the SAB. |
 | `demo-rpc.js` | End-to-end proof of shared-memory RPC (client ↔ worker). |
+| `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and the forward plan (browser). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
 
@@ -87,8 +93,13 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
   (`posix-poll.c` etc.) and include `uv/posix.h`. libuv has no Emscripten branch
   upstream, so it otherwise builds with no I/O backend.
 - `src/nvim/CMakeLists.txt` — one `if(EMSCRIPTEN)` block: link `uv_stubs.c`,
-  the JSPI / NODERAWFS / `SUPPORT_LONGJMP=wasm` link flags, `--pre-js`,
-  `--js-library`.
+  the JSPI / `FORCE_FILESYSTEM` + `nodefs.js` / `SUPPORT_LONGJMP=wasm` link flags,
+  `--pre-js`, `--js-library`.
+- `src/nvim/channel.c` / `channel.h` — `channel_from_fds()` (RPC over two explicit
+  fds, for the TUI client); skip the embedded dup-dance on Emscripten.
+- `src/nvim/ui_client.c` — Emscripten `ui_client_start_server()` path that spawns
+  the engine worker instead of a child process (stage 2).
+- `src/nvim/log.h` — `-DNVIM_WASM_TRACE` (wasm) lowers the min log level (debug aid).
 
 ## Architecture: separate processes + shared memory
 
@@ -109,27 +120,22 @@ impossible in single-threaded wasm, so we keep the split but change the
 ```
 
 - The **engine** blocks waiting for input by suspending in `poll()`:
-  off the main thread it uses `Atomics.wait` (proven working); on the main
-  thread (the UI) blocking is forbidden, so the client stays event-driven.
-- `demo-rpc.js` demonstrates the full path with a minimal JS client. The
-  remaining work for an interactive editor is the **client side**: run the real
-  built-in TUI (or a JS renderer) on the main thread, attach over the SAB
-  channel, and wire terminal stdin/stdout.
+  off the main thread it uses `Atomics.wait`; on the main thread (the UI)
+  blocking is forbidden, so the client suspends asynchronously via JSPI.
+- The **builtin TUI** runs on the main thread (`src/nvim/tui/`), keeping fd 0/1/2
+  for the real terminal and talking to the engine over the SAB. Stage 2 made this
+  fully interactive (`node nvim.js -- file.txt`); see `stage2.md` for the design
+  and the hard problems solved. `demo-rpc.js` still exercises the raw RPC path.
 
-### Node stage vs browser stage
+### Filesystem: MEMFS + NODEFS (not NODERAWFS)
 
-`worker.js` currently launches the engine as a child `node nvim.js --embed`
-process and bridges its pipes to the SAB (reusing the already-working pipe RPC
-path). The browser stage will instead host the engine wasm *directly* in the
-worker and back its stdin/stdout fds with the SAB (the `installChannelStream`
-hooks in `nvim_io.js`), so the child process and the bridge go away — the
-main-thread ⇄ SAB contract is identical either way.
-
-> NODERAWFS note: NODERAWFS makes file access trivial but routes fd I/O straight
-> to Node fds, which makes purely-virtual fds (the in-worker SAB channel)
-> awkward. The clean browser-stage path is to switch the engine build to
-> MEMFS + a `NODEFS`/in-memory mount so the channel fds are first-class virtual
-> streams. The `nvim_io.js` channel ops are written for that model already.
+The wasm build uses MEMFS with a NODEFS mount of the host filesystem (set up in
+`pre.js`), **not** NODERAWFS. NODERAWFS routes fd I/O straight to Node fds, which
+makes purely-virtual fds (the in-worker SAB channel, the client's RPC fds)
+impossible. With MEMFS the channel fds are first-class virtual streams backed by
+the `SharedArrayBuffer` ring (`nvim_io.js`), while real files stay reachable
+through the NODEFS mount. The browser stage swaps NODEFS for a fetched/IDBFS
+virtual FS — same channel ops.
 
 ## Known limitations
 
