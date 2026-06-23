@@ -39,6 +39,15 @@ set(LUA_CONFIGURE_COMMAND
       # a valid symbol index for wasm object files, so there CMAKE_AR is `emar`
       # and CMAKE_RANLIB is `emranlib`. For native builds these expand to the
       # absolute paths of the system tools (an effective no-op).
+      #
+      # WARNING: the two sed expressions below match the upstream Lua Makefile's
+      # `AR= ar rcu` and `RANLIB= ranlib` lines by their exact ` ar `/`ranlib`
+      # spelling. If a future Lua bump changes the format of those lines (e.g.
+      # `AR=ar` with no surrounding spaces, or a different default tool), these
+      # seds will SILENTLY match nothing -- the native build is unaffected, but
+      # the wasm Lua archive is then built with GNU `ar`, producing an archive
+      # with no valid wasm symbol index and a confusing late link failure. Any
+      # Lua version bump MUST re-verify these two substitutions still apply.
       -e "/^AR/s@ar @${CMAKE_AR} @"
       -e "/^RANLIB/s@ranlib@${CMAKE_RANLIB}@"
       -i ${DEPS_BUILD_DIR}/src/lua/src/Makefile &&

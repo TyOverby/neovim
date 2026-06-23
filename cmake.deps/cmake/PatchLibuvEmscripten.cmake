@@ -21,10 +21,16 @@
 set(uv_unix_h "${LIBUV_SRC}/include/uv/unix.h")
 file(READ "${uv_unix_h}" unix_h)
 if(NOT unix_h MATCHES "__EMSCRIPTEN__")
+  set(_before "${unix_h}")
   string(REPLACE
     "      defined(__GNU__)\n# include \"uv/posix.h\""
     "      defined(__GNU__)    || \\\n      defined(__EMSCRIPTEN__)\n# include \"uv/posix.h\""
     unix_h "${unix_h}")
+  if(unix_h STREQUAL _before)
+    message(FATAL_ERROR
+      "PatchLibuvEmscripten: anchor 'defined(__GNU__)\\n# include \"uv/posix.h\"' "
+      "not found in ${uv_unix_h}; upstream libuv layout changed -- update this patch.")
+  endif()
   file(WRITE "${uv_unix_h}" "${unix_h}")
   message(STATUS "Patched libuv include/uv/unix.h to use uv/posix.h on Emscripten")
 endif()
@@ -51,6 +57,12 @@ endif()
 
 add_library(uv_a STATIC")
 
+set(_before "${contents}")
 string(REPLACE "add_library(uv_a STATIC" "${emscripten_branch}" contents "${contents}")
+if(contents STREQUAL _before)
+  message(FATAL_ERROR
+    "PatchLibuvEmscripten: anchor 'add_library(uv_a STATIC' not found in "
+    "${libuv_cmakelists}; upstream libuv layout changed -- update this patch.")
+endif()
 file(WRITE "${libuv_cmakelists}" "${contents}")
 message(STATUS "Patched libuv CMakeLists.txt with Emscripten poll() backend")
