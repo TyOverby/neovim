@@ -72,8 +72,10 @@ be published to npm or hosted on any static path.
   });
 
   // 2. Renderer: mount the default grid UI into a <pre> and forward keystrokes.
-  //    Accepts only { cols, rows } today. Rendering is a monochrome character
-  //    grid (no syntax/fg/bg colour, just a cursor outline).
+  //    Accepts only { cols, rows } today. Rendering is a COLOURED character grid:
+  //    it decodes the ext_linegrid highlight stream and emits colour spans
+  //    (fg/bg/bold/italic/underline/undercurl/strikethrough/reverse), with a
+  //    solid cursor block.
   const ui = NeovimUI.mount_into(nvim, document.getElementById('screen'), {
     cols: 80,
     rows: 24,
@@ -356,8 +358,10 @@ const handle = await on_autocmd(instance, ["BufWritePost"], { pattern: ["*"] },
   });
 // handle.unsubscribe();  // stop notifications + delete the augroup
 
-// mount_into ships today, but PLANNED: it accepts only { cols, rows } now —
-// `font_family` / `font_size` are not yet supported, and rendering is monochrome.
+// mount_into ships today and now renders COLOUR (it decodes the ext_linegrid
+// highlight stream into fg/bg/bold/italic/underline/undercurl/strikethrough/
+// reverse spans). PLANNED: it accepts only { cols, rows } now — `font_family` /
+// `font_size` are not yet supported.
 const ui = await mount_into(instance, document.querySelector(".code-container", {
   font_family: "monospace",
   font_size: 16,
@@ -601,7 +605,9 @@ needs no cross-origin isolation.
   1. `nvim_ui_attach`es with `{ ext_linegrid: true }`;
   2. decodes `redraw` notifications (`grid_resize`, `grid_line`, `grid_scroll`,
      `grid_cursor_goto`, `flush`) into a 2-D character grid;
-  3. renders that grid into a `<pre>` — **no fg/bg colour**, just a cursor outline.
+  3. renders that grid into a `<pre>` **in colour** — it decodes the highlight
+     stream (`default_colors_set`, `hl_attr_define`, per-cell hl ids) into grouped
+     colour spans (fg/bg/bold/italic/underline/undercurl/strikethrough/reverse).
      The command line and messages are drawn by Neovim into the bottom grid rows
      (we don't request `ext_cmdline`/`ext_messages`), so `:`, `:w`, etc. show up;
   4. maps DOM `keydown` → `nvim_input`.

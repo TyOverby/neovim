@@ -28,7 +28,9 @@
     outline: none;
     tab-size: 8;
   }
-  /* Cursor: an outline only — no fg/bg colouring of the character itself. */
+  /* Cursor: a solid block. render() sets inline bg/fg (swapped from the cell)
+     so it stays visible over a coloured cell; this outline is a fallback for the
+     default-colour case where no inline background is emitted. */
   #screen .cursor { outline: 1px solid #d4d4d4; outline-offset: -1px; }
   .hint { font-size: .75rem; opacity: .55; margin-top: .5rem; }
 </style>

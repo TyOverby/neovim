@@ -160,6 +160,77 @@ async function main() {
   ok(cmdline, "':' opens a command line on the bottom row");
   nvim.input('<Esc>');
 
+  // 5. Colour decode: type Python, turn on syntax highlighting, and assert the
+  //    headless Screen decoded REAL highlights (default_colors_set populated the
+  //    defaults, hl_attr_define filled hlAttrs, and a keyword cell carries a
+  //    non-zero hl id whose resolved attrs have a foreground). The Node host has
+  //    the full on-disk runtime, so `:syntax on` actually highlights.
+  //
+  //    First clear the buffer so the typed text lands at a known place.
+  await nvim.request('nvim_command', ['%delete _']);
+  // `def` starts at column 0 of some line; type a keyword we can locate.
+  nvim.input('iimport os<CR>def f():<Esc>');
+  await waitFor(function () { return /(^|\n)def f\(\):/.test(screen.text()); }, 10000);
+  await nvim.request('nvim_command', ['set filetype=python']);
+  await nvim.request('nvim_command', ['syntax on']);
+
+  // Find the row holding `def f():` and the column of its leading `d`.
+  function defPos() {
+    var rows = screen.text().split('\n');
+    for (var i = 0; i < rows.length; i++) {
+      var col = rows[i].indexOf('def f():');
+      if (col >= 0) { return { row: i, col: col }; }
+    }
+    return null;
+  }
+  // Wait for syntax highlighting to flush: the `d` of `def` should get a non-zero
+  // hl id once the python syntax loads.
+  const highlit = await waitFor(function () {
+    var p = defPos();
+    if (!p) { return false; }
+    return screen.hlIdAt(p.row, p.col) !== 0 && Object.keys(screen.hlAttrs).length > 1;
+  }, 10000);
+  ok(highlit, "`:syntax on` over python decodes a non-zero hl id on the `def` keyword");
+
+  ok(Object.keys(screen.hlAttrs).length > 1,
+     'hlAttrs is populated from hl_attr_define (' + Object.keys(screen.hlAttrs).length + ' entries)');
+  ok(screen.defaultFg !== null || screen.defaultBg !== null,
+     'default_colors_set populated the defaults (fg=' + screen.defaultFg + ', bg=' + screen.defaultBg + ')');
+
+  const dp = defPos() || { row: 0, col: 0 };
+  const defId = screen.hlIdAt(dp.row, dp.col);
+  ok(defId !== 0, 'the `def` keyword cell has a non-zero hl id (' + defId + ')');
+  const defAttrs = screen.attrAt(dp.row, dp.col);
+  ok(typeof defAttrs.foreground === 'number',
+     'the `def` keyword hl resolves to attrs with a foreground (' + JSON.stringify(defAttrs) + ')');
+
+  // A plain-text cell (the `o` in `import os`, which is not a keyword) stays on
+  // the default highlight (id 0).
+  function importOsPos() {
+    var rows = screen.text().split('\n');
+    for (var i = 0; i < rows.length; i++) {
+      var col = rows[i].indexOf('import os');
+      if (col >= 0) { return { row: i, col: col + 8 }; }   // the trailing `s` of `os`
+    }
+    return null;
+  }
+  const ip = importOsPos();
+  ok(ip !== null && screen.hlIdAt(ip.row, ip.col) === 0,
+     'a plain-text cell resolves to the default highlight (id 0)');
+
+  // Clear any residual prompt that `syntax on` / the edits may have queued
+  // (nvim_get_mode returns even while a hit-enter prompt is up), then drop the
+  // scratch edits so the later open_file_in_editor (check 11) doesn't hit an
+  // E37 "no write since last change" prompt.
+  nvim.input('<Esc>');
+  for (let i = 0; i < 20; i++) {
+    const m = await nvim.request('nvim_get_mode');
+    if (!m || !m.blocking) { break; }
+    nvim.input('<CR>');
+    await sleep(50);
+  }
+  await nvim.request('nvim_command', ['set nomodified']);
+
   // ---- create() runtime config (env / filesystem / cwd) ---------------------
   // These assert the config we passed into nodeEngineTransport above reached the
   // engine via the create() seam (workerData -> worker.js -> __nvim* -> pre.js).
