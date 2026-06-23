@@ -15,7 +15,7 @@
   setStatus('starting engine worker…');
 
   // 1. Core: boot `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
-  var nvim = Neovim.create({ args: ['-u', 'NONE', '-i', 'NONE'] });
+  var nvim = Neovim.create({ args: [ '-n' ] });
 
   nvim.onStatus(function (s) {
     if (!s) { return; }
