@@ -1,8 +1,5 @@
 # neovim.js
 
-__IMPORTANT__: This section is _aspirational_.  Not all of it
-has been implemented yet, but it describes the end goal of the project.
-
 `neovim.js` is a distribution of neovim that has been compiled to
 wasm/javascript in order to run in a browser.  Unlike other project that host a
 [Gui for neovim](https://neovim.io/doc/user/gui/) in the browser (with the guts
@@ -26,60 +23,171 @@ Web app authors who want a good text editing component can embed neovim
 directly in their application.  This can be a headless neovim instance with a
 custom UI layer, or use our default UI renderer.
 
+The sections below are split into two parts: **Available today**, a quickstart
+against the API that ships right now, and a **Planned API** that captures where
+the embedding experience is headed. Anything in the planned section is annotated
+with whether it is live yet.
+
+### Available today
+
+The browser library is two UMD modules plus the `@msgpack/msgpack` global. You
+load them with `<script>` tags (exactly as `wasm/web/index.html` does) — there is
+no ESM `import`-from-URL build yet. The scripts must be served alongside the
+engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`); see
+`wasm/web/build-site.sh` for assembling that bundle.
+
+```html
+<pre id="screen"></pre>
+
+<!-- msgpack global, then the headless core, then the default renderer. -->
+<script src="msgpack.min.js"></script>   <!-- @msgpack/msgpack UMD: globalThis.MessagePack -->
+<script src="neovim.js"></script>        <!-- globalThis.Neovim -->
+<script src="neovim-ui.js"></script>     <!-- globalThis.NeovimUI -->
+<script>
+  // 1. Core: spawn `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
+  //    `args` are nvim args WITHOUT `--embed` (the worker prepends it). This
+  //    returns the instance SYNCHRONOUSLY — it is NOT a promise. To wait for the
+  //    engine to be ready, await `nvim.ready` (a separate promise), not create().
+  const nvim = Neovim.create({ args: ['-n'] });   // engineUrl defaults to 'engine-worker.js'
+
+  // Out-of-band engine status: { kind: 'booting' | 'stdout' | 'stderr' | 'exit' | 'error', ... }
+  nvim.onStatus((s) => {
+    if (s.kind === 'error') { console.error('engine error', s.error); }
+  });
+
+  // 2. Renderer: mount the default grid UI into a <pre> and forward keystrokes.
+  //    Accepts only { cols, rows } today. Rendering is a monochrome character
+  //    grid (no syntax/fg/bg colour, just a cursor outline).
+  const ui = NeovimUI.mount_into(nvim, document.getElementById('screen'), {
+    cols: 80,
+    rows: 24,
+  });
+
+  // 3. `nvim.ready` resolves (to the instance) once nvim_get_api_info round-trips,
+  //    which also populates `nvim.chan` (this client's RPC channel id).
+  nvim.ready.then(async () => {
+    console.log('attached on channel', nvim.chan);
+
+    // You have the full neovim RPC API over `request` (returns a Promise):
+    await nvim.request('nvim_command', ['edit /tmp/scratch.txt']);
+
+    // Drive the editor with raw key input:
+    nvim.input('iHello<Esc>');
+
+    // Subscribe to any notification method; the handler gets the params array.
+    // Returns an unsubscribe function.
+    const off = nvim.onNotification('redraw', (params) => { /* ... */ });
+    // off();  // call to unsubscribe
+  });
+</script>
+```
+
+This is a trimmed version of the real page glue in `wasm/web/app.js`; read that
+file for the complete, working example (including the status line).
+
+You have the full power of the neovim RPC API via `nvim.request(...)`, and can
+even build extensions as an embedder, allowing neovim to seamlessly communicate
+with the rest of your application — by registering RPC notification handlers and
+having neovim call `rpcnotify(nvim.chan, ...)` back at you.
+
+#### Reference: the real surface today
+
+`Neovim.create({ args, engineUrl, transport, MessagePack })` → instance
+(synchronous). For the browser it spawns `engine-worker.js` as a Web Worker.
+`args` are nvim args without `--embed`; `engineUrl` defaults to
+`'engine-worker.js'`. (`Neovim.createNvim({ transport, MessagePack })` is the
+lower-level, transport-supplied entry point used by the Node e2e test.)
+
+The returned **instance**:
+
+| Member | Description |
+|---|---|
+| `request(method, params)` | Send an RPC request. Returns a `Promise` of the result. |
+| `notify(method, params)` | Send an RPC notification (no response). |
+| `input(keys)` | Convenience for `notify('nvim_input', [keys])`. |
+| `onNotification(method, fn)` | Subscribe to a notification (e.g. `'redraw'`); `fn` gets the params array. Returns an unsubscribe fn. |
+| `onStatus(fn)` | Subscribe to out-of-band transport status (`{ kind, ... }`). Returns an unsubscribe fn. |
+| `onRequest(fn)` | Set a handler `fn(method, params)` for requests the engine makes of the client (without one, the client replies nil). |
+| `chan` | This client's RPC channel id. `null` until ready. |
+| `ready` | A `Promise` that resolves to the instance once `nvim_get_api_info` round-trips (and `chan` is set). |
+| `dispose()` | Tear down the transport / engine and reject in-flight requests. |
+
+`NeovimUI.mount_into(instance, el, { cols, rows })` → `{ screen, resize(c, r),
+dispose() }`. Wires the instance to a `<pre>`, attaches the UI
+(`nvim_ui_attach` with `ext_linegrid`), renders on flush, and forwards
+keystrokes. `screen` is a `NeovimUI.Screen` (the headless grid model);
+`resize(c, r)` issues `nvim_ui_try_resize`; `dispose()` unsubscribes from
+`redraw`. `NeovimUI.Screen` and `NeovimUI.keyToNvim` are also exported for
+headless use.
+
+### Planned API
+
+The snippet below is the longer-term vision for the embedding API. It does **not**
+run today — each feature is annotated with its current status. Today only
+`args`, `engineUrl`, and `transport` are wired up on `create()`, and there is no
+ESM build, no awaitable `create()`, no `neovim_utils.js`, and no `create_autocmd`
+/ `add_notify_handler` / `read_file` instance methods.
+
 ```js
-// core neovim api
+// PLANNED: ESM import-from-URL is not supported yet — today these are UMD
+// modules loaded via <script> tags (see "Available today" above).
 import neovim from 'https://tyoverby.com/neovim.js';
 
 // utilities for hooking up a neovim instance to a dom element
 import { mount_into } from 'https://tyoverby.com/neovim_ui.js';
 
-// misc utilities that build on top of the core neovim api
+// PLANNED: neovim_utils.js does not exist yet.
 import { open_file_in_editor } from 'https://tyoverby.com/neovim_utils.js';
 
-// create an instance of neovim.  Under the hood, it's building a web-worker and hooking up
-// the RPC mechanism via postmessage.
+// PLANNED: `await neovim.create(...)` — create() is synchronous today and is NOT
+// awaitable. The real pattern is: `const nvim = neovim.create({...}); await nvim.ready;`
 const instance = await neovim.create({
-  // load all of the plugins that neovim ships with
+  // PLANNED: selects between differently-packaged `nvim.data` runtime bundles
+  // (a full runtime vs. a smaller core set). NOT about toggling `-u NONE`.
   plugins: 'full',
-  // set the directory that neovim opens up inside of
+  // PLANNED: not implemented — only args/engineUrl/transport work today.
   cwd: "/bar",
-  // specify or override the files in the filesystem with new content
+  // PLANNED: not implemented.
   filesystem: { "/bar/foo.txt": "content of /bar/foo.txt" },
-  // override environment variables
+  // PLANNED: not implemented.
   env: { "HOME": "/bar" },
-  // use the browser's clipboard
+  // PLANNED: not implemented.
   clipboard: "browser"
 });
 
-// open this file in the editor
+// PLANNED: neovim_utils.js helper — does not exist yet.
 await open_file_in_editor(instance, "/bar/foo.txt");
 
 const notification_name = "file_saved";
 
-// add an autocommand that will notify us whenever a file is saved.
+// PLANNED: instance.create_autocmd is not a method today. You can already get
+// the same effect with the real API by sending the equivalent nvim_command /
+// nvim_create_autocmd RPC via `instance.request(...)`, using `instance.chan`.
 await instance.create_autocmd(["BufWritePost"], {
     "pattern": ["*"],
     "group": "MyPlugin",
     "command": `call rpcnotify(${instance.chan}, '${notification_name}', expand('<afile>:p'), bufnr('%'))`
 });
 
-// add a handler for the file save notification
+// PLANNED: instance.add_notify_handler is not a method today. The shipping
+// equivalent is `instance.onNotification('file_saved', fn)`.
 await instance.add_notify_handler('file_saved', async function ([filename]) {
-  // Read the contents off the file system
+  // PLANNED: instance.read_file does not exist yet.
   let contents = await instance.read_file(filename);
   alert(filename + " has been saved: " + contents);
 });
 
-// stick the editor in the dom
+// mount_into ships today, but PLANNED: it accepts only { cols, rows } now —
+// `font_family` / `font_size` are not yet supported, and rendering is monochrome.
 const ui = await mount_into(instance, document.querySelector(".code-container", {
   font_family: "monospace",
   font_size: 16,
 });
 ```
 
-You have the full power of the neovim RPC API, and can even build extensions as
-an embedder, allowing neovim to seamlessly communicate with the rest of your
-application.
+The end goal is that you have the full power of the neovim RPC API, and can even
+build extensions as an embedder, allowing neovim to seamlessly communicate with
+the rest of your application.
 
 ## As a chrome extension
 
