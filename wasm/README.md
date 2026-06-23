@@ -30,11 +30,22 @@ with whether it is live yet.
 
 ### Available today
 
-The browser library is two UMD modules plus the `@msgpack/msgpack` global. You
-load them with `<script>` tags (exactly as `wasm/web/index.html` does) — there is
-no ESM `import`-from-URL build yet. The scripts must be served alongside the
-engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`); see
-`wasm/web/build-site.sh` for assembling that bundle.
+The browser library ships two ways: as UMD modules (`neovim.js`, `neovim-ui.js`)
+loaded via `<script>` tags (exactly as `wasm/web/index.html` does), or as ESM
+entry points (`neovim.mjs`, `neovim-ui.mjs`) you `import`. Both must be served
+alongside the engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`).
+The UMD path also needs the `@msgpack/msgpack` UMD loaded as a `<script>` (the
+`globalThis.MessagePack` global); the ESM path needs **no separate msgpack
+wiring** — `neovim.mjs` resolves `@msgpack/msgpack` itself (the bundled ESM build,
+the `MessagePack` global if present, or an explicit `MessagePack` option).
+
+To assemble a redistributable, npm-importable bundle of all of that into a flat,
+relative-path directory, run `wasm/web/build-lib.sh` (the library analogue of the
+demo-site `build-site.sh`). It emits the UMD + ESM JS, the engine worker, the
+msgpack dep (both the UMD `msgpack.min.js` and the ESM build under `msgpack.esm/`),
+the `nvim.*` engine assets, and a generated `package.json` whose `exports` map
+points `import` at the `.mjs` and `main`/`require` at the UMD — so the bundle can
+be published to npm or hosted on any static path.
 
 ```html
 <pre id="screen"></pre>
@@ -48,7 +59,9 @@ engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`); see
   //    `args` are nvim args WITHOUT `--embed` (the worker prepends it). This
   //    returns the instance SYNCHRONOUSLY — it is NOT a promise. To wait for the
   //    engine to be ready, await `nvim.ready` (a separate promise), not create().
-  const nvim = Neovim.create({ args: ['-n'] });   // engineUrl defaults to 'engine-worker.js'
+  //    `baseUrl` points create() at wherever the bundle is hosted (default: the
+  //    page's own directory); pass it when you serve the bundle from a subpath.
+  const nvim = Neovim.create({ args: ['-n'] });   // or: { args, baseUrl: '/lib/' }
 
   // Out-of-band engine status: { kind: 'booting' | 'stdout' | 'stderr' | 'exit' | 'error', ... }
   nvim.onStatus((s) => {
@@ -85,6 +98,36 @@ engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`); see
 This is a trimmed version of the real page glue in `wasm/web/app.js`; read that
 file for the complete, working example (including the status line).
 
+The same API is available as ESM. The `.mjs` entry points re-export exactly the
+UMD surface (`create`, `createNvim`, `browserEngineTransport`, `ByteQueue` from
+the core; `Screen`, `mount_into`, `keyToNvim` from the renderer) plus a `default`
+export, so you can `import` instead of using `<script>` globals:
+
+```js
+import { create } from './neovim.mjs';        // or '/lib/neovim.mjs'
+import { mount_into } from './neovim-ui.mjs';
+
+// `baseUrl` makes engine-worker.js + nvim.js/.wasm/.data all resolve under that
+// path (with or without a trailing slash). The engine worker is created with
+// `new Worker(baseUrl + 'engine-worker.js')`; it then `importScripts('nvim.js')`
+// relative to its own URL, and Emscripten resolves nvim.wasm/nvim.data relative
+// to nvim.js — so the whole chain follows `baseUrl` with no extra wiring.
+// (`new Worker` is same-origin only, so `baseUrl` may be a subpath of the page's
+// origin but not yet a different-origin CDN.) `engineUrl` overrides `baseUrl`.
+const nvim = create({ args: ['-n'], baseUrl: '/lib/' });
+const ui = mount_into(nvim, document.getElementById('screen'), { cols: 80, rows: 24 });
+await nvim.ready;
+```
+
+No `<script>` tag and no separate msgpack import are needed on the ESM path:
+`neovim.mjs` injects `@msgpack/msgpack` into `create()`/`createNvim()` for you,
+resolving it as `opts.MessagePack` (explicit override) → `globalThis.MessagePack`
+(if a UMD `<script>` happened to load it) → the ESM build bundled at
+`msgpack.esm/` by `build-lib.sh`. (In the raw source tree, where `msgpack.esm/`
+is absent, the import still succeeds; only a `create()` with no msgpack available
+anywhere errors — so pass the `MessagePack` option if you import the source
+directly without building the bundle.)
+
 You have the full power of the neovim RPC API via `nvim.request(...)`, and can
 even build extensions as an embedder, allowing neovim to seamlessly communicate
 with the rest of your application — by registering RPC notification handlers and
@@ -92,11 +135,14 @@ having neovim call `rpcnotify(nvim.chan, ...)` back at you.
 
 #### Reference: the real surface today
 
-`Neovim.create({ args, engineUrl, transport, MessagePack })` → instance
+`Neovim.create({ args, baseUrl, engineUrl, transport, MessagePack })` → instance
 (synchronous). For the browser it spawns `engine-worker.js` as a Web Worker.
-`args` are nvim args without `--embed`; `engineUrl` defaults to
-`'engine-worker.js'`. (`Neovim.createNvim({ transport, MessagePack })` is the
-lower-level, transport-supplied entry point used by the Node e2e test.)
+`args` are nvim args without `--embed`. `baseUrl` is where the bundle is hosted
+(the engine URL becomes `baseUrl + 'engine-worker.js'`, trailing slash optional);
+`engineUrl` is an explicit override that takes precedence over `baseUrl`; with
+neither, the engine URL defaults to `'engine-worker.js'` (the page's own
+directory). (`Neovim.createNvim({ transport, MessagePack })` is the lower-level,
+transport-supplied entry point used by the Node e2e test.)
 
 The returned **instance**:
 
@@ -123,17 +169,23 @@ headless use.
 ### Planned API
 
 The snippet below is the longer-term vision for the embedding API. It does **not**
-run today — each feature is annotated with its current status. Today only
-`args`, `engineUrl`, and `transport` are wired up on `create()`, and there is no
-ESM build, no awaitable `create()`, no `neovim_utils.js`, and no `create_autocmd`
-/ `add_notify_handler` / `read_file` instance methods.
+run today — each feature is annotated with its current status. ESM `import`,
+`baseUrl`, and the `build-lib.sh` bundle now ship (see "Available today"); but
+`create()` still wires up only `args`/`baseUrl`/`engineUrl`/`transport`, and there
+is no awaitable `create()`, no `neovim_utils.js`, and no `create_autocmd` /
+`add_notify_handler` / `read_file` instance methods. Same-origin-only is the one
+remaining ESM gap: `import` works, but `new Worker()` (and thus `baseUrl`) can't
+point at a different-origin CDN yet — `https://tyoverby.com/neovim.js` from a
+different origin needs a Blob-bootstrap shim that isn't built.
 
 ```js
-// PLANNED: ESM import-from-URL is not supported yet — today these are UMD
-// modules loaded via <script> tags (see "Available today" above).
+// SHIPS TODAY as a local/same-origin import (e.g. './neovim.mjs' or '/lib/neovim.mjs').
+// PLANNED: cross-ORIGIN import-from-URL like the absolute URL below still needs a
+// Blob-bootstrap shim for the worker (new Worker is same-origin only).
 import neovim from 'https://tyoverby.com/neovim.js';
 
-// utilities for hooking up a neovim instance to a dom element
+// utilities for hooking up a neovim instance to a dom element (SHIPS TODAY at
+// neovim-ui.mjs; cross-origin URL still PLANNED as above)
 import { mount_into } from 'https://tyoverby.com/neovim_ui.js';
 
 // PLANNED: neovim_utils.js does not exist yet.

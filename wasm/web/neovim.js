@@ -28,7 +28,8 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) { module.exports = factory(); }
   else { root.Neovim = factory(); }
-})(typeof self !== 'undefined' ? self : this, function () {
+})(typeof self !== 'undefined' ? self
+   : typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
   // A tiny async-iterable byte queue: the transport pushes RPC chunks in,
@@ -198,12 +199,42 @@
     return t;
   }
 
+  // Resolve the engine-worker URL from opts. Precedence:
+  //   1. opts.engineUrl  (explicit override; used verbatim)
+  //   2. opts.baseUrl + 'engine-worker.js'  (host the bundle anywhere)
+  //   3. 'engine-worker.js'  (relative to the page, the original behaviour)
+  // `baseUrl` accepts a value with or without a trailing slash.
+  //
+  // How the rest of the asset chain resolves once engine-worker.js is loaded
+  // from `baseUrl` (verified by hosting the bundle from a subpath and curling
+  // the asset URLs, see wasm/web/build-lib.sh):
+  //   * The worker does `importScripts('nvim.js')`, which resolves RELATIVE to
+  //     the worker's own URL -- i.e. relative to `baseUrl`. So nvim.js loads
+  //     from baseUrl/nvim.js with no extra plumbing.
+  //   * Emscripten's browser `locateFile` then resolves nvim.wasm / nvim.data
+  //     relative to the script that loaded it (nvim.js, itself under baseUrl),
+  //     so those land under baseUrl too.
+  // The whole chain therefore follows `baseUrl` automatically; nothing needs to
+  // be threaded into the worker. CAVEAT: `new Worker(url)` requires a SAME-ORIGIN
+  // url, so `baseUrl` may point at a subpath of the page's origin but not at a
+  // different-origin CDN. Cross-origin hosting needs a Blob-bootstrap shim, which
+  // is intentionally out of scope here (see wasm/README.md).
+  function resolveEngineUrl(opts) {
+    if (opts.engineUrl) { return opts.engineUrl; }
+    if (opts.baseUrl) {
+      var base = opts.baseUrl;
+      if (base.charAt(base.length - 1) !== '/') { base += '/'; }
+      return base + 'engine-worker.js';
+    }
+    return 'engine-worker.js';
+  }
+
   // The README-facing entry point: build a browser engine transport and a core
-  // instance over it. opts: { args, engineUrl }.
+  // instance over it. opts: { args, baseUrl, engineUrl }.
   function create(opts) {
     opts = opts || {};
     var transport = opts.transport ||
-      browserEngineTransport(opts.engineUrl || 'engine-worker.js', opts.args || []);
+      browserEngineTransport(resolveEngineUrl(opts), opts.args || []);
     return createNvim({ transport: transport, MessagePack: opts.MessagePack });
   }
 
@@ -211,6 +242,7 @@
     create: create,
     createNvim: createNvim,
     browserEngineTransport: browserEngineTransport,
+    resolveEngineUrl: resolveEngineUrl,
     ByteQueue: ByteQueue,
   };
 });
