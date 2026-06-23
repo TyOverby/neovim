@@ -578,10 +578,11 @@ uint64_t channel_from_stdio(bool rpc, CallbackReader on_output, const char **err
     os_replace_stdout_and_stderr_to_conout();
   }
 #elif defined(__EMSCRIPTEN__)
-  // wasm: the RPC channel is backed by the in-realm postMessage channel object,
-  // whose stream ops wasm/nvim_io.js installs directly on fd 0/1. There is no process spawning
-  // (so no cloexec concern) and no separate stdout to protect, so skip the
-  // dup/redirect dance entirely and use fd 0/1 as-is. See wasm/stage2.md.
+  // wasm: the engine's RPC channel (`nvim --embed`) is backed by the in-realm
+  // postMessage channel object, whose stream ops wasm/nvim_io.js installs
+  // directly on fd 0/1. There is no process spawning (so no cloexec concern) and
+  // no separate stdout to protect, so skip the dup/redirect dance entirely and
+  // use fd 0/1 as-is. See wasm/README.md.
 #else
   if (embedded_mode) {
     // Redirect stdout/stdin (the UI channel) to stderr. Use fnctl(F_DUPFD_CLOEXEC) instead of dup()
@@ -606,29 +607,6 @@ uint64_t channel_from_stdio(bool rpc, CallbackReader on_output, const char **err
 
   return channel->id;
 }
-
-#ifdef __EMSCRIPTEN__
-/// wasm: opens an RPC channel over two explicit file descriptors (a read fd and
-/// a write fd). Unlike channel_from_stdio(), this is not tied to fd 0/1 and is
-/// not gated on headless/embedded mode: it is used by the builtin-UI *client*
-/// (which keeps fd 0/1/2 for the real terminal) to talk to the engine running in
-/// a worker. The two fds are backed by the postMessage channel transport, with
-/// stream ops installed in JS (see wasm/nvim_io.js). See wasm/stage2.md.
-uint64_t channel_from_fds(int in_fd, int out_fd)
-{
-  if (did_stdio) {
-    return 0;
-  }
-  did_stdio = true;
-
-  Channel *channel = channel_alloc(kChannelStreamStdio);
-  rstream_init_fd(&main_loop, &channel->stream.stdio.in, in_fd);
-  wstream_init_fd(&main_loop, &channel->stream.stdio.out, out_fd, 0);
-  rpc_start(channel);
-
-  return channel->id;
-}
-#endif
 
 /// @param data will be consumed
 size_t channel_send(uint64_t id, char *data, size_t len, bool data_owned, const char **error)

@@ -109,11 +109,18 @@ the system that you care about.
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
 This directory contains everything needed to cross-compile Neovim to WebAssembly
-with Emscripten and run it either **under Node.js** (interactive builtin TUI) or
-**in a browser** (a custom JavaScript grid UI on the page). Both use JSPI —
-JavaScript Promise Integration — where wasm runs, and **postMessage** between the
-editor (in a worker) and its UI. No `SharedArrayBuffer`, so the browser build
-needs no special HTTP headers and runs on any static host.
+with Emscripten and run it **in a browser** (a custom JavaScript grid UI on the
+page), with the same engine also runnable **headlessly under Node.js** (for the
+e2e test and `--headless`/`-l` scripting). It uses JSPI — JavaScript Promise
+Integration — where wasm runs, and **postMessage** between the editor (in a
+worker) and its UI. No `SharedArrayBuffer`, so the browser build needs no special
+HTTP headers and runs on any static host.
+
+> An earlier stage shipped an interactive **builtin TUI** that ran the wasm UI
+> client on the Node main thread (`nvim file.txt`). It was a stepping stone to
+> prove the worker + JSPI + postMessage architecture under Node, and has been
+> removed now that the browser UI works and the headless e2e test covers the
+> engine path. `stage2.md` records it for history.
 
 It is **additive**: the normal native build is unchanged. Every change to the
 shared build files (`CMakeLists.txt`, `cmake.deps/…`) is guarded by
@@ -130,9 +137,9 @@ What works today (`node nvim.js -- <args>`):
 | Full Lua + `vim.api` + bundled runtime (`$VIMRUNTIME`) | ✅ |
 | Real filesystem access (MEMFS + NODEFS under Node) | ✅ |
 | `nvim --embed` msgpack-RPC server | ✅ |
-| Engine in a worker + client over `postMessage` | ✅ |
-| **Interactive built-in TUI** (`node nvim.js -- file.txt`) | ✅ (stage 2 — see `stage2.md`) |
+| Engine in a worker + JS client over `postMessage` | ✅ |
 | **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `stage3.md`, `wasm/web/`) |
+| Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed (no spawn in wasm) |
 
 ## Prerequisites
@@ -141,10 +148,9 @@ What works today (`node nvim.js -- <args>`):
 - Node with JSPI (`WebAssembly.Suspending`):
   - **v24+** (v26 tested): on by default, no flag.
   - **v22**: pass `--experimental-wasm-jspi` (e.g.
-    `node --experimental-wasm-jspi build-wasm/bin/nvim.js -- file.txt`). The engine
+    `node --experimental-wasm-jspi build-wasm/bin/nvim.js -- --version`). The engine
     worker inherits `process.execArgv`, so the flag only goes on the top-level node.
   - **v20 and older**: unsupported (only the older `WebAssembly.Suspender` API).
-  The `nvim` wrapper in `build-wasm/bin/` adds the flag automatically when needed.
 - For the **browser** UI: a JSPI-capable browser (Chrome ≥ 137, on by default) and
   Node (for `serve.js` and the `@msgpack/msgpack` npm dep — installed automatically
   by `build-nvim.sh`).
@@ -164,14 +170,13 @@ wasm/build-nvim.sh     # cross-compiles nvim -> build-wasm/bin/nvim.js (+ .wasm)
 Then:
 
 ```sh
-# Interactive editor (builtin TUI on the main thread, engine in a worker).
-# The `nvim` wrapper enables JSPI as needed and, for now, defaults to a clean
-# session (-u NONE -i NONE); override with $NVIM_WASM_DEFAULTS.
-build-wasm/bin/nvim file.txt
+# Browser grid UI (the primary target): serve the page and open it.
+node wasm/web/serve.js          # then open http://localhost:8000/
 
-# Or invoke node directly (Node 22/23 need the JSPI flag; 24+ don't):
-node build-wasm/bin/nvim.js -- file.txt
+# Headless end-to-end test (boots the engine in a Node worker_thread).
+node wasm/web/e2e.test.js
 
+# Headless engine directly (Node 22/23 need the JSPI flag; 24+ don't):
 node build-wasm/bin/nvim.js -- --version
 node build-wasm/bin/nvim.js -- -u NONE --headless -l script.lua
 ```
@@ -224,15 +229,15 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | File | Purpose |
 |---|---|
 | `build-deps.sh` | Cross-compile the bundled dependencies to wasm. |
-| `build-nvim.sh` | Configure + build nvim to wasm; install launcher/helpers. |
+| `build-nvim.sh` | Configure + build nvim to wasm; install the Node engine host (`worker.js`). |
 | `shim.h` | Force-included into every emcc compile (`EMCC_CFLAGS`); small libc gap fills (pthread thread-name stubs). |
 | `uv_stubs.c` | libuv / libc functions the Emscripten builds omit (sys-info, `uv_exepath`, `sched_*`, `pthread_*_np`). Linked into nvim only for wasm. |
 | `extern-pre.js` | Emscripten `--extern-pre-js` (runs before everything): under Node, points `locateFile` at nvim.js's dir so the preloaded `nvim.data` resolves from any cwd. |
 | `pre.js` | Emscripten `--pre-js`: argv, the postMessage-channel global, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS; browser path uses the preloaded runtime in MEMFS. |
-| `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll`, postMessage-backed channel fds for both roles, host-terminal stdio + winsize + raw mode, and the engine-spawn glue. |
-| `worker.js` | Node engine endpoint: hosts `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel. |
+| `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll` and the postMessage-backed channel stream ops for the engine's fd 0/1. |
+| `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
 | `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle), `e2e.test.js` (headless end-to-end test over a Node worker engine). Uses `@msgpack/msgpack` (npm). |
-| `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and stage 3 (browser grid UI). |
+| `stage1.md` / `stage2.md` / `stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
 
@@ -247,41 +252,38 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
   the JSPI / `FORCE_FILESYSTEM` + `nodefs.js` / `SUPPORT_LONGJMP=wasm` link flags,
   `ENVIRONMENT=node,web,worker`, `--preload-file` of the runtime into MEMFS,
   `--extern-pre-js`, `--pre-js`, `--js-library`.
-- `src/nvim/channel.c` / `channel.h` — `channel_from_fds()` (RPC over two explicit
-  fds, for the TUI client); skip the embedded dup-dance on Emscripten.
-- `src/nvim/ui_client.c` — Emscripten `ui_client_start_server()` path that spawns
-  the engine worker instead of a child process (stage 2).
+- `src/nvim/channel.c` — for the engine's `nvim --embed` channel, skip the
+  embedded dup/redirect dance on Emscripten (fd 0/1 are virtual postMessage
+  streams, not real pipes; no child to protect them from).
 - `src/nvim/log.h` — `-DNVIM_WASM_TRACE` (wasm) lowers the min log level (debug aid).
 
-## Architecture: separate processes + message passing
+## Architecture: engine in a worker + message passing
 
-Modern Neovim's TUI is a **separate process** from the editor server: the TUI
-spawns `nvim --embed` and talks msgpack-RPC to it (TUI input →
-`rpc_send_event(ui_client_channel_id, "nvim_input")`). Process spawning is
-impossible in single-threaded wasm, so we keep the split but run the engine in a
-*worker* and change the *transport* to **postMessage** — which is also what the
-browser uses:
+Modern Neovim already splits the **editor server** (`nvim --embed`) from its
+**UI client**, which talk msgpack-RPC (UI input → `nvim_input`; server → `redraw`).
+We keep that split but run the engine in a *worker* and make the *transport*
+**postMessage**, with the client written in plain JavaScript on the other side:
 
 ```
-   main thread (UI client)              worker (engine)
+   client (plain JS)                    worker (engine)
    ┌─────────────────────┐             ┌──────────────────────┐
-   │ terminal in/out     │  msgpack    │ nvim --embed (wasm)  │
-   │ TUI render + input ─┼──RPC────────┼─> editor             │
+   │ UI / RPC client     │  msgpack    │ nvim --embed (wasm)  │
+   │ input → / redraw ◀──┼──RPC────────┼─> editor             │
    └─────────┬───────────┘ postMessage └──────────┬───────────┘
              └────────────────────────────────────┘
 ```
 
 - The engine **does not block**. nvim's `poll()` suspends asynchronously via JSPI
-  and resumes when a message arrives or the libuv timeout elapses — in *both*
-  roles. That is what makes postMessage usable at all: a thread parked in a
-  synchronous wait would never return to its event loop to receive a message.
-  (A `SharedArrayBuffer` + `Atomics.wait` would allow synchronous blocking, but
-  then postMessage couldn't be delivered — and it would force COOP/COEP on the
-  browser. Message passing avoids both.)
-- The **builtin TUI** runs on the main thread (`src/nvim/tui/`), keeping fd 0/1/2
-  for the real terminal and exchanging RPC bytes with the engine worker over
-  `worker.postMessage` / the worker's `'message'` event. Stage 2 made this fully
-  interactive (`node nvim.js -- file.txt`); see `stage2.md`.
+  and resumes when a message arrives or the libuv timeout elapses. That is what
+  makes postMessage usable at all: a thread parked in a synchronous wait would
+  never return to its event loop to receive a message. (A `SharedArrayBuffer` +
+  `Atomics.wait` would allow synchronous blocking, but then postMessage couldn't
+  be delivered — and it would force COOP/COEP on the browser. Message passing
+  avoids both.)
+- The **client runs no wasm**: it's the JS in `wasm/web/` (`neovim.js` +
+  `neovim-ui.js`) in the browser, or the e2e test's core under Node. Only the
+  engine worker instantiates a JSPI module, so only it (and thus the browser)
+  needs JSPI support.
 
 ### Architecture: the browser web UI (`wasm/web/`)
 

@@ -67,12 +67,11 @@ emcmake cmake \
 echo "==> Building nvim_bin (the executable; runtime bundling handled separately)"
 cmake --build "${BUILD}" --target nvim_bin
 
-# Ship the JS runtime helpers next to nvim.js (pre.js/nvim_io.js are already
-# linked into nvim.js; worker.js is the Node engine host the TUI client spawns).
-echo "==> Installing JS helpers next to nvim.js"
+# Ship the Node engine host next to nvim.js (pre.js/nvim_io.js are already linked
+# into nvim.js; worker.js hosts the engine wasm in a Node worker_thread, used by
+# the browser library's Node transport and the e2e test).
+echo "==> Installing the Node engine host next to nvim.js"
 cp "${ROOT}/wasm/worker.js" "${BUILD}/bin/"
-cp "${ROOT}/wasm/nvim" "${BUILD}/bin/nvim"
-chmod +x "${BUILD}/bin/nvim"
 
 # Browser target: the page UI (wasm/web/) is served straight from the source
 # tree by wasm/web/serve.js (which also points /nvim.js,/nvim.wasm,/nvim.data at
@@ -87,6 +86,6 @@ fi
 
 echo "==> Done."
 echo "    Headless / RPC:   node ${BUILD}/bin/nvim.js -- <nvim args>"
-echo "    Interactive TUI:  ${BUILD}/bin/nvim file.txt"
 echo "    Browser grid UI:  node ${ROOT}/wasm/web/serve.js   # then open http://localhost:8000/"
+echo "    Headless e2e test: node ${ROOT}/wasm/web/e2e.test.js"
 ls -la "${BUILD}/bin/" || true

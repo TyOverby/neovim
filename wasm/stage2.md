@@ -1,4 +1,13 @@
-# Stage 2 — Interactive built-in TUI over the SAB channel  ✅ DONE
+# Stage 2 — Interactive built-in TUI over the SAB channel  ✅ DONE (later removed)
+
+> **Historical.** The wasm builtin-TUI client described here has since been
+> **removed**. It was a stepping stone to prove the engine-in-a-worker + JSPI +
+> postMessage architecture under Node before the browser UI existed; once the
+> browser UI (stage 3) worked and the headless `wasm/web/e2e.test.js` covered the
+> engine path, the in-wasm TUI client (its `ui_client.c` / `channel_from_fds` /
+> `nvim_io.js` host-terminal glue and the `wasm/nvim` launcher) was dropped. This
+> file is kept only as a record of how it worked. The transport also moved from
+> the `SharedArrayBuffer` channel below to plain postMessage (see stage 3).
 
 Goal (achieved): a real interactive editor with `node nvim.js -- file.txt` — the
 builtin TUI renders to the terminal, keystrokes edit the buffer, `:w`/`:wq` save,

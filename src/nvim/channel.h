@@ -49,12 +49,6 @@ struct Channel {
 #include "channel.h.generated.h"
 #include "channel.h.inline.generated.h"
 
-#ifdef __EMSCRIPTEN__
-// Defined in channel.c (wasm only). Declared explicitly because the declaration
-// generator may not emit prototypes for #ifdef-guarded functions. See stage2.md.
-uint64_t channel_from_fds(int in_fd, int out_fd);
-#endif
-
 static inline bool callback_reader_set(CallbackReader reader)
 {
   return reader.cb.type != kCallbackNone || reader.self;
