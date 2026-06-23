@@ -231,7 +231,7 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `pre.js` | Emscripten `--pre-js`: argv, the postMessage-channel global, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS; browser path uses the preloaded runtime in MEMFS. |
 | `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll`, postMessage-backed channel fds for both roles, host-terminal stdio + winsize + raw mode, and the engine-spawn glue. |
 | `worker.js` | Node engine endpoint: hosts `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel. |
-| `web/` | Browser target: `index.html`, `ui.js` (main-thread grid UI + msgpack-RPC client), `engine-worker.js` (Web Worker engine host), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle). Uses `@msgpack/msgpack` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle), `e2e.test.js` (headless end-to-end test over a Node worker engine). Uses `@msgpack/msgpack` (npm). |
 | `stage1.md` / `stage2.md` / `stage3.md` | Records of stage 1 (cross-compile), stage 2 (interactive TUI), and stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
@@ -291,7 +291,7 @@ builtin-TUI client with a **custom UI written in plain JavaScript**. The result 
 needs no cross-origin isolation.
 
 ```
-   page main thread (wasm/web/ui.js)            Web Worker (engine-worker.js)
+   page main thread (neovim.js + neovim-ui.js)  Web Worker (engine-worker.js)
    ┌───────────────────────────────┐ postMessage ┌──────────────────────────┐
    │ keydown → nvim_input  ────────┼────────────▶│ nvim --embed (wasm)      │
    │ redraw  → char grid → <pre> ◀─┼─────────────┤ editor + ext_linegrid    │
@@ -304,8 +304,9 @@ needs no cross-origin isolation.
   channel (fd 0 ← messages from the page; fd 1 → `postMessage` to the page), and
   the engine's `poll()` suspends via JSPI between messages. The same `nvim.wasm`
   serves both Node and browser (`-sENVIRONMENT=node,web,worker`).
-- **Pure-JS UI on the page** (`ui.js`) — a msgpack-RPC client (`@msgpack/msgpack`)
-  that:
+- **Pure-JS UI on the page** — split into a headless core (`neovim.js`, the
+  msgpack-RPC client over `@msgpack/msgpack`) and the default renderer
+  (`neovim-ui.js`), composed by `app.js`. Together they:
   1. `nvim_ui_attach`es with `{ ext_linegrid: true }`;
   2. decodes `redraw` notifications (`grid_resize`, `grid_line`, `grid_scroll`,
      `grid_cursor_goto`, `flush`) into a 2-D character grid;

@@ -3,7 +3,8 @@
 // The transport is postMessage (not SharedArrayBuffer), so the page needs NO
 // special headers — this is a plain static server, the same as any host would
 // be. It just resolves the kinds of asset from where they live in the tree:
-//   * page assets (index.html, ui.js, engine-worker.js)  -> wasm/web/
+//   * page + library (index.html, neovim.js, neovim-ui.js, app.js,
+//     engine-worker.js)                                   -> wasm/web/
 //   * the msgpack UMD bundle (msgpack.min.js)             -> node_modules
 //   * the wasm build artifacts (nvim.js/.wasm/.data)      -> build-wasm/bin/
 //

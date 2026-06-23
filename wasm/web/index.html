@@ -42,8 +42,11 @@
     msgpack-RPC client rendering the <code>ext_linegrid</code> grid. Click the grid, then type.
   </div>
 
-  <!-- order matters: the MessagePack global before the UI -->
+  <!-- Layered: MessagePack global, then the core, then the renderer, then the
+       page glue that composes them. -->
   <script src="msgpack.min.js"></script>
-  <script src="ui.js"></script>
+  <script src="neovim.js"></script>
+  <script src="neovim-ui.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
