@@ -14,7 +14,11 @@
   setStatus('starting engine worker…');
 
   // 1. Core: boot `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
-  var nvim = Neovim.create({ args: [ '-n' ] });
+  //    clipboard: 'browser' wires the +/* registers (and, via unnamedplus, plain
+  //    y/p/d) to the system clipboard through navigator.clipboard. Pasting may
+  //    prompt for clipboard-read permission the first time; needs a secure context
+  //    (HTTPS or localhost).
+  var nvim = Neovim.create({ args: [ '-n' ], clipboard: 'browser' });
 
   nvim.onStatus(function (s) {
     if (!s) { return; }

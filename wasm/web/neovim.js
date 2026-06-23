@@ -236,7 +236,16 @@
           }
           return Promise.resolve();
         }
-        return c.writeText(text);
+        // Don't let a writeText rejection (e.g. "Document is not focused", or a
+        // denied permission) propagate to nvim and error out the YANK -- the text
+        // is already in nvim's register; only the mirror to the system clipboard
+        // failed. Warn and resolve so editing isn't interrupted. (Paste/get does
+        // propagate, so a failed read still surfaces.)
+        return Promise.resolve(c.writeText(text)).catch(function (e) {
+          if (typeof console !== 'undefined') {
+            console.warn('clipboard: writeText failed (copy not mirrored to system clipboard):', e && e.message || e);
+          }
+        });
       },
     };
   }
