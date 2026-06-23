@@ -260,9 +260,11 @@
   //      to the provider and DELEGATES every other method to a caller-supplied
   //      onRequest (if any) -- it never silently clobbers a user's handler;
   //   b. sets g:clipboard in the engine so nvim's clipboard provider calls back
-  //      via rpcrequest(<instance.chan>, 'clipboard_get'/'clipboard_set', ...).
+  //      via rpcrequest(<instance.chan>, 'clipboard_get'/'clipboard_set', ...);
+  //   c. sets `clipboard=unnamedplus` so plain y/p/d use the system clipboard
+  //      (pass setRegister=false to wire only the explicit "+/"* registers).
   // Returns a Promise that resolves once g:clipboard is installed.
-  function enableClipboard(instance, provider, prevRequestHandler) {
+  function enableClipboard(instance, provider, prevRequestHandler, setRegister) {
     if (instance.chan == null) {
       throw new Error('enableClipboard: instance has no RPC channel yet (await instance.ready)');
     }
@@ -319,7 +321,12 @@
       // Re-source the provider so g:loaded_clipboard_provider re-evaluates against
       // the new g:clipboard (it may have been 0 from a headless boot with no tool).
       'pcall(function() vim.g.loaded_clipboard_provider = nil end)\n' +
-      'vim.cmd("runtime autoload/provider/clipboard.vim")\n';
+      'vim.cmd("runtime autoload/provider/clipboard.vim")\n' +
+      // Route the UNNAMED register through the clipboard so plain y/p/d "just
+      // work" with the system clipboard -- without this, only the explicit "+/"*
+      // registers ("+p etc.) touch it, which surprises most users. Skipped when
+      // setRegister is false (an embedder who wants only the +/* registers).
+      (setRegister === false ? '' : 'pcall(function() vim.o.clipboard = "unnamedplus" end)\n');
     return instance.request('nvim_exec_lua', [lua, [chan]]);
   }
 

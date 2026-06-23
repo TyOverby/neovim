@@ -351,8 +351,11 @@ async function main() {
     return null;
   };
   await Neovim.enableClipboard(nvim, memProvider, priorHandler);
-  // unnamedplus so yanks/`getreg('+')` route through the provider naturally.
-  await nvim.request('nvim_set_option_value', ['clipboard', 'unnamedplus', {}]);
+  // enableClipboard sets clipboard=unnamedplus itself so plain y/p/d integrate
+  // with the system clipboard (the user-facing default). Assert it took effect.
+  const clipOpt = await nvim.request('nvim_get_option_value', ['clipboard', {}]);
+  ok(clipOpt === 'unnamedplus',
+     "enableClipboard sets clipboard=unnamedplus (plain y/p use the clipboard); got " + JSON.stringify(clipOpt));
 
   // 16. clipboard COPY: drive nvim to set the `+` register; assert provider.set
   //     was called with the expected lines (engine -> rpcrequest('clipboard_set')).
@@ -374,6 +377,24 @@ async function main() {
   const pong2 = await nvim.request('nvim_exec_lua',
     ['return vim.rpcrequest(..., "ping", "again")', [nvim.chan]]);
   ok(pong2 === 'pong:again', 'enableClipboard composes with (does not clobber) the prior onRequest (ping still works)');
+
+  // 18b. Bare y/p (NOT "+y/"+p) use the clipboard now that unnamedplus is set --
+  //      this is exactly the "hitting p does what I expect" case. Seed a buffer
+  //      line, `yy` (should copy to the provider), then `p` on a fresh buffer
+  //      (should paste the provider's contents).
+  lastSet = null;
+  await nvim.request('nvim_command', ['enew!']);
+  await nvim.request('nvim_buf_set_lines', [0, 0, -1, false, ['bare-yank-line']]);
+  await nvim.request('nvim_command', ['normal! ggyy']);     // bare yank
+  const bareYank = await waitFor(function () { return lastSet !== null; }, 5000);
+  ok(bareYank && lastSet.lines.join('\n').indexOf('bare-yank-line') >= 0,
+     'bare `yy` copies to the clipboard via unnamedplus (provider.set got the line)');
+  store = { lines: ['bare-paste-content'], regtype: 'v' };
+  await nvim.request('nvim_command', ['enew!']);
+  await nvim.request('nvim_command', ['normal! p']);        // bare paste
+  const bareLines = await nvim.request('nvim_buf_get_lines', [0, 0, -1, false]);
+  ok(bareLines.join('\n').indexOf('bare-paste-content') >= 0,
+     'bare `p` pastes from the clipboard via unnamedplus (got ' + JSON.stringify(bareLines) + ')');
 
   // 9. Lifecycle: when the engine goes away, the core must observe EOF and tear
   // down. This is the path the browser relies on (engine-worker posts

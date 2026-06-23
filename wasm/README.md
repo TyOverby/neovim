@@ -327,6 +327,12 @@ Both ride the async `onRequest` seam above, so the client's reply may be a
 `Promise` (e.g. `navigator.clipboard.readText()`); the engine's `poll()` suspends
 via JSPI while it waits, so blocking `rpcrequest` is fine.
 
+Enabling the clipboard also sets **`clipboard=unnamedplus`**, so plain `y`/`p`/`d`
+use the system clipboard directly (not just the explicit `"+`/`"*` registers) —
+i.e. bare `p` pastes what you copied, which is what most users expect. Pass
+`setRegister: false` to `enableClipboard` (below) if you want to wire only the
+`+`/`*` registers and leave the unnamed register alone.
+
 ```js
 // Built-in: back the +/* registers with the browser's system clipboard.
 const nvim = await Neovim.create({ args: ['-n'], clipboard: 'browser' });
@@ -355,9 +361,11 @@ back at the client (nvim's clipboard provider accepts funcref `copy`/`paste`
 entries), and force-reloads the provider so it re-reads `g:clipboard`.
 
 For embedders driving the lower-level `createNvim()` directly, the install is
-also exported as `Neovim.enableClipboard(instance, provider[, delegateOnRequest])`
-(ESM: `enableClipboard`) — call it **after** `instance.ready` (it needs
-`instance.chan`); it returns a Promise that resolves once `g:clipboard` is set.
+also exported as `Neovim.enableClipboard(instance, provider[, delegateOnRequest[,
+setRegister]])` (ESM: `enableClipboard`) — call it **after** `instance.ready` (it
+needs `instance.chan`); it returns a Promise that resolves once `g:clipboard` is
+set. `setRegister` defaults to `true` (sets `clipboard=unnamedplus`); pass `false`
+to wire only the `+`/`*` registers.
 
 > **`navigator.clipboard` caveats (browser).** Reading the clipboard
 > (`readText()`, used by paste) may require a **user gesture** and the
