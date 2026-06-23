@@ -56,11 +56,13 @@ be published to npm or hosted on any static path.
 <script src="neovim-ui.js"></script>     <!-- globalThis.NeovimUI -->
 <script>
   // 1. Core: spawn `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
-  //    `args` are nvim args WITHOUT `--embed` (the worker prepends it). This
-  //    returns the instance SYNCHRONOUSLY — it is NOT a promise. To wait for the
-  //    engine to be ready, await `nvim.ready` (a separate promise), not create().
+  //    `args` are nvim args WITHOUT `--embed` (the worker prepends it).
+  //    create() returns an awaitable promise-facade: you can `await
+  //    Neovim.create(...)` for a ready instance, OR (as here) use the result
+  //    synchronously and `await nvim.ready` later — both work off the same object.
   //    `baseUrl` points create() at wherever the bundle is hosted (default: the
   //    page's own directory); pass it when you serve the bundle from a subpath.
+  //    Optional runtime config: { env, cwd, filesystem } (see the reference below).
   const nvim = Neovim.create({ args: ['-n'] });   // or: { args, baseUrl: '/lib/' }
 
   // Out-of-band engine status: { kind: 'booting' | 'stdout' | 'stderr' | 'exit' | 'error', ... }
@@ -135,16 +137,39 @@ having neovim call `rpcnotify(nvim.chan, ...)` back at you.
 
 #### Reference: the real surface today
 
-`Neovim.create({ args, baseUrl, engineUrl, transport, MessagePack })` → instance
-(synchronous). For the browser it spawns `engine-worker.js` as a Web Worker.
-`args` are nvim args without `--embed`. `baseUrl` is where the bundle is hosted
-(the engine URL becomes `baseUrl + 'engine-worker.js'`, trailing slash optional);
-`engineUrl` is an explicit override that takes precedence over `baseUrl`; with
-neither, the engine URL defaults to `'engine-worker.js'` (the page's own
-directory). (`Neovim.createNvim({ transport, MessagePack })` is the lower-level,
-transport-supplied entry point used by the Node e2e test.)
+`Neovim.create({ args, baseUrl, engineUrl, transport, MessagePack, env, cwd,
+filesystem })` → a **promise-facade**. For the browser it spawns
+`engine-worker.js` as a Web Worker. `args` are nvim args without `--embed`.
+`baseUrl` is where the bundle is hosted (the engine URL becomes `baseUrl +
+'engine-worker.js'`, trailing slash optional); `engineUrl` is an explicit override
+that takes precedence over `baseUrl`; with neither, the engine URL defaults to
+`'engine-worker.js'` (the page's own directory).
 
-The returned **instance**:
+The return value is **awaitable**: `const nvim = await Neovim.create({...})`
+yields a fully-usable, *ready* instance. The same object also carries the
+instance's synchronous members forwarded onto it (`request`, `notify`, `input`,
+`onNotification`, `onStatus`, `onRequest`, `dispose`, `ready`, and a live `chan`
+getter), so you can keep using it synchronously without awaiting — subscribe to
+`onStatus`, call `mount_into`, then `await nvim.ready` (or `nvim.ready.then(...)`)
+exactly as before. (Internally the facade is a real `Promise` that fulfills with
+the *distinct* instance, so awaiting it never deadlocks.)
+
+`env`, `cwd`, and `filesystem` are optional **runtime config** applied before the
+engine's `main()` runs (they ride the engine worker's init message → `pre.js`).
+They take effect only on the default browser worker path, not when you supply your
+own `transport`:
+
+| Option | Meaning |
+|---|---|
+| `env: { KEY: 'val', ... }` | Environment overrides applied on top of the defaults (`HOME`, `TERM`, …). Caller values win — set arbitrary vars or override `HOME`. |
+| `filesystem: { '/abs/path': contents, ... }` | Seed files into the in-memory wasm FS before boot. Missing parent dirs are created. `contents` is a string (or a `Uint8Array` for binary). Lets a browser embedder open files with no host FS. |
+| `cwd: '/abs/path'` | `chdir` into this directory after the filesystem is seeded (so a cwd inside a `filesystem` dir works). Fails soft — a missing dir is logged and the default cwd is kept. |
+
+(`Neovim.createNvim({ transport, MessagePack })` is the lower-level,
+transport-supplied entry point used by the Node e2e test. It returns a **plain
+synchronous instance** — it is *not* awaitable; `await createNvim(...).ready`.)
+
+The returned **instance** (also reachable synchronously off the facade):
 
 | Member | Description |
 |---|---|
@@ -168,15 +193,16 @@ headless use.
 
 ### Planned API
 
-The snippet below is the longer-term vision for the embedding API. It does **not**
+The snippet below is the longer-term vision for the embedding API. Parts of it
 run today — each feature is annotated with its current status. ESM `import`,
-`baseUrl`, and the `build-lib.sh` bundle now ship (see "Available today"); but
-`create()` still wires up only `args`/`baseUrl`/`engineUrl`/`transport`, and there
-is no awaitable `create()`, no `neovim_utils.js`, and no `create_autocmd` /
-`add_notify_handler` / `read_file` instance methods. Same-origin-only is the one
-remaining ESM gap: `import` works, but `new Worker()` (and thus `baseUrl`) can't
-point at a different-origin CDN yet — `https://tyoverby.com/neovim.js` from a
-different origin needs a Blob-bootstrap shim that isn't built.
+`baseUrl`, the `build-lib.sh` bundle, an **awaitable `create()`**, and the
+**`env` / `cwd` / `filesystem`** runtime config now ship (see "Available today").
+Still planned: the `plugins` (runtime-bundle selection) and `clipboard` options,
+`neovim_utils.js`, and the `create_autocmd` / `add_notify_handler` / `read_file`
+instance methods. Same-origin-only is the one remaining ESM gap: `import` works,
+but `new Worker()` (and thus `baseUrl`) can't point at a different-origin CDN yet
+— `https://tyoverby.com/neovim.js` from a different origin needs a Blob-bootstrap
+shim that isn't built.
 
 ```js
 // SHIPS TODAY as a local/same-origin import (e.g. './neovim.mjs' or '/lib/neovim.mjs').
@@ -191,17 +217,19 @@ import { mount_into } from 'https://tyoverby.com/neovim_ui.js';
 // PLANNED: neovim_utils.js does not exist yet.
 import { open_file_in_editor } from 'https://tyoverby.com/neovim_utils.js';
 
-// PLANNED: `await neovim.create(...)` — create() is synchronous today and is NOT
-// awaitable. The real pattern is: `const nvim = neovim.create({...}); await nvim.ready;`
+// SHIPS TODAY: `await neovim.create(...)` resolves to a ready instance (create()
+// returns an awaitable promise-facade). The synchronous pattern still works too:
+// `const nvim = neovim.create({...}); await nvim.ready;`
 const instance = await neovim.create({
   // PLANNED: selects between differently-packaged `nvim.data` runtime bundles
   // (a full runtime vs. a smaller core set). NOT about toggling `-u NONE`.
   plugins: 'full',
-  // PLANNED: not implemented — only args/engineUrl/transport work today.
+  // SHIPS TODAY: chdir into this dir after the filesystem is seeded.
   cwd: "/bar",
-  // PLANNED: not implemented.
+  // SHIPS TODAY: seed files into the in-memory wasm FS before boot (parent dirs
+  // are created; values are string or Uint8Array contents).
   filesystem: { "/bar/foo.txt": "content of /bar/foo.txt" },
-  // PLANNED: not implemented.
+  // SHIPS TODAY: environment overrides applied on top of the defaults.
   env: { "HOME": "/bar" },
   // PLANNED: not implemented.
   clipboard: "browser"

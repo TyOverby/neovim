@@ -45,6 +45,13 @@ if (process.env.NVIM_LOG_FILE) {
 globalThis.__nvimChannel = channel;
 globalThis.__nvimArgs = ['--embed'].concat(workerData.args || []);
 
+// The create() runtime config travels the same seam as args: the Node transport
+// puts it on workerData, we forward it onto the __nvim* globals pre.js reads.
+// (The browser analogue is engine-worker.js doing the same off its init message.)
+if (workerData.env) { globalThis.__nvimEnv = workerData.env; }
+if (workerData.filesystem) { globalThis.__nvimFiles = workerData.filesystem; }
+if (typeof workerData.cwd === 'string') { globalThis.__nvimCwd = workerData.cwd; }
+
 // Booting the (non-MODULARIZE) Emscripten module starts the engine. When it
 // exits (e.g. :q) the worker thread exits, which the parent observes as the
 // worker's 'exit' event and treats as channel EOF.

@@ -40,6 +40,14 @@
   // A host (the engine worker, Node or browser) overrides argv and supplies the
   // postMessage RPC channel via globals. We read them here because
   // Emscripten's own `var Module` shadows any globalThis.Module a host could set.
+  //
+  // The same seam also carries the optional runtime config the `create()` API
+  // exposes (see wasm/web/neovim.js and wasm/README.md): __nvimEnv (environment
+  // overrides), __nvimFiles (files to seed into the wasm FS), __nvimCwd (working
+  // directory). They are applied in preRun below, AFTER the default env/FS setup.
+  var cfgEnv = null;    // { KEY: 'val', ... } environment overrides (caller wins)
+  var cfgFiles = null;  // { '/abs/path': 'contents' | Uint8Array } files to seed
+  var cfgCwd = null;    // '/abs/path' working directory to chdir into last
   if (typeof globalThis !== 'undefined') {
     if (globalThis.__nvimArgs) {
       args = globalThis.__nvimArgs;
@@ -47,6 +55,9 @@
     if (globalThis.__nvimChannel) {
       Module['nvimChannel'] = globalThis.__nvimChannel;
     }
+    if (globalThis.__nvimEnv) { cfgEnv = globalThis.__nvimEnv; }
+    if (globalThis.__nvimFiles) { cfgFiles = globalThis.__nvimFiles; }
+    if (typeof globalThis.__nvimCwd === 'string') { cfgCwd = globalThis.__nvimCwd; }
   }
   Module['arguments'] = args;
   // Keep a pristine copy: Emscripten's callMain() does args.unshift(thisProgram),
@@ -114,6 +125,62 @@
       ENV['PWD'] = '/root';
       ENV['TERM'] = 'xterm-256color';
       ENV['LANG'] = 'C.UTF-8';
+    }
+
+    // --- create()-supplied runtime config (applied on top of the defaults) ---
+    // Order matters: env first, then seed files (so a cwd inside a seeded dir
+    // exists), then chdir into cwd last. All of these fail soft -- a bad path or
+    // missing dir must not crash the engine boot.
+    function dbg(msg) {
+      try {
+        if (typeof err === 'function') { err(msg); }
+        else if (typeof console !== 'undefined') { console.warn(msg); }
+      } catch (_e) { /* never let logging break boot */ }
+    }
+
+    // 1. env overrides: caller values win over the defaults set above. Works in
+    //    BOTH targets (override HOME, set arbitrary vars, etc.).
+    if (cfgEnv && typeof cfgEnv === 'object') {
+      for (var ek in cfgEnv) {
+        if (Object.prototype.hasOwnProperty.call(cfgEnv, ek)) {
+          ENV[ek] = String(cfgEnv[ek]);
+        }
+      }
+    }
+
+    // 2. filesystem: seed each { '/abs/path': contents } entry into the wasm FS
+    //    (MEMFS) before main() runs. There is no mkdirp, so walk the path and
+    //    FS.mkdir each parent segment (ignoring "already exists"). Values are
+    //    file contents -- a string, or a Uint8Array for binary data.
+    if (cfgFiles && typeof cfgFiles === 'object') {
+      var mkdirp = function (dir) {
+        var parts = dir.split('/');
+        var cur = '';
+        for (var p = 0; p < parts.length; p++) {
+          if (parts[p] === '') { continue; }   // leading slash / doubled slashes
+          cur += '/' + parts[p];
+          try { FS.mkdir(cur); } catch (e) { /* already exists -- fine */ }
+        }
+      };
+      for (var fpath in cfgFiles) {
+        if (!Object.prototype.hasOwnProperty.call(cfgFiles, fpath)) { continue; }
+        try {
+          var slash = fpath.lastIndexOf('/');
+          if (slash > 0) { mkdirp(fpath.slice(0, slash)); }
+          var data = cfgFiles[fpath];
+          // FS.writeFile takes a string or a typed array; pass through either.
+          FS.writeFile(fpath, data);
+        } catch (e) {
+          dbg('nvim wasm: failed to seed file ' + fpath + ': ' + e);
+        }
+      }
+    }
+
+    // 3. cwd: chdir last, so a cwd that lives inside a seeded dir resolves. Fail
+    //    soft -- on a missing dir keep the default cwd rather than crashing.
+    if (cfgCwd) {
+      try { FS.chdir(cfgCwd); }
+      catch (e) { dbg('nvim wasm: failed to chdir to ' + cfgCwd + ': ' + e); }
     }
   });
 })();

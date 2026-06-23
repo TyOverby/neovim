@@ -175,16 +175,30 @@
   }
 
   // Browser convenience: spawn the engine in a Web Worker (engine-worker.js) and
-  // wrap it as a transport. `args` are the nvim args (without `--embed`, which
-  // the worker prepends). Only valid in a browser/worker context (uses Worker).
-  function browserEngineTransport(engineUrl, args) {
+  // wrap it as a transport. `config` is the engine init payload sent as the
+  // worker's first message: { args, env, cwd, filesystem }. `args` are the nvim
+  // args (without `--embed`, which the worker prepends); env/cwd/filesystem are
+  // the optional create() runtime config that engine-worker.js forwards to pre.js
+  // via the __nvim* globals. Only valid in a browser/worker context (uses Worker).
+  //
+  // Back-compat: a bare array may be passed in place of `config` (legacy
+  // `browserEngineTransport(url, args)` callers) -- it is treated as `{ args }`.
+  function browserEngineTransport(engineUrl, config) {
+    if (Array.isArray(config)) { config = { args: config }; }
+    config = config || {};
+    var init = {
+      args: config.args || [],
+      env: config.env,
+      cwd: config.cwd,
+      filesystem: config.filesystem,
+    };
     var worker = new Worker(engineUrl);
     var t = {
       onMessage: null,
       onClose: null,
       onStatus: null,
       send: function (u8) { worker.postMessage(u8.buffer, [u8.buffer]); },
-      start: function () { worker.postMessage({ args: args || [] }); },
+      start: function () { worker.postMessage(init); },
       close: function () { worker.terminate(); },
     };
     worker.onmessage = function (e) {
@@ -230,12 +244,56 @@
   }
 
   // The README-facing entry point: build a browser engine transport and a core
-  // instance over it. opts: { args, baseUrl, engineUrl }.
+  // instance over it.
+  //   opts: { args, baseUrl, engineUrl, transport, MessagePack,
+  //           env, cwd, filesystem }
+  // env/cwd/filesystem are the runtime config (see wasm/README.md): they are
+  // carried in the engine worker's init message and applied by pre.js before the
+  // engine's main() runs. With a caller-supplied `transport` they have no effect
+  // (the transport owns the engine handshake), so they only apply on the default
+  // browser path.
+  //
+  // RETURN SHAPE -- a "promise-facade": create() returns a real Promise that
+  // FULFILLS WITH THE (distinct) ready instance, so `await Neovim.create(...)`
+  // yields a fully-usable instance. The same object ALSO carries the instance's
+  // synchronous members forwarded onto it (request/notify/input/onNotification/
+  // onStatus/onRequest/dispose/ready and a `chan` getter), so the existing
+  // synchronous usage (app.js: subscribe onStatus, mount_into, then `.ready`)
+  // keeps working WITHOUT awaiting.
+  //
+  // CORRECTNESS: a Promise can never fulfill with itself (the Promise resolution
+  // procedure would deadlock). So the facade must fulfill with the *instance*,
+  // which is a DISTINCT, non-thenable object -- NOT with the facade. We therefore
+  // build the facade from `instance.ready` (which already fulfills with the
+  // instance) and never make the instance itself thenable. createNvim() stays a
+  // plain synchronous instance and is intentionally NOT wrapped.
   function create(opts) {
     opts = opts || {};
     var transport = opts.transport ||
-      browserEngineTransport(resolveEngineUrl(opts), opts.args || []);
-    return createNvim({ transport: transport, MessagePack: opts.MessagePack });
+      browserEngineTransport(resolveEngineUrl(opts), {
+        args: opts.args || [],
+        env: opts.env,
+        cwd: opts.cwd,
+        filesystem: opts.filesystem,
+      });
+    var instance = createNvim({ transport: transport, MessagePack: opts.MessagePack });
+
+    // A real Promise fulfilling with the DISTINCT instance once it's ready.
+    var facade = instance.ready.then(function () { return instance; });
+
+    // Forward the instance's synchronous surface onto the facade so callers who
+    // don't await still get the instance API directly off the create() result.
+    ['request', 'notify', 'input', 'onNotification', 'onStatus', 'onRequest',
+     'dispose'].forEach(function (m) {
+      facade[m] = function () { return instance[m].apply(instance, arguments); };
+    });
+    facade.ready = instance.ready;
+    // `chan` is set asynchronously on the instance once ready; expose it live.
+    Object.defineProperty(facade, 'chan', {
+      enumerable: true,
+      get: function () { return instance.chan; },
+    });
+    return facade;
   }
 
   return {

@@ -48,14 +48,25 @@ async function waitFor(pred, timeoutMs, label) {
 }
 
 // ---- a Node worker_thread transport (the analogue of the browser worker) ---
-function nodeEngineTransport(args) {
+// `cfg` carries the create() runtime config { args, env, cwd, filesystem }; it is
+// forwarded on workerData exactly as the browser path posts it in the worker's
+// init message, so worker.js -> pre.js apply identical logic in both targets.
+function nodeEngineTransport(cfg) {
+  cfg = cfg || {};
   // Give the engine a clean env: drop NVIM_LOG_FILE so worker.js's `.engine`
   // suffix can't point at an unwritable path (which would emit a startup
   // warning -> hit-enter prompt). CI won't have it set; a dev shell might.
   const env = Object.assign({}, process.env);
   delete env.NVIM_LOG_FILE;
   const worker = new Worker(WORKER, {
-    workerData: { args: args || [] },     // worker.js prepends `--embed`
+    // worker.js prepends `--embed` to args and forwards env/cwd/filesystem to
+    // the __nvim* globals pre.js reads.
+    workerData: {
+      args: cfg.args || [],
+      env: cfg.env,
+      cwd: cfg.cwd,
+      filesystem: cfg.filesystem,
+    },
     env: env,
     stdout: true, stderr: true,           // capture; don't litter the test output
   });
@@ -88,7 +99,18 @@ async function main() {
   // `-n` disables swap files (otherwise E303 + the intro both queue messages and
   // nvim raises a "Press ENTER" prompt that blocks input/RPC). `-u/-i NONE` keep
   // the session pristine, matching the browser demo.
-  const { transport, worker } = nodeEngineTransport(['-u', 'NONE', '-i', 'NONE', '-n']);
+  //
+  // Exercise the create() runtime config seam (env/cwd/filesystem) on the SAME
+  // path the browser uses: the values ride workerData -> worker.js -> __nvim*
+  // globals -> pre.js preRun, identical to the browser's init message ->
+  // engine-worker.js -> __nvim* globals -> pre.js. We assert each took effect via
+  // RPC below (checks 6-8).
+  const { transport, worker } = nodeEngineTransport({
+    args: ['-u', 'NONE', '-i', 'NONE', '-n'],
+    env: { NVIM_WASM_PROBE: 'hi-from-env' },
+    filesystem: { '/work/hello.txt': 'seeded-contents\n' },
+    cwd: '/work',
+  });
   const nvim = Neovim.createNvim({ transport: transport, MessagePack: MessagePack });
 
   let engineError = null;
@@ -133,7 +155,25 @@ async function main() {
   ok(cmdline, "':' opens a command line on the bottom row");
   nvim.input('<Esc>');
 
-  // 5. Lifecycle: when the engine goes away, the core must observe EOF and tear
+  // ---- create() runtime config (env / filesystem / cwd) ---------------------
+  // These assert the config we passed into nodeEngineTransport above reached the
+  // engine via the create() seam (workerData -> worker.js -> __nvim* -> pre.js).
+
+  // 6. env: pre.js applied our override on top of its defaults, so $NVIM_WASM_PROBE
+  //    is visible to nvim's expand().
+  const probe = await nvim.request('nvim_eval', ['$NVIM_WASM_PROBE']);
+  ok(probe === 'hi-from-env', "env override is visible to nvim ($NVIM_WASM_PROBE = '" + probe + "')");
+
+  // 7. filesystem: the seeded file exists in the wasm FS with the given contents.
+  const lines = await nvim.request('nvim_exec_lua', ['return vim.fn.readfile("/work/hello.txt")', []]);
+  ok(Array.isArray(lines) && lines.length === 1 && lines[0] === 'seeded-contents',
+     "seeded /work/hello.txt reads back as 'seeded-contents' (got " + JSON.stringify(lines) + ')');
+
+  // 8. cwd: pre.js chdir'd into the seeded dir, so getcwd() reflects it.
+  const cwd = await nvim.request('nvim_eval', ['getcwd()']);
+  ok(cwd === '/work', "cwd took effect (getcwd() = '" + cwd + "')");
+
+  // 9. Lifecycle: when the engine goes away, the core must observe EOF and tear
   // down. This is the path the browser relies on (engine-worker posts
   // {kind:'exit'} -> transport.onClose -> the core closes). We simulate the
   // engine vanishing by terminating its worker, then assert the core both emits

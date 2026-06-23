@@ -7,7 +7,8 @@
 // so the page needs no COOP/COEP / cross-origin isolation.
 //
 // Protocol with the page:
-//   page -> worker:  first message {args}  (init); then ArrayBuffers (RPC input)
+//   page -> worker:  first message {args, env, cwd, filesystem}  (init); then
+//                    ArrayBuffers (RPC input)
 //   worker -> page:  ArrayBuffers (RPC output); {kind:'booting'|'stdout'|'stderr'
 //                    |'exit'} status objects
 'use strict';
@@ -17,7 +18,8 @@ var started = false;
 onmessage = function (e) {
   if (!started) {
     started = true;
-    var args = (e.data && e.data.args) || [];
+    var init = e.data || {};
+    var args = init.args || [];
 
     // The channel object wasm/nvim_io.js reads (Module.nvimChannel).
     var channel = {
@@ -28,6 +30,13 @@ onmessage = function (e) {
     };
     self.__nvimChannel = channel;
     self.__nvimArgs = ['--embed'].concat(args);
+
+    // create() runtime config (env/cwd/filesystem) travels in the same init
+    // message and is handed to the engine via the __nvim* globals pre.js reads,
+    // mirroring the Node host (wasm/worker.js) exactly.
+    if (init.env) { self.__nvimEnv = init.env; }
+    if (init.filesystem) { self.__nvimFiles = init.filesystem; }
+    if (typeof init.cwd === 'string') { self.__nvimCwd = init.cwd; }
 
     // Surface engine stdout/stderr + exit back to the page.
     self.Module = self.Module || {};
