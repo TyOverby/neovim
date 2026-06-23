@@ -14,7 +14,7 @@
 //     so we mount the host filesystem via NODEFS and copy across process.env.
 //   * Browser (Web Worker engine): no `process`. The runtime ships preloaded
 //     into MEMFS at /usr/share/nvim/runtime (--preload-file), and the host page
-//     hands us argv + the SAB channel through globals before the module boots.
+//     hands us argv + the postMessage channel through globals before the module boots.
 (function () {
   var isNode = (typeof process !== 'undefined' &&
                 process.versions && process.versions.node);
@@ -38,7 +38,7 @@
   }
 
   // A host (the engine worker, Node or browser) overrides argv and supplies the
-  // shared-memory RPC channel via globals. We read them here because
+  // postMessage RPC channel via globals. We read them here because
   // Emscripten's own `var Module` shadows any globalThis.Module a host could set.
   if (typeof globalThis !== 'undefined') {
     if (globalThis.__nvimArgs) {
@@ -60,7 +60,7 @@
   Module['preRun'].push(function () {
     if (isNode) {
       // Mount the host filesystem. Unlike NODERAWFS, MEMFS+NODEFS keeps fd 0/1 as
-      // virtual streams (so they can be backed by the SAB RPC channel), while real
+      // virtual streams (so they can be backed by the postMessage RPC channel), while real
       // files remain reachable. We mount each existing top-level host directory
       // onto the same path inside the wasm FS. /usr is intentionally skipped so it
       // does not shadow the preloaded runtime at /usr/share/nvim/runtime.

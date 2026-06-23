@@ -1,7 +1,8 @@
 // wasm/shim.h - Emscripten/WASM build shim.
 //
 // This header is force-included into EVERY emcc compilation (deps + nvim) via
-// the EMCC_CFLAGS environment variable set by wasm/build.sh:
+// the EMCC_CFLAGS environment variable set by wasm/build-deps.sh and
+// wasm/build-nvim.sh:
 //
 //     export EMCC_CFLAGS="-include /abs/path/to/wasm/shim.h"
 //

@@ -578,8 +578,8 @@ uint64_t channel_from_stdio(bool rpc, CallbackReader on_output, const char **err
     os_replace_stdout_and_stderr_to_conout();
   }
 #elif defined(__EMSCRIPTEN__)
-  // wasm: the RPC channel is backed by SharedArrayBuffer-driven stream ops that
-  // wasm/nvim_io.js installs directly on fd 0/1. There is no process spawning
+  // wasm: the RPC channel is backed by the in-realm postMessage channel object,
+  // whose stream ops wasm/nvim_io.js installs directly on fd 0/1. There is no process spawning
   // (so no cloexec concern) and no separate stdout to protect, so skip the
   // dup/redirect dance entirely and use fd 0/1 as-is. See wasm/stage2.md.
 #else
@@ -612,7 +612,7 @@ uint64_t channel_from_stdio(bool rpc, CallbackReader on_output, const char **err
 /// a write fd). Unlike channel_from_stdio(), this is not tied to fd 0/1 and is
 /// not gated on headless/embedded mode: it is used by the builtin-UI *client*
 /// (which keeps fd 0/1/2 for the real terminal) to talk to the engine running in
-/// a worker. The two fds are backed by the SharedArrayBuffer transport, with
+/// a worker. The two fds are backed by the postMessage channel transport, with
 /// stream ops installed in JS (see wasm/nvim_io.js). See wasm/stage2.md.
 uint64_t channel_from_fds(int in_fd, int out_fd)
 {

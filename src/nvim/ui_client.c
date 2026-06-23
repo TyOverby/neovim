@@ -47,7 +47,7 @@ static bool tui_rgb = false;
 
 #ifdef __EMSCRIPTEN__
 // JS glue (wasm/nvim_io.js): spawns the engine (`nvim --embed`) in a worker,
-// wires its stdio to a SharedArrayBuffer channel, installs the client side of
+// wires its stdio to a postMessage channel, installs the client side of
 // that channel on two fresh fds, switches this (client) process's terminal into
 // raw mode, and writes the client-side read/write fds to *in_fd / *out_fd.
 extern void nvim_wasm_start_engine(int *in_fd, int *out_fd);
@@ -57,7 +57,7 @@ uint64_t ui_client_start_server(const char *exepath, size_t argc, char **argv)
 {
 #ifdef __EMSCRIPTEN__
   // wasm: there is no process spawning. The engine runs in a worker and we talk
-  // to it over shared memory; the builtin TUI runs here on the main thread.
+  // to it over a postMessage channel; the builtin TUI runs here on the main thread.
   // See wasm/stage2.md.
   (void)exepath;
   (void)argc;
