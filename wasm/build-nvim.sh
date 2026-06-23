@@ -95,7 +95,14 @@ cp "${ROOT}/wasm/worker.js" "${BUILD}/bin/"
 RT="${ROOT}/runtime"
 STAGE_ROOT="${BUILD}/.runtime-stage"
 FILE_PACKAGER="$(command -v file_packager || true)"
-PY_PACKAGER="${EMSCRIPTEN_ROOT:-/usr/share/emscripten}/tools/file_packager.py"
+# Locate file_packager.py relative to emcc, which is correct on BOTH the emsdk
+# layout (CI: emcc lives at <root>/emcc with tools/ alongside) and the Debian apt
+# layout (dev box: /usr/bin/emcc is a symlink into /usr/share/emscripten, where
+# tools/ also sits). `command -v file_packager` is empty under emsdk and
+# EMSCRIPTEN_ROOT is unset there, so the old /usr/share/emscripten fallback failed
+# in CI -- resolving from the real emcc fixes both.
+EMCC_REAL="$(readlink -f "$(command -v emcc 2>/dev/null)" 2>/dev/null || true)"
+PY_PACKAGER="${EMSCRIPTEN_ROOT:-$(dirname "${EMCC_REAL:-/usr/share/emscripten/x}")}/tools/file_packager.py"
 
 run_file_packager() {  # <data-out> <stage-dir>
   local data_out="$1" stage="$2"
