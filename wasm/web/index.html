@@ -24,7 +24,14 @@
     color: #d4d4d4;
     padding: 8px;
     border: 1px solid #444;
-    display: inline-block;
+    /* A real, resizable box so mount_into auto-sizes the grid to fill it and a
+       drag of the resize handle reflows the grid (try_resize -> grid_resize). */
+    box-sizing: border-box;
+    width: 80ch;
+    height: 24em;
+    max-width: 100%;
+    overflow: hidden;
+    resize: both;
     outline: none;
     tab-size: 8;
   }
@@ -42,6 +49,7 @@
   <div class="hint">
     Engine (<code>nvim --embed</code>) runs in a Web Worker; this page is a pure-JS
     msgpack-RPC client rendering the <code>ext_linegrid</code> grid. Click the grid, then type.
+    Drag the bottom-right corner (or resize the window) to reflow the grid.
   </div>
 
   <!-- Layered: MessagePack global, then the core, then the renderer, then the

@@ -72,13 +72,16 @@ be published to npm or hosted on any static path.
   });
 
   // 2. Renderer: mount the default grid UI into a <pre> and forward keystrokes.
-  //    Accepts only { cols, rows } today. Rendering is a COLOURED character grid:
-  //    it decodes the ext_linegrid highlight stream and emits colour spans
-  //    (fg/bg/bold/italic/underline/undercurl/strikethrough/reverse), with a
-  //    solid cursor block.
+  //    Rendering is a COLOURED character grid: it decodes the ext_linegrid
+  //    highlight stream and emits colour spans (fg/bg/bold/italic/underline/
+  //    undercurl/strikethrough/reverse), with a solid cursor block.
+  //    Opts: { font_family, font_size, cols, rows } (all optional). Omit cols/rows
+  //    to AUTO-SIZE the grid to the element and track its resizes (see below);
+  //    pass cols/rows for a FIXED grid.
   const ui = NeovimUI.mount_into(nvim, document.getElementById('screen'), {
-    cols: 80,
-    rows: 24,
+    font_family: 'ui-monospace, monospace',
+    font_size: 16,
+    // cols: 80, rows: 24,  // optional: a fixed grid (omit to auto-size)
   });
 
   // 3. `nvim.ready` resolves (to the instance) once nvim_get_api_info round-trips,
@@ -230,13 +233,33 @@ The returned **instance** (also reachable synchronously off the facade):
 | `ready` | A `Promise` that resolves to the instance once `nvim_get_api_info` round-trips (and `chan` is set). |
 | `dispose()` | Tear down the transport / engine and reject in-flight requests. |
 
-`NeovimUI.mount_into(instance, el, { cols, rows })` → `{ screen, resize(c, r),
-dispose() }`. Wires the instance to a `<pre>`, attaches the UI
-(`nvim_ui_attach` with `ext_linegrid`), renders on flush, and forwards
-keystrokes. `screen` is a `NeovimUI.Screen` (the headless grid model);
-`resize(c, r)` issues `nvim_ui_try_resize`; `dispose()` unsubscribes from
-`redraw`. `NeovimUI.Screen` and `NeovimUI.keyToNvim` are also exported for
-headless use.
+`NeovimUI.mount_into(instance, el, { font_family, font_size, cols, rows })` →
+`{ screen, resize(c, r), dispose(), cols, rows }`. Wires the instance to a
+`<pre>`, attaches the UI (`nvim_ui_attach` with `ext_linegrid`), renders on
+flush, and forwards keystrokes. `screen` is a `NeovimUI.Screen` (the headless
+grid model); `resize(c, r)` issues `nvim_ui_try_resize`; `dispose()` unsubscribes
+from `redraw` **and** disconnects the auto-resize observer; `cols`/`rows` are the
+dimensions it attached with. `NeovimUI.Screen` and `NeovimUI.keyToNvim` are also
+exported for headless use.
+
+All opts are optional:
+
+| Opt | Meaning |
+|---|---|
+| `font_family` | CSS `font-family` applied to `el` (default: leave the page CSS as-is). **Must be monospace** for the grid to line up. |
+| `font_size` | A number (→ `px`) or a CSS length string, applied to `el`. `mount_into` also pins a deterministic integer-px `line-height` (ratio 1.2) so the row math is stable. |
+| `cols`, `rows` | **Explicit, fixed** grid size. Passing *either* disables auto-sizing (a missing one defaults to 80/24). |
+
+**Auto-size + resize tracking.** With *neither* `cols` nor `rows` given,
+`mount_into` measures the font's cell metrics (a hidden monospace probe) and
+`el`'s content box, attaches a grid that **fills the element**, and installs a
+`ResizeObserver` on `el`. On resize it recomputes cols/rows and — if they changed
+— issues `nvim_ui_try_resize` (coalesced to one call per animation frame so a
+drag doesn't spam the engine); the engine's `grid_resize` redraw reflows the
+`Screen`, so the grid follows the element. If `el` has no layout yet (0×0), it
+falls back to 80×24 rather than attaching a degenerate grid. `dispose()`
+disconnects the observer. Passing explicit `cols`/`rows` keeps a fixed grid with
+no observer.
 
 #### The helper layer (`neovim-utils.js`)
 
@@ -353,9 +376,9 @@ run today — each feature is annotated with its current status. ESM `import`,
 **`env` / `cwd` / `filesystem`** runtime config, **`plugins`** (runtime-bundle
 selection), and **`neovim-utils.js`** (the `open_file_in_editor` /
 `read_file` / `write_file` / `create_autocmd` / `add_notify_handler` /
-`on_autocmd` **free functions** — see "Available today") and the **`clipboard`**
-option (see "Clipboard" above) now ship. Still planned: the renderer's
-`font_family` / `font_size` (and auto-resize). Note the
+`on_autocmd` **free functions** — see "Available today"), the **`clipboard`**
+option (see "Clipboard" above), and the renderer's **`font_family` / `font_size`**
++ **auto-resize** (see `mount_into` under "Available today") now ship. Note the
 helpers ship as free functions `helper(instance, ...)`, **not** as instance
 methods (`instance.helper(...)`) — the snippet below uses the planned-method
 shape, but the real calls are the free-function form. Same-origin-only is the one remaining ESM gap: `import` works,
@@ -417,11 +440,13 @@ const handle = await on_autocmd(instance, ["BufWritePost"], { pattern: ["*"] },
   });
 // handle.unsubscribe();  // stop notifications + delete the augroup
 
-// mount_into ships today and now renders COLOUR (it decodes the ext_linegrid
-// highlight stream into fg/bg/bold/italic/underline/undercurl/strikethrough/
-// reverse spans). PLANNED: it accepts only { cols, rows } now — `font_family` /
-// `font_size` are not yet supported.
-const ui = await mount_into(instance, document.querySelector(".code-container", {
+// mount_into ships today: it renders COLOUR (decodes the ext_linegrid highlight
+// stream into fg/bg/bold/italic/underline/undercurl/strikethrough/reverse spans)
+// and accepts `font_family` / `font_size`. Omitting `cols`/`rows` AUTO-SIZES the
+// grid to the element and tracks its resizes (a ResizeObserver drives
+// nvim_ui_try_resize); passing `cols`/`rows` keeps a fixed grid. (mount_into is
+// synchronous — no `await` needed.)
+const ui = mount_into(instance, document.querySelector(".code-container"), {
   font_family: "monospace",
   font_size: 16,
 });

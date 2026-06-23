@@ -7,7 +7,6 @@
 'use strict';
 
 (function () {
-  var COLS = 80, ROWS = 24;
   var statusEl = document.getElementById('status');
   var screenEl = document.getElementById('screen');
   function setStatus(s) { if (statusEl) { statusEl.textContent = s; } }
@@ -26,7 +25,14 @@
   });
 
   // 2. Renderer: mount a default grid UI into the <pre> and forward keystrokes.
-  var ui = NeovimUI.mount_into(nvim, screenEl, { cols: COLS, rows: ROWS });
+  //    No fixed cols/rows -> mount_into auto-sizes the grid to fill #screen and
+  //    tracks its size (drag the resize handle / resize the window to reflow).
+  //    font_family / font_size are applied to the element (and pin a stable
+  //    line-height for the grid math).
+  var ui = NeovimUI.mount_into(nvim, screenEl, {
+    font_family: 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
+    font_size: 16,
+  });
 
   nvim.ready
     .then(function () { setStatus('attached — click the grid and type (chan ' + nvim.chan + ')'); })

@@ -290,22 +290,177 @@
     el.focus();
   }
 
+  // ---- font + sizing ------------------------------------------------------
+  // We keep the grid math stable by pinning a deterministic line-height: rows
+  // are an exact integer number of px so floor(contentHeight / cellH) doesn't
+  // wobble on sub-pixel font metrics. 1.2 is the conventional terminal ratio.
+  var DEFAULT_FONT_FAMILY = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace';
+  var LINE_HEIGHT_RATIO = 1.2;
+
+  // Apply opts.font_family / opts.font_size to `el` (only when given, so an
+  // unset option leaves the page CSS alone), and pin a deterministic integer-px
+  // line-height. `font_size` is a number (-> px) or a string (used as-is).
+  // Returns the resolved { fontFamily, fontSize (css), lineHeight (px) } that the
+  // probe must mirror so its cell metrics match the live element.
+  function applyFont(el, opts) {
+    if (opts.font_family) { el.style.fontFamily = opts.font_family; }
+    if (opts.font_size != null) {
+      el.style.fontSize = (typeof opts.font_size === 'number')
+        ? (opts.font_size + 'px') : opts.font_size;
+    }
+    var cs = (typeof getComputedStyle === 'function') ? getComputedStyle(el) : null;
+    var fontFamily = (cs && cs.fontFamily) || el.style.fontFamily || DEFAULT_FONT_FAMILY;
+    var fontSizeCss = (cs && cs.fontSize) || el.style.fontSize || '16px';
+    var fontSizePx = parseFloat(fontSizeCss) || 16;
+    // Pin line-height to an exact integer px so row math is stable.
+    var lineHeightPx = Math.max(1, Math.round(fontSizePx * LINE_HEIGHT_RATIO));
+    el.style.lineHeight = lineHeightPx + 'px';
+    return { fontFamily: fontFamily, fontSize: fontSizeCss, lineHeight: lineHeightPx };
+  }
+
+  // Measure one monospace cell (width x height in px) for the given resolved
+  // font, using a hidden off-screen probe with the SAME font metrics as the live
+  // element. Uses getBoundingClientRect() for sub-pixel accuracy: a long run of a
+  // fixed glyph divided by its length gives a per-cell width that isn't skewed by
+  // a single glyph's rounding.
+  function measureCell(font) {
+    var probe = document.createElement('span');
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.left = '-9999px';
+    probe.style.top = '0';
+    probe.style.whiteSpace = 'pre';
+    probe.style.fontFamily = font.fontFamily;
+    probe.style.fontSize = font.fontSize;
+    probe.style.lineHeight = font.lineHeight + 'px';
+    probe.style.padding = '0';
+    probe.style.margin = '0';
+    probe.style.border = '0';
+    var N = 50;
+    probe.textContent = '0'.repeat(N);
+    document.body.appendChild(probe);
+    var rect = probe.getBoundingClientRect();
+    var cellW = rect.width / N;
+    document.body.removeChild(probe);
+    // Height comes from the pinned (integer) line-height, which is what the live
+    // <pre> uses per row -- the probe rect height can be the same but we trust the
+    // pinned value so cellH is an exact integer.
+    return { w: cellW, h: font.lineHeight };
+  }
+
+  // `el`'s content-box size in px (clientWidth/Height already exclude border and
+  // scrollbar; subtract padding to get the content box).
+  function contentBox(el) {
+    var cs = (typeof getComputedStyle === 'function') ? getComputedStyle(el) : null;
+    var padL = cs ? (parseFloat(cs.paddingLeft) || 0) : 0;
+    var padR = cs ? (parseFloat(cs.paddingRight) || 0) : 0;
+    var padT = cs ? (parseFloat(cs.paddingTop) || 0) : 0;
+    var padB = cs ? (parseFloat(cs.paddingBottom) || 0) : 0;
+    return {
+      w: Math.max(0, el.clientWidth - padL - padR),
+      h: Math.max(0, el.clientHeight - padT - padB),
+    };
+  }
+
+  // Derive { cols, rows } from `el`'s content box and a measured cell. Returns
+  // null when the element has no usable layout yet (0x0 or an unmeasurable cell),
+  // so the caller can fall back to the fixed defaults instead of a degenerate grid.
+  function deriveSize(el, font) {
+    var box = contentBox(el);
+    var cell = measureCell(font);
+    if (!(cell.w > 0) || !(cell.h > 0) || box.w <= 0 || box.h <= 0) { return null; }
+    return {
+      cols: Math.max(1, Math.floor(box.w / cell.w)),
+      rows: Math.max(1, Math.floor(box.h / cell.h)),
+    };
+  }
+
   // ---- mount_into ---------------------------------------------------------
   // Wire `instance` to render into the DOM element `el` (a <pre>) and forward
-  // its keystrokes. opts: { cols, rows }. Returns { screen, resize, dispose }.
+  // its keystrokes.
+  //
+  // opts:
+  //   * font_family - CSS font-family applied to `el` (default: leave the page
+  //     CSS as-is; a monospace stack is assumed). A monospace family is required
+  //     for the grid to line up.
+  //   * font_size   - number (-> px) or a CSS length string, applied to `el`.
+  //   * cols, rows  - EXPLICIT grid size. Passing either disables auto-sizing:
+  //     the grid is fixed at the given dimensions (missing one defaults 80/24).
+  //
+  // With neither cols nor rows given, the grid AUTO-SIZES: it measures the font's
+  // cell metrics and `el`'s content box, attaches a grid that fills the element,
+  // and tracks `el`'s size with a ResizeObserver (driving nvim_ui_try_resize on
+  // change, debounced via requestAnimationFrame; the engine's grid_resize redraw
+  // reflows the Screen, so we never resize it by hand). If `el` has no layout yet
+  // (0x0), it falls back to 80x24 so it never attaches a degenerate grid.
+  //
+  // Returns { screen, resize(c, r), dispose(), cols, rows } (cols/rows are the
+  // derived-or-explicit dimensions it attached with).
   function mount_into(instance, el, opts) {
     opts = opts || {};
-    var cols = opts.cols || 80, rows = opts.rows || 24;
+    var explicit = (opts.cols != null) || (opts.rows != null);
+
+    // Font styling + a pinned line-height so the grid math is deterministic.
+    var font = applyFont(el, opts);
+
+    var cols, rows;
+    if (explicit) {
+      cols = opts.cols || 80; rows = opts.rows || 24;
+    } else {
+      var derived = deriveSize(el, font);
+      if (derived) { cols = derived.cols; rows = derived.rows; }
+      else { cols = 80; rows = 24; }   // no layout yet: never attach 0x0
+    }
+
     var screen = new Screen(cols, rows);
     screen.onFlush = function () { render(el, screen); };
     var off = instance.onNotification('redraw', function (params) { screen.handleRedraw(params); });
     installKeyboard(el, instance);
     instance.request('nvim_ui_attach', [cols, rows, { rgb: true, ext_linegrid: true }]);
-    return {
+
+    var api = {
       screen: screen,
-      resize: function (c, r) { return instance.request('nvim_ui_try_resize', [c, r]); },
-      dispose: function () { off(); },
+      cols: cols,
+      rows: rows,
+      resize: function (c, r) {
+        api.cols = c; api.rows = r;
+        return instance.request('nvim_ui_try_resize', [c, r]);
+      },
+      dispose: function () {
+        off();
+        if (observer) { observer.disconnect(); observer = null; }
+        if (rafId != null) { cancelRaf(rafId); rafId = null; }
+      },
     };
+
+    // ---- auto-resize: track `el` and drive try_resize on change ----------
+    // Only when auto-sizing (explicit cols/rows keep a fixed grid). On each
+    // observed resize we recompute cols/rows and, if they changed, ask the engine
+    // to resize -- it answers with a grid_resize redraw the Screen decode already
+    // handles, so we don't touch the Screen here (avoids a double-resize race).
+    // Coalesce a burst of resizes (a window drag) into one try_resize per frame.
+    var observer = null, rafId = null;
+    var hasRaf = (typeof requestAnimationFrame === 'function');
+    function scheduleRaf(fn) { return hasRaf ? requestAnimationFrame(fn) : setTimeout(fn, 16); }
+    function cancelRaf(id) { if (hasRaf) { cancelAnimationFrame(id); } else { clearTimeout(id); } }
+
+    if (!explicit && typeof ResizeObserver === 'function') {
+      var recompute = function () {
+        rafId = null;
+        var derived = deriveSize(el, font);
+        if (!derived) { return; }                 // 0x0 (e.g. hidden): keep last grid
+        if (derived.cols === api.cols && derived.rows === api.rows) { return; }
+        api.cols = derived.cols; api.rows = derived.rows;
+        instance.request('nvim_ui_try_resize', [derived.cols, derived.rows]);
+      };
+      observer = new ResizeObserver(function () {
+        if (rafId != null) { return; }            // coalesce: one try_resize per frame
+        rafId = scheduleRaf(recompute);
+      });
+      observer.observe(el);
+    }
+
+    return api;
   }
 
   return { Screen: Screen, mount_into: mount_into, keyToNvim: keyToNvim };
