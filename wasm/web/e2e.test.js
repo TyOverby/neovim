@@ -138,8 +138,12 @@ async function main() {
   // {kind:'exit'} -> transport.onClose -> the core closes). We simulate the
   // engine vanishing by terminating its worker, then assert the core both emits
   // 'exit' and rejects any in-flight request (so callers never hang).
-  // (Note: making `:qa!` *itself* terminate the wasm engine is a separate
-  // open item — see the engine-exit follow-up — not part of the UI split.)
+  // (Note: in the BROWSER, `:qa!` terminates the engine and engine-worker.js
+  // posts {kind:'exit'} on Module.onExit, so the channel closes on its own. The
+  // Node host (wasm/worker.js) doesn't hook Module.onExit -- its worker_thread
+  // stays alive in the JSPI-suspended poll -- so `:qa!` over RPC doesn't close
+  // the channel here yet; we close from the host side instead. Either way this
+  // exercises the same transport.onClose -> core-close path.)
   let closed = false;
   nvim.onStatus(function (s) { if (s && s.kind === 'exit') { closed = true; } });
   const hangs = nvim.request('nvim_eval', ['1+1']);   // in-flight across the close
