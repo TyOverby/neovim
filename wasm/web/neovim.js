@@ -98,9 +98,26 @@
         var hs = notifyHandlers[msg[1]];
         if (hs) { for (var i = 0; i < hs.length; i++) { hs[i](msg[2]); } }
       } else if (type === 0) {                // request from engine: [0, msgid, method, params]
-        var result = null;
-        if (requestHandler) { try { result = requestHandler(msg[2], msg[3]); } catch (e) { /* reply nil */ } }
-        send([1, msg[1], null, result]);
+        // ASYNC SEAM: the handler may return a value OR a Promise. We always
+        // await it (via Promise.resolve, so a plain synchronous return still
+        // works), then reply [1, msgid, error, result]. nvim BLOCKS on
+        // rpcrequest, but the engine's poll() suspends via JSPI, so an async
+        // reply is fine -- the engine just waits. Without a handler we reply nil
+        // (what most UIs want). A throw / rejection becomes an RPC error so the
+        // engine's rpcrequest fails rather than hanging.
+        var msgid = msg[1];
+        var p;
+        if (requestHandler) {
+          try { p = Promise.resolve(requestHandler(msg[2], msg[3])); }
+          catch (e) { p = Promise.reject(e); }
+        } else {
+          p = Promise.resolve(null);
+        }
+        p.then(function (result) {
+          send([1, msgid, null, result === undefined ? null : result]);
+        }, function (err) {
+          send([1, msgid, String(err && err.message || err), null]);
+        });
       }
     }
 
@@ -172,6 +189,138 @@
     });
 
     return instance;
+  }
+
+  // ---- clipboard (the first ENGINE->page call) ----------------------------
+  //
+  // Background: every other call goes page->engine. The clipboard is the first
+  // call the ENGINE makes OF the page. When nvim yanks to the `+`/`*` register it
+  // invokes its clipboard PROVIDER; we wire that provider to rpcrequest()s back at
+  // this client (addressed by `instance.chan`). The client answers those requests
+  // through the async onRequest seam above:
+  //   * copy:  engine -> rpcrequest(chan, 'clipboard_set', lines, regtype)
+  //   * paste: engine -> rpcrequest(chan, 'clipboard_get')  -> [lines, regtype]
+  // nvim BLOCKS on rpcrequest, but the engine's poll() suspends via JSPI, so the
+  // client's reply may be async (e.g. navigator.clipboard.readText()).
+  //
+  // A clipboard PROVIDER is `{ get(): Promise<string|[lines,regtype]>,
+  //                            set(lines, regtype): Promise<void>|void }`.
+  // `get` may return a plain string (wrapped as [string.split('\n'), 'v']) or a
+  // [lines, regtype] pair; `set` receives (lines, regtype).
+
+  // A built-in provider backed by navigator.clipboard. If navigator.clipboard is
+  // absent (e.g. Node, or an insecure context) it does NOT throw at construction;
+  // get()/set() reject/warn so the failure surfaces as a clear RPC error rather
+  // than at install time. CAVEAT: navigator.clipboard.readText() may be denied
+  // without a user gesture (paste then yields an error to nvim).
+  function browserClipboardProvider() {
+    function clip() {
+      return (typeof navigator !== 'undefined' && navigator.clipboard) || null;
+    }
+    return {
+      get: function () {
+        var c = clip();
+        if (!c || typeof c.readText !== 'function') {
+          return Promise.reject(new Error('clipboard: navigator.clipboard.readText unavailable'));
+        }
+        return c.readText().then(function (text) {
+          return [String(text == null ? '' : text).split('\n'), 'v'];
+        });
+      },
+      set: function (lines, regtype) {
+        var c = clip();
+        var text = Array.isArray(lines) ? lines.join('\n') : String(lines == null ? '' : lines);
+        if (!c || typeof c.writeText !== 'function') {
+          if (typeof console !== 'undefined') {
+            console.warn('clipboard: navigator.clipboard.writeText unavailable; copy ignored');
+          }
+          return Promise.resolve();
+        }
+        return c.writeText(text);
+      },
+    };
+  }
+
+  // Normalise a clipboard option into a provider object. Accepts:
+  //   'browser'  -> the built-in navigator.clipboard provider
+  //   <provider> -> a custom { get, set } object (the escape hatch / embedder hook)
+  function resolveClipboardProvider(clipboard) {
+    if (clipboard === 'browser') { return browserClipboardProvider(); }
+    if (clipboard && typeof clipboard.get === 'function' && typeof clipboard.set === 'function') {
+      return clipboard;
+    }
+    throw new Error("clipboard option must be 'browser' or a { get, set } provider");
+  }
+
+  // enableClipboard(instance, provider) -- wire `provider` as the instance's
+  // clipboard. Reusable + unit-testable; exported as Neovim.enableClipboard for
+  // embedders driving createNvim() directly. Must be called AFTER the instance is
+  // ready (so instance.chan exists). It:
+  //   a. installs an onRequest handler that routes 'clipboard_get'/'clipboard_set'
+  //      to the provider and DELEGATES every other method to a caller-supplied
+  //      onRequest (if any) -- it never silently clobbers a user's handler;
+  //   b. sets g:clipboard in the engine so nvim's clipboard provider calls back
+  //      via rpcrequest(<instance.chan>, 'clipboard_get'/'clipboard_set', ...).
+  // Returns a Promise that resolves once g:clipboard is installed.
+  function enableClipboard(instance, provider, prevRequestHandler) {
+    if (instance.chan == null) {
+      throw new Error('enableClipboard: instance has no RPC channel yet (await instance.ready)');
+    }
+    // Compose: clipboard methods first, then delegate to the prior handler.
+    instance.onRequest(function (method, params) {
+      params = params || [];
+      if (method === 'clipboard_get') {
+        return Promise.resolve(provider.get()).then(function (res) {
+          // Accept a plain string (wrap as [lines, 'v']) or a [lines, regtype] pair.
+          if (typeof res === 'string') { return [res.split('\n'), 'v']; }
+          if (Array.isArray(res) && Array.isArray(res[0])) { return res; }
+          if (Array.isArray(res)) { return [res, 'v']; }   // a bare lines array
+          return [[''], 'v'];
+        });
+      }
+      if (method === 'clipboard_set') {
+        // params: [lines, regtype, reg] -- nvim passes the lines list and regtype.
+        return Promise.resolve(provider.set(params[0], params[1]));
+      }
+      if (typeof prevRequestHandler === 'function') {
+        return prevRequestHandler(method, params);
+      }
+      return null;   // unknown method, no delegate -> reply nil (as default)
+    });
+
+    // Install g:clipboard with Lua function entries that rpcrequest() back at us.
+    // nvim's provider (runtime/autoload/provider/clipboard.vim) accepts a
+    // g:clipboard dict whose copy/paste '+'/'*' entries are FUNCREFS (it checks
+    // `type(...) == v:t_func`). A Lua function assigned via vim.g.clipboard
+    // becomes a v:t_func funcref, so the provider calls it directly:
+    //   paste: s:paste[reg]()           -> our get  -> returns [lines, regtype]
+    //   copy:  s:copy[reg](lines, type) -> our set
+    // We force-reload the provider (unlet g:loaded_clipboard_provider + re-source)
+    // so it re-reads g:clipboard even if it was evaluated during startup.
+    var chan = instance.chan;
+    var lua =
+      'local chan = ...\n' +
+      'local function paste(reg)\n' +
+      '  return function()\n' +
+      '    return vim.rpcrequest(chan, "clipboard_get", reg)\n' +
+      '  end\n' +
+      'end\n' +
+      'local function copy(reg)\n' +
+      '  return function(lines, regtype)\n' +
+      '    vim.rpcrequest(chan, "clipboard_set", lines, regtype, reg)\n' +
+      '  end\n' +
+      'end\n' +
+      'vim.g.clipboard = {\n' +
+      '  name = "neovim-wasm",\n' +
+      '  copy = { ["+"] = copy("+"), ["*"] = copy("*") },\n' +
+      '  paste = { ["+"] = paste("+"), ["*"] = paste("*") },\n' +
+      '  cache_enabled = 0,\n' +
+      '}\n' +
+      // Re-source the provider so g:loaded_clipboard_provider re-evaluates against
+      // the new g:clipboard (it may have been 0 from a headless boot with no tool).
+      'pcall(function() vim.g.loaded_clipboard_provider = nil end)\n' +
+      'vim.cmd("runtime autoload/provider/clipboard.vim")\n';
+    return instance.request('nvim_exec_lua', [lua, [chan]]);
   }
 
   // Browser convenience: spawn the engine in a Web Worker (engine-worker.js) and
@@ -299,15 +448,49 @@
       });
     var instance = createNvim({ transport: transport, MessagePack: opts.MessagePack });
 
-    // A real Promise fulfilling with the DISTINCT instance once it's ready.
-    var facade = instance.ready.then(function () { return instance; });
+    // Clipboard: if requested, resolve the provider up front (so a bad option
+    // throws synchronously from create()), then install it after the instance is
+    // ready. We compose with any onRequest the caller sets on the facade BEFORE
+    // we install (clipboard methods first, then delegate), so we never clobber a
+    // user handler. Track the last user-set onRequest here.
+    var userRequestHandler = null;
+    var clipboardProvider = (opts.clipboard != null)
+      ? resolveClipboardProvider(opts.clipboard) : null;
+
+    // A real Promise fulfilling with the DISTINCT instance once it's ready, after
+    // the clipboard (if any) is wired so an awaiter gets a clipboard-ready
+    // instance. A clipboard install failure is surfaced as a status, not a reject,
+    // so the editor is still usable without clipboard.
+    var facade = instance.ready.then(function () {
+      if (!clipboardProvider) { return instance; }
+      return enableClipboard(instance, clipboardProvider, userRequestHandler)
+        .then(function () { return instance; }, function (err) {
+          if (typeof console !== 'undefined') {
+            console.warn('clipboard: failed to install g:clipboard:', err);
+          }
+          return instance;
+        });
+    });
 
     // Forward the instance's synchronous surface onto the facade so callers who
     // don't await still get the instance API directly off the create() result.
-    ['request', 'notify', 'input', 'onNotification', 'onStatus', 'onRequest',
+    ['request', 'notify', 'input', 'onNotification', 'onStatus',
      'dispose'].forEach(function (m) {
       facade[m] = function () { return instance[m].apply(instance, arguments); };
     });
+    // onRequest is intercepted so the clipboard install can compose with (rather
+    // than clobber) a user-supplied handler regardless of call order. If clipboard
+    // is already installed, re-install so the new user handler is the delegate.
+    facade.onRequest = function (fn) {
+      userRequestHandler = fn;
+      if (clipboardProvider && instance.chan != null) {
+        enableClipboard(instance, clipboardProvider, userRequestHandler);
+      } else if (!clipboardProvider) {
+        instance.onRequest(fn);
+      }
+      // else: clipboard requested but not ready yet -- the facade's ready handler
+      // above installs it with this userRequestHandler as the delegate.
+    };
     facade.ready = instance.ready;
     // `chan` is set asynchronously on the instance once ready; expose it live.
     Object.defineProperty(facade, 'chan', {
@@ -320,6 +503,7 @@
   return {
     create: create,
     createNvim: createNvim,
+    enableClipboard: enableClipboard,
     browserEngineTransport: browserEngineTransport,
     resolveEngineUrl: resolveEngineUrl,
     ByteQueue: ByteQueue,

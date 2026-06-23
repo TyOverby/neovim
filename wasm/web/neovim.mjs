@@ -57,6 +57,7 @@ function withMessagePack(opts) {
 
 export function create(opts) { return ns.create(withMessagePack(opts)); }
 export function createNvim(opts) { return ns.createNvim(withMessagePack(opts)); }
+export const enableClipboard = ns.enableClipboard;
 export const browserEngineTransport = ns.browserEngineTransport;
 export const resolveEngineUrl = ns.resolveEngineUrl;
 export const ByteQueue = ns.ByteQueue;

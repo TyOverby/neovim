@@ -225,7 +225,7 @@ The returned **instance** (also reachable synchronously off the facade):
 | `input(keys)` | Convenience for `notify('nvim_input', [keys])`. |
 | `onNotification(method, fn)` | Subscribe to a notification (e.g. `'redraw'`); `fn` gets the params array. Returns an unsubscribe fn. |
 | `onStatus(fn)` | Subscribe to out-of-band transport status (`{ kind, ... }`). Returns an unsubscribe fn. |
-| `onRequest(fn)` | Set a handler `fn(method, params)` for requests the engine makes of the client (without one, the client replies nil). |
+| `onRequest(fn)` | Set a handler `fn(method, params)` for requests the engine makes of the client (without one, the client replies nil). `fn` may return a value **or a `Promise`** — the reply is sent once it resolves; a throw/rejection becomes an RPC error (so the engine's `rpcrequest` fails rather than hanging). This async seam is what the clipboard rides on (see **Clipboard** below). |
 | `chan` | This client's RPC channel id. `null` until ready. |
 | `ready` | A `Promise` that resolves to the instance once `nvim_get_api_info` round-trips (and `chan` is set). |
 | `dispose()` | Tear down the transport / engine and reject in-flight requests. |
@@ -288,6 +288,63 @@ autocmd id, `group` the augroup id, `name` the generated notification name, and
 `unsubscribe()` removes the notification handler **and** deletes the augroup (so
 the engine stops firing the rpcnotify); it returns a Promise and is idempotent.
 
+#### Clipboard (`create({ clipboard })`)
+
+By default the wasm engine has **no clipboard tool** (no `xclip`/`pbcopy`/… in
+the browser), so the `+`/`*` registers don't reach the system clipboard. The
+`clipboard` option wires them to one — it is the first place the **engine calls
+back into the page** (every other call is page → engine):
+
+* when nvim yanks/copies to `+`/`*`, the engine `rpcrequest`s the client
+  `clipboard_set(lines, regtype)`;
+* when nvim pastes from `+`/`*`, it `rpcrequest`s `clipboard_get()` and expects
+  `[lines, regtype]` back.
+
+Both ride the async `onRequest` seam above, so the client's reply may be a
+`Promise` (e.g. `navigator.clipboard.readText()`); the engine's `poll()` suspends
+via JSPI while it waits, so blocking `rpcrequest` is fine.
+
+```js
+// Built-in: back the +/* registers with the browser's system clipboard.
+const nvim = await Neovim.create({ args: ['-n'], clipboard: 'browser' });
+
+// Or supply your own provider (the escape hatch; also how it's tested headlessly):
+const nvim2 = await Neovim.create({
+  args: ['-n'],
+  clipboard: {
+    async get()            { return [['hello'], 'v']; },  // or just return 'hello'
+    async set(lines, type) { /* persist lines somewhere */ },
+  },
+});
+```
+
+| `clipboard` value | Meaning |
+|---|---|
+| `'browser'` | Use a built-in provider backed by `navigator.clipboard`. It is **guarded**: if `navigator.clipboard` is absent (Node, or an insecure/non-HTTPS context) it does not throw at install — `set` warns and is a no-op, `get` rejects, so the failure surfaces as a clear console warning / RPC error, not a crash. |
+| `<provider>` | A custom object `{ get(): Promise<string \| [lines, regtype]>, set(lines, regtype): Promise<void> \| void }`. `get` may return a plain string (wrapped as `[string.split('\n'), 'v']`) or a `[lines, regtype]` pair; `set` receives the yanked `lines` array and `regtype`. This is the embedder hook **and** what makes the seam testable without `navigator`. |
+
+`create({ clipboard })` **composes** with — never clobbers — a user `onRequest`:
+the install routes `clipboard_get`/`clipboard_set` to the provider first and
+**delegates every other method** to whatever you pass to `nvim.onRequest(fn)`
+(in either call order). Internally it sets `g:clipboard` in the engine with Lua
+function entries that `rpcrequest(<chan>, 'clipboard_get'/'clipboard_set', …)`
+back at the client (nvim's clipboard provider accepts funcref `copy`/`paste`
+entries), and force-reloads the provider so it re-reads `g:clipboard`.
+
+For embedders driving the lower-level `createNvim()` directly, the install is
+also exported as `Neovim.enableClipboard(instance, provider[, delegateOnRequest])`
+(ESM: `enableClipboard`) — call it **after** `instance.ready` (it needs
+`instance.chan`); it returns a Promise that resolves once `g:clipboard` is set.
+
+> **`navigator.clipboard` caveats (browser).** Reading the clipboard
+> (`readText()`, used by paste) may require a **user gesture** and the
+> `clipboard-read` permission, and can be **denied** in the background — in which
+> case paste from `+`/`*` yields an error to nvim. Writing (`writeText()`, used by
+> copy) is generally allowed after a gesture. Both need a **secure context**
+> (HTTPS or `localhost`). The headless e2e test uses the custom in-memory provider
+> (Node has no `navigator`); the `'browser'` path must be smoke-tested in a real
+> browser.
+
 ### Planned API
 
 The snippet below is the longer-term vision for the embedding API. Parts of it
@@ -296,8 +353,9 @@ run today — each feature is annotated with its current status. ESM `import`,
 **`env` / `cwd` / `filesystem`** runtime config, **`plugins`** (runtime-bundle
 selection), and **`neovim-utils.js`** (the `open_file_in_editor` /
 `read_file` / `write_file` / `create_autocmd` / `add_notify_handler` /
-`on_autocmd` **free functions** — see "Available today") now ship. Still planned:
-the `clipboard` option and the renderer's `font_family` / `font_size`. Note the
+`on_autocmd` **free functions** — see "Available today") and the **`clipboard`**
+option (see "Clipboard" above) now ship. Still planned: the renderer's
+`font_family` / `font_size` (and auto-resize). Note the
 helpers ship as free functions `helper(instance, ...)`, **not** as instance
 methods (`instance.helper(...)`) — the snippet below uses the planned-method
 shape, but the real calls are the free-function form. Same-origin-only is the one remaining ESM gap: `import` works,
@@ -336,7 +394,8 @@ const instance = await neovim.create({
   filesystem: { "/bar/foo.txt": "content of /bar/foo.txt" },
   // SHIPS TODAY: environment overrides applied on top of the defaults.
   env: { "HOME": "/bar" },
-  // PLANNED: not implemented.
+  // SHIPS TODAY: back the +/* registers with the system clipboard via
+  // navigator.clipboard (or pass a custom { get, set } provider). See "Clipboard".
   clipboard: "browser"
 });
 

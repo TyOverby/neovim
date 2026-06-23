@@ -299,6 +299,82 @@ async function main() {
   const reFired = await waitFor(function () { return fired !== null; }, 1000);
   ok(!reFired, 'on_autocmd unsubscribe() stops further notifications');
 
+  // ---- async onRequest seam + clipboard (engine -> page calls) ---------------
+  // These exercise the FIRST direction where the engine makes requests OF the
+  // client. Node has no navigator.clipboard, so we use a CUSTOM in-memory
+  // provider -- which is also the embedder escape hatch the seam exists for.
+
+  // 14. async onRequest seam: register an async handler that resolves a value
+  //     after a tick, have the engine rpcrequest it, and assert the engine got
+  //     the AWAITED value (proving we await the handler's Promise before replying).
+  nvim.onRequest(function (method, params) {
+    if (method === 'ping') {
+      return new Promise(function (res) { setTimeout(function () { res('pong:' + params[0]); }, 30); });
+    }
+    if (method === 'boom') {
+      return Promise.reject(new Error('handler-rejected'));
+    }
+    return null;
+  });
+  const pong = await nvim.request('nvim_exec_lua',
+    ['return vim.rpcrequest(..., "ping", "hi")', [nvim.chan]]);
+  ok(pong === 'pong:hi',
+     "async onRequest: engine rpcrequest('ping') gets the awaited Promise value (got " + JSON.stringify(pong) + ')');
+
+  // 15. a rejecting onRequest handler -> the engine's rpcrequest FAILS (does not
+  //     hang). nvim_exec_lua should reject because vim.rpcrequest errored.
+  let boomRejected = false;
+  try {
+    await nvim.request('nvim_exec_lua', ['return vim.rpcrequest(..., "boom")', [nvim.chan]]);
+  } catch (e) {
+    boomRejected = true;
+  }
+  ok(boomRejected, 'a rejecting onRequest handler makes the engine rpcrequest fail (does not hang)');
+
+  // ---- clipboard round-trip via the in-memory provider -----------------------
+  // An in-memory clipboard store + provider. set() records the call; get()
+  // returns the seeded contents. enableClipboard composes this with the onRequest
+  // handler we set above (clipboard methods first, then delegate to 'ping'/'boom').
+  let store = { lines: ['seeded-paste'], regtype: 'v' };
+  let lastSet = null;
+  const memProvider = {
+    get: function () { return [store.lines, store.regtype]; },
+    set: function (lines, regtype) { lastSet = { lines: lines, regtype: regtype }; store = { lines: lines, regtype: regtype }; },
+  };
+  // The prior onRequest (ping/boom) must keep working after enableClipboard, so
+  // pass it as the delegate.
+  const priorHandler = function (method, params) {
+    if (method === 'ping') {
+      return new Promise(function (res) { setTimeout(function () { res('pong:' + params[0]); }, 30); });
+    }
+    if (method === 'boom') { return Promise.reject(new Error('handler-rejected')); }
+    return null;
+  };
+  await Neovim.enableClipboard(nvim, memProvider, priorHandler);
+  // unnamedplus so yanks/`getreg('+')` route through the provider naturally.
+  await nvim.request('nvim_set_option_value', ['clipboard', 'unnamedplus', {}]);
+
+  // 16. clipboard COPY: drive nvim to set the `+` register; assert provider.set
+  //     was called with the expected lines (engine -> rpcrequest('clipboard_set')).
+  await nvim.request('nvim_call_function', ['setreg', ['+', 'hello-clip']]);
+  const sawSet = await waitFor(function () { return lastSet !== null; }, 5000);
+  ok(sawSet, "clipboard COPY: setreg('+', ...) invokes provider.set (engine rpcrequested clipboard_set)");
+  ok(sawSet && Array.isArray(lastSet.lines) && lastSet.lines.join('\n').indexOf('hello-clip') >= 0,
+     'clipboard COPY: provider.set received the yanked lines (got ' + JSON.stringify(lastSet && lastSet.lines) + ')');
+
+  // 17. clipboard PASTE: seed the store, read `+` back from the engine; assert it
+  //     returns the seeded contents (engine -> rpcrequest('clipboard_get') -> us).
+  store = { lines: ['paste-me-back'], regtype: 'v' };
+  const pasted = await nvim.request('nvim_call_function', ['getreg', ['+']]);
+  ok(pasted === 'paste-me-back',
+     "clipboard PASTE: getreg('+') returns the provider's seeded contents (got " + JSON.stringify(pasted) + ')');
+
+  // 18. the prior onRequest delegate still works after enableClipboard composed
+  //     over it (clipboard methods first, then delegate).
+  const pong2 = await nvim.request('nvim_exec_lua',
+    ['return vim.rpcrequest(..., "ping", "again")', [nvim.chan]]);
+  ok(pong2 === 'pong:again', 'enableClipboard composes with (does not clobber) the prior onRequest (ping still works)');
+
   // 9. Lifecycle: when the engine goes away, the core must observe EOF and tear
   // down. This is the path the browser relies on (engine-worker posts
   // {kind:'exit'} -> transport.onClose -> the core closes). We simulate the
