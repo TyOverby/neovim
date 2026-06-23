@@ -1,3 +1,111 @@
+# neovim.js
+
+__IMPORTANT__: This section is _aspirational_.  Not all of it
+has been implemented yet, but it describes the end goal of the project.
+
+`neovim.js` is a distribution of neovim that has been compiled to
+wasm/javascript in order to run in a browser.  Unlike other project that host a
+[Gui for neovim](https://neovim.io/doc/user/gui/) in the browser (with the guts
+of neovim still running on a computer somewhere), `neovim.js` runs the entire
+editor in the browser, removing the need to host a native server somewhere, and
+the per-keystroke network round-trip that it entails.
+
+There are three ways to use `neovim.js`: 
+
+* As a standalone javascript library  
+* As a chrome extension  
+* As a hosted application
+
+In all of these cases, the core neovim instance is run in a webworker, and can
+be controlled by routing [neovim RPC calls](https://neovim.io/doc/user/api/#RPC) 
+over [postMessage](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage).
+
+## As a library
+
+Web app authors who want a good text editing component can embed neovim
+directly in their application.  This can be a headless neovim instance with a
+custom UI layer, or use our default UI renderer.
+
+```js
+// core neovim api
+import neovim from 'https://tyoverby.com/neovim.js';
+
+// utilities for hooking up a neovim instance to a dom element
+import { mount_into } from 'https://tyoverby.com/neovim_ui.js';
+
+// misc utilities that build on top of the core neovim api
+import { open_file_in_editor } from 'https://tyoverby.com/neovim_utils.js';
+
+// create an instance of neovim.  Under the hood, it's building a web-worker and hooking up
+// the RPC mechanism via postmessage.
+const instance = await neovim.create({
+  // load all of the plugins that neovim ships with
+  plugins: 'full',
+  // set the directory that neovim opens up inside of
+  cwd: "/bar",
+  // specify or override the files in the filesystem with new content
+  filesystem: { "/bar/foo.txt": "content of /bar/foo.txt" },
+  // override environment variables
+  env: { "HOME": "/bar" },
+  // use the browser's clipboard
+  clipboard: "browser"
+});
+
+// open this file in the editor
+await open_file_in_editor(instance, "/bar/foo.txt");
+
+const notification_name = "file_saved";
+
+// add an autocommand that will notify us whenever a file is saved.
+await instance.create_autocmd(["BufWritePost"], {
+    "pattern": ["*"],
+    "group": "MyPlugin",
+    "command": `call rpcnotify(${instance.chan}, '${notification_name}', expand('<afile>:p'), bufnr('%'))`
+});
+
+// add a handler for the file save notification
+await instance.add_notify_handler('file_saved', async function ([filename]) {
+  // Read the contents off the file system
+  let contents = await instance.read_file(filename);
+  alert(filename + " has been saved: " + contents);
+});
+
+// stick the editor in the dom
+const ui = await mount_into(instance, document.querySelector(".code-container", {
+  font_family: "monospace",
+  font_size: 16,
+});
+```
+
+You have the full power of the neovim RPC API, and can even build extensions as
+an embedder, allowing neovim to seamlessly communicate with the rest of your
+application.
+
+## As a chrome extension
+
+Have you ever been on a webpage and wished that a textarea on the page was
+neovim instead?  Now you don't have to!  With a single keybinding, you can
+replace a textarea with a full vim, copying the current contents of the
+textarea into a vim buffer, and write back into the textarea with `:w`.
+
+The vim instance that the page uses is actually a long-lived extension-owned
+web-worker, so startup time is minimized, and the users `vimrc` can be
+configured and follow them around between sites.
+
+## As a standalone application
+
+The most ambitious part of the project, the standalone `neovim.js` application
+is designed to be a full replacement for running neovim on a remote server.
+With a standard neovim setup, typing responsiveness is tied to the latency of
+your connection to the machine that is running neovim, so if you're renting a
+computer half way around the world, the experience is borderline unusable.  But
+with the standalone `neovim.js` application, you start the server on a remote
+machine, and visit the page that it's hosting.  Because the entire vim engine
+is local to your browser, text editing and plugin execution is lightning fast.
+Filesystem access, network connections, shells, LSP servers, commands, and
+PTY's are all transparently proxied through the server, so they run for real on
+the system that you care about.
+
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
 This directory contains everything needed to cross-compile Neovim to WebAssembly
@@ -157,10 +265,10 @@ browser uses:
 ```
    main thread (UI client)              worker (engine)
    ┌─────────────────────┐             ┌──────────────────────┐
-   │ terminal in/out      │  msgpack    │ nvim --embed (wasm)  │
-   │ TUI render + input ──┼──RPC────────┼─> editor             │
-   └─────────┬───────────┘ postMessage  └──────────┬───────────┘
-             └──────────────────────────────────────┘
+   │ terminal in/out     │  msgpack    │ nvim --embed (wasm)  │
+   │ TUI render + input ─┼──RPC────────┼─> editor             │
+   └─────────┬───────────┘ postMessage └──────────┬───────────┘
+             └────────────────────────────────────┘
 ```
 
 - The engine **does not block**. nvim's `poll()` suspends asynchronously via JSPI
@@ -185,8 +293,8 @@ needs no cross-origin isolation.
 ```
    page main thread (wasm/web/ui.js)            Web Worker (engine-worker.js)
    ┌───────────────────────────────┐ postMessage ┌──────────────────────────┐
-   │ keydown → nvim_input  ─────────┼────────────▶│ nvim --embed (wasm)      │
-   │ redraw  → char grid → <pre> ◀──┼─────────────┤ editor + ext_linegrid    │
+   │ keydown → nvim_input  ────────┼────────────▶│ nvim --embed (wasm)      │
+   │ redraw  → char grid → <pre> ◀─┼─────────────┤ editor + ext_linegrid    │
    └───────────────────────────────┘             └──────────────────────────┘
        pure JS, no wasm, no JSPI                   poll() suspends via JSPI
 ```
