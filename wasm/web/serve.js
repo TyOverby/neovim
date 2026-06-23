@@ -37,7 +37,10 @@ const TYPES = {
 
 function resolve(urlPath) {
   if (urlPath === '/' || urlPath === '') { return path.join(WEB, 'index.html'); }
-  if (urlPath === '/nvim.js' || urlPath === '/nvim.wasm' || urlPath === '/nvim.data') {
+  // Engine assets live in build-wasm/bin: nvim.js/.wasm and the per-variant
+  // runtime packages nvim-<variant>.data + nvim-<variant>.data.js (loaders).
+  if (urlPath === '/nvim.js' || urlPath === '/nvim.wasm' ||
+      /^\/nvim(-(full|core|minimal))?\.data(\.js)?$/.test(urlPath)) {
     return path.join(BUILD, urlPath);
   }
   if (urlPath === '/msgpack.min.js') { return MSGPACK; }

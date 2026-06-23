@@ -802,10 +802,16 @@ if(EMSCRIPTEN)
     # Run in Node (worker_thread engine / builtin-TUI client) AND in the browser
     # (Web Worker engine driven by a pure-JS UI on the page). One binary, both.
     -sENVIRONMENT=node,web,worker
-    # The browser has no host filesystem, so bundle $VIMRUNTIME into MEMFS. Under
-    # Node the preloaded copy also wins (pre.js skips the /usr NODEFS mount). The
-    # data lands in nvim.data next to nvim.js/.wasm.
-    --preload-file=${PROJECT_SOURCE_DIR}/runtime@/usr/share/nvim/runtime
+    # NOTE: the $VIMRUNTIME is intentionally NOT baked in here with --preload-file.
+    # nvim.wasm is RUNTIME-AGNOSTIC: --preload-file only ever emitted a separate
+    # nvim.data + a data-package loader baked into nvim.js, never anything in the
+    # .wasm. The runtime is now packaged OUT-OF-BAND by wasm/build-nvim.sh, which
+    # runs emscripten's file_packager over a staged runtime subtree to produce one
+    # (nvim-<variant>.data + nvim-<variant>.data.js loader) pair PER variant
+    # (full/core/minimal), all sharing this one nvim.wasm. A host loads the chosen
+    # variant's loader before nvim.js (browser: engine-worker.js importScripts; Node:
+    # see wasm/worker.js), so main() waits on the data via a run-dependency. This
+    # makes runtime variants free (no per-variant relink). See wasm/README.md.
     # Runs before everything (incl. the data-package loader): point locateFile at
     # nvim.js's dir under Node so nvim.data resolves from any cwd. --pre-js is too
     # late for this (the loader computes the path at the very top).

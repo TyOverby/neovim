@@ -9,13 +9,20 @@
 # with RELATIVE paths and `.nojekyll` is dropped, mirroring build-site.sh, so the
 # bundle works under any base path / subpath.
 #
-#   Usage:  wasm/web/build-lib.sh [output-dir] [version]
+#   Usage:  wasm/web/build-lib.sh [output-dir] [version] [--variant <name>]
 #             output-dir  default: <repo>/_lib
 #             version     default: derived from CMakeLists.txt (NVIM_VERSION_*),
 #                         else 0.0.0. Pass an explicit semver to override.
+#             --variant   which runtime bundle to ship: full (default) | core |
+#                         minimal. The shared nvim.wasm + the chosen variant's
+#                         (nvim-<variant>.data + loader) are copied as plain
+#                         nvim.data / nvim.data.js so the worker loads them with no
+#                         per-embedder config. (Pass --variant all to ship every
+#                         variant under its nvim-<variant>.* name instead, for an
+#                         embedder that wants to select via create({ plugins }).)
 #
-# Prereqs: a finished `wasm/build-nvim.sh` (provides build-wasm/bin/nvim.{js,wasm,
-# data}) and `npm install` under wasm/web (provides @msgpack/msgpack).
+# Prereqs: a finished `wasm/build-nvim.sh` (provides build-wasm/bin/nvim.{js,wasm}
+# + nvim-<variant>.data/.data.js) and `npm install` under wasm/web (@msgpack).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,7 +30,23 @@ WEB="${ROOT}/wasm/web"
 BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 MSGPACK_ESM="${WEB}/node_modules/@msgpack/msgpack/dist.esm"
+
+# Parse args: positional [output-dir] [version] plus an optional --variant <name>.
+VARIANT="full"
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --variant) VARIANT="${2:-}"; shift 2 ;;
+    --variant=*) VARIANT="${1#--variant=}"; shift ;;
+    *) POS+=("$1"); shift ;;
+  esac
+done
+set -- "${POS[@]+"${POS[@]}"}"
 OUT="${1:-${ROOT}/_lib}"
+case "${VARIANT}" in
+  full|core|minimal|all) ;;
+  *) echo "invalid --variant '${VARIANT}' (full|core|minimal|all)"; exit 1 ;;
+esac
 
 # --- version: explicit arg > CMakeLists NVIM_VERSION_* > 0.0.0 ----------------
 VERSION="${2:-}"
@@ -41,8 +64,15 @@ fi
 VERSION="${VERSION:-0.0.0}"
 
 # --- preconditions (same guard shape as build-site.sh) -----------------------
-for f in "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${BUILD}/nvim.data"; do
+# Which runtime variants to ship: a single one, or all three for create({plugins}).
+if [ "${VARIANT}" = "all" ]; then SHIP_VARIANTS=(full core minimal); else SHIP_VARIANTS=("${VARIANT}"); fi
+for f in "${BUILD}/nvim.js" "${BUILD}/nvim.wasm"; do
   [ -f "$f" ] || { echo "missing $f (run wasm/build-nvim.sh first)"; exit 1; }
+done
+for v in "${SHIP_VARIANTS[@]}"; do
+  for f in "${BUILD}/nvim-${v}.data" "${BUILD}/nvim-${v}.data.js"; do
+    [ -f "$f" ] || { echo "missing $f (run wasm/build-nvim.sh first)"; exit 1; }
+  done
 done
 [ -f "${MSGPACK}" ] || { echo "missing ${MSGPACK} (run: cd wasm/web && npm install)"; exit 1; }
 [ -f "${MSGPACK_ESM}/index.mjs" ] || { echo "missing ${MSGPACK_ESM}/index.mjs (run: cd wasm/web && npm install)"; exit 1; }
@@ -62,13 +92,27 @@ cp "${MSGPACK}" "${OUT}/msgpack.min.js"
 # that index.mjs imports. (.d.ts/.map are optional; keep them, they're harmless.)
 mkdir -p "${OUT}/msgpack.esm"
 cp -R "${MSGPACK_ESM}/." "${OUT}/msgpack.esm/"
-# engine wasm assets (resolved relative to the worker at runtime; see neovim.js)
-cp "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${BUILD}/nvim.data" "${OUT}/"
+# engine wasm assets (resolved relative to the worker at runtime; see neovim.js):
+# the shared nvim.wasm + nvim.js, plus the chosen runtime variant(s) under their
+# nvim-<variant>.data / nvim-<variant>.data.js names. engine-worker.js loads
+# nvim-<plugins>.data.js (default plugins='full'); a single non-full bundle is
+# selected by the embedder with create({ plugins: '<variant>' }).
+cp "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${OUT}/"
+for v in "${SHIP_VARIANTS[@]}"; do
+  cp "${BUILD}/nvim-${v}.data" "${BUILD}/nvim-${v}.data.js" "${OUT}/"
+done
 
 # --- generated package.json (npm-publishable / importable) -------------------
 # `main` -> the UMD core (require()/bundlers); `exports` map -> the ESM entry
 # points so `import` resolves to the .mjs wrappers, with the renderer under a
-# subpath. `files` is implicit (publish the whole flat dir).
+# subpath. `files` is implicit (publish the whole flat dir). The shipped runtime
+# variant package(s) are exported under their nvim-<variant>.data(.js) names.
+VARIANT_EXPORTS=""
+for v in "${SHIP_VARIANTS[@]}"; do
+  VARIANT_EXPORTS="${VARIANT_EXPORTS}
+    \"./nvim-${v}.data\": \"./nvim-${v}.data\",
+    \"./nvim-${v}.data.js\": \"./nvim-${v}.data.js\","
+done
 cat > "${OUT}/package.json" <<JSON
 {
   "name": "neovim-wasm",
@@ -90,8 +134,7 @@ cat > "${OUT}/package.json" <<JSON
     },
     "./engine-worker.js": "./engine-worker.js",
     "./nvim.js": "./nvim.js",
-    "./nvim.wasm": "./nvim.wasm",
-    "./nvim.data": "./nvim.data",
+    "./nvim.wasm": "./nvim.wasm",${VARIANT_EXPORTS}
     "./msgpack.min.js": "./msgpack.min.js",
     "./msgpack.esm/": "./msgpack.esm/"
   },
@@ -102,8 +145,18 @@ JSON
 # Serve every file verbatim under static hosts (mirror build-site.sh).
 touch "${OUT}/.nojekyll"
 
-echo "==> Library bundle assembled in ${OUT} (version ${VERSION})"
+echo "==> Library bundle assembled in ${OUT} (version ${VERSION}, runtime variant: ${VARIANT})"
 ls -la "${OUT}"
+if [ "${VARIANT}" = "all" ]; then
+  SELECT_HINT="// all three variants shipped; pick one (default 'full'):
+  const nvim = create({ baseUrl: '/lib/', plugins: 'core', args: ['-n'] });"
+elif [ "${VARIANT}" = "full" ]; then
+  SELECT_HINT="// 'full' is the default; no plugins option needed.
+  const nvim = create({ baseUrl: '/lib/', args: ['-n'] });"
+else
+  SELECT_HINT="// this bundle ships only the '${VARIANT}' runtime; select it:
+  const nvim = create({ baseUrl: '/lib/', plugins: '${VARIANT}', args: ['-n'] });"
+fi
 cat <<USAGE
 
 Import from the bundle (host it under any same-origin path, e.g. /lib/):
@@ -111,7 +164,7 @@ Import from the bundle (host it under any same-origin path, e.g. /lib/):
   // ESM -- no separate msgpack wiring needed; neovim.mjs bundles the ESM build.
   import { create } from '/lib/neovim.mjs';
   import { mount_into } from '/lib/neovim-ui.mjs';
-  const nvim = create({ baseUrl: '/lib/', args: ['-n'] });
+  ${SELECT_HINT}
   await nvim.ready;
 
   // or UMD via <script> (sets globalThis.Neovim / globalThis.NeovimUI):
@@ -119,7 +172,7 @@ Import from the bundle (host it under any same-origin path, e.g. /lib/):
   // <script src="/lib/neovim.js"></script>
   // <script src="/lib/neovim-ui.js"></script>
 
-baseUrl makes engine-worker.js, nvim.js, nvim.wasm and nvim.data all resolve
-under that path. NOTE: new Worker() is same-origin only, so baseUrl may be a
-subpath of the page's origin but not a different-origin CDN (yet).
+baseUrl makes engine-worker.js, nvim.js, nvim.wasm and the nvim-<variant>.data
+package all resolve under that path. NOTE: new Worker() is same-origin only, so
+baseUrl may be a subpath of the page's origin but not a different-origin CDN (yet).
 USAGE

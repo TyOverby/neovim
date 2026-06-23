@@ -33,7 +33,8 @@ with whether it is live yet.
 The browser library ships two ways: as UMD modules (`neovim.js`, `neovim-ui.js`)
 loaded via `<script>` tags (exactly as `wasm/web/index.html` does), or as ESM
 entry points (`neovim.mjs`, `neovim-ui.mjs`) you `import`. Both must be served
-alongside the engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm`/`nvim.data`).
+alongside the engine assets (`engine-worker.js`, `nvim.js`/`nvim.wasm` plus a
+runtime package `nvim-<variant>.data`/`.data.js` — see **Runtime bundles**).
 The UMD path also needs the `@msgpack/msgpack` UMD loaded as a `<script>` (the
 `globalThis.MessagePack` global); the ESM path needs **no separate msgpack
 wiring** — `neovim.mjs` resolves `@msgpack/msgpack` itself (the bundled ESM build,
@@ -109,11 +110,12 @@ export, so you can `import` instead of using `<script>` globals:
 import { create } from './neovim.mjs';        // or '/lib/neovim.mjs'
 import { mount_into } from './neovim-ui.mjs';
 
-// `baseUrl` makes engine-worker.js + nvim.js/.wasm/.data all resolve under that
-// path (with or without a trailing slash). The engine worker is created with
-// `new Worker(baseUrl + 'engine-worker.js')`; it then `importScripts('nvim.js')`
-// relative to its own URL, and Emscripten resolves nvim.wasm/nvim.data relative
-// to nvim.js — so the whole chain follows `baseUrl` with no extra wiring.
+// `baseUrl` makes engine-worker.js + nvim.js/.wasm + the nvim-<variant>.data
+// package all resolve under that path (with or without a trailing slash). The
+// engine worker is created with `new Worker(baseUrl + 'engine-worker.js')`; it
+// then `importScripts('nvim-<variant>.data.js')` and `importScripts('nvim.js')`
+// relative to its own URL, and Emscripten resolves nvim.wasm relative to nvim.js
+// — so the whole chain follows `baseUrl` with no extra wiring.
 // (`new Worker` is same-origin only, so `baseUrl` may be a subpath of the page's
 // origin but not yet a different-origin CDN.) `engineUrl` overrides `baseUrl`.
 const nvim = create({ args: ['-n'], baseUrl: '/lib/' });
@@ -154,16 +156,59 @@ getter), so you can keep using it synchronously without awaiting — subscribe t
 exactly as before. (Internally the facade is a real `Promise` that fulfills with
 the *distinct* instance, so awaiting it never deadlocks.)
 
-`env`, `cwd`, and `filesystem` are optional **runtime config** applied before the
-engine's `main()` runs (they ride the engine worker's init message → `pre.js`).
-They take effect only on the default browser worker path, not when you supply your
-own `transport`:
+`env`, `cwd`, `filesystem`, and `plugins` are optional **runtime config** applied
+before the engine's `main()` runs (they ride the engine worker's init message →
+`pre.js`). They take effect only on the default browser worker path, not when you
+supply your own `transport`:
 
 | Option | Meaning |
 |---|---|
 | `env: { KEY: 'val', ... }` | Environment overrides applied on top of the defaults (`HOME`, `TERM`, …). Caller values win — set arbitrary vars or override `HOME`. |
 | `filesystem: { '/abs/path': contents, ... }` | Seed files into the in-memory wasm FS before boot. Missing parent dirs are created. `contents` is a string (or a `Uint8Array` for binary). Lets a browser embedder open files with no host FS. |
 | `cwd: '/abs/path'` | `chdir` into this directory after the filesystem is seeded (so a cwd inside a `filesystem` dir works). Fails soft — a missing dir is logged and the default cwd is kept. |
+| `plugins: 'full' \| 'core' \| 'minimal'` | Selects which **runtime bundle** the engine loads (default `'full'`). All three share one `nvim.wasm`; they differ only in the `nvim-<variant>.data` package the engine worker loads. See **Runtime bundles** below. An unknown value throws from `create()`. |
+
+#### Runtime bundles (the `plugins` option)
+
+`nvim.wasm` is **runtime-agnostic** — it bakes in *no* `$VIMRUNTIME`. The runtime
+ships separately as one Emscripten `file_packager` data package per variant
+(`nvim-<variant>.data` + a small `nvim-<variant>.data.js` loader), and the engine
+worker loads the chosen one **before** `nvim.js`, unpacking it into the in-memory
+FS at `/usr/share/nvim/runtime`. Because the `.wasm` is shared, switching variants
+costs no recompile and no relink — only a different `(data + loader)` pair.
+
+| `plugins` | Contents | Approx `.data` size |
+|---|---|---|
+| `'full'` (default) | The complete runtime — today's behavior, unchanged. | ~22 MB |
+| `'core'` | Boots + edits + filetype detection + indent + a **curated** syntax-highlighting slice for common languages (`autoload/`, `colors/`, `compiler/`, `keymap/`, `ftplugin/`, `indent/`, the whole `pack/`, and ~40 hand-picked `syntax/` languages). Drops `doc/`, `tutor/`, `spell/`, treesitter `queries/`, and the bulk of `syntax/`. | ~8.7 MB |
+| `'minimal'` | Strictly the boot/edit essentials: `lua/` (the `vim.*` stdlib — **mandatory**, nvim will not boot without it), `plugin/`, `scripts/`, `filetype.lua`, plus the tiny `syntax/` *framework* (`syntax.vim`/`synload.vim`/… ~16 KB) so nvim's default `syntax on` succeeds — with **no language files** so nothing is actually highlighted. No `ftplugin/`, no `indent/`, no `doc/`. | ~3.1 MB |
+
+The variants are staged and packaged by `wasm/build-nvim.sh` (which defines the
+exact file-inclusion lists). The exact subset is therefore a build artifact, not a
+runtime toggle — `plugins` only selects *which already-built package* to load.
+
+**Each variant must boot clean.** A staged subset has to start (under `-n`, i.e.
+plugins loaded) with no startup `E###` error and no "Press ENTER" prompt — a
+prompt blocks all subsequent RPC, making the variant unusable. Two traps the
+trimmed variants navigate: (1) `plugin/netrwPlugin.vim` and `plugin/matchit.vim`
+`packadd` packages from `pack/`, so **core ships the whole `pack/`** while
+**minimal drops those two plugin scripts**; (2) nvim's default `syntax on` sources
+`syntax/syntax.vim`, so even no-highlighting **minimal still ships the syntax
+framework**. `build-nvim.sh` enforces this with a **headless boot gate**: it points
+`$VIMRUNTIME` at each staged variant, boots `nvim -n --headless` under an isolated
+empty `$HOME`, and fails the build if the captured `:messages`/stderr contain any
+`E###` or a hit-enter prompt.
+
+> **Under Node** the `plugins` option is moot: there is no data package at all.
+> `nvim.js`'s Node host reads the runtime straight from the on-disk `runtime/`
+> tree via the NODEFS mount (`pre.js` points `$VIMRUNTIME` at `../../runtime`),
+> so Node always has the full runtime. The data packages are a browser concern.
+
+To **ship a single variant** in a redistributable bundle, pass it to
+`build-lib.sh`: `wasm/web/build-lib.sh _lib --variant minimal` copies the shared
+`nvim.wasm` + the chosen `nvim-minimal.data`/`.data.js` and tells you to select it
+with `create({ plugins: 'minimal' })`. `--variant all` ships all three so the
+embedder can switch at runtime; the default is `full`.
 
 (`Neovim.createNvim({ transport, MessagePack })` is the lower-level,
 transport-supplied entry point used by the Node e2e test. It returns a **plain
@@ -195,11 +240,11 @@ headless use.
 
 The snippet below is the longer-term vision for the embedding API. Parts of it
 run today — each feature is annotated with its current status. ESM `import`,
-`baseUrl`, the `build-lib.sh` bundle, an **awaitable `create()`**, and the
-**`env` / `cwd` / `filesystem`** runtime config now ship (see "Available today").
-Still planned: the `plugins` (runtime-bundle selection) and `clipboard` options,
-`neovim_utils.js`, and the `create_autocmd` / `add_notify_handler` / `read_file`
-instance methods. Same-origin-only is the one remaining ESM gap: `import` works,
+`baseUrl`, the `build-lib.sh` bundle, an **awaitable `create()`**, the
+**`env` / `cwd` / `filesystem`** runtime config, and **`plugins`** (runtime-bundle
+selection) now ship (see "Available today"). Still planned: the `clipboard`
+option, `neovim_utils.js`, and the `create_autocmd` / `add_notify_handler` /
+`read_file` instance methods. Same-origin-only is the one remaining ESM gap: `import` works,
 but `new Worker()` (and thus `baseUrl`) can't point at a different-origin CDN yet
 — `https://tyoverby.com/neovim.js` from a different origin needs a Blob-bootstrap
 shim that isn't built.
@@ -221,8 +266,9 @@ import { open_file_in_editor } from 'https://tyoverby.com/neovim_utils.js';
 // returns an awaitable promise-facade). The synchronous pattern still works too:
 // `const nvim = neovim.create({...}); await nvim.ready;`
 const instance = await neovim.create({
-  // PLANNED: selects between differently-packaged `nvim.data` runtime bundles
-  // (a full runtime vs. a smaller core set). NOT about toggling `-u NONE`.
+  // SHIPS TODAY: selects which packaged runtime bundle the engine loads --
+  // 'full' (default) | 'core' | 'minimal', all sharing one nvim.wasm. NOT about
+  // toggling `-u NONE`. See "Runtime bundles" above.
   plugins: 'full',
   // SHIPS TODAY: chdir into this dir after the filesystem is seeded.
   cwd: "/bar",
@@ -417,14 +463,14 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | File | Purpose |
 |---|---|
 | `build-deps.sh` | Cross-compile the bundled dependencies to wasm. |
-| `build-nvim.sh` | Configure + build nvim to wasm; install the Node engine host (`worker.js`). |
+| `build-nvim.sh` | Configure + build nvim to wasm; install the Node engine host (`worker.js`); stage + `file_packager` the three runtime variants (`nvim-{full,core,minimal}.data` + loaders). |
 | `shim.h` | Force-included into every emcc compile (`EMCC_CFLAGS`); small libc gap fills (pthread thread-name stubs). |
 | `uv_stubs.c` | libuv / libc functions the Emscripten builds omit (sys-info, `uv_exepath`, `sched_*`, `pthread_*_np`). Linked into nvim only for wasm. |
-| `extern-pre.js` | Emscripten `--extern-pre-js` (runs before everything): under Node, points `locateFile` at nvim.js's dir so the preloaded `nvim.data` resolves from any cwd. |
-| `pre.js` | Emscripten `--pre-js`: argv, the postMessage-channel global, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS; browser path uses the preloaded runtime in MEMFS. |
+| `extern-pre.js` | Emscripten `--extern-pre-js` (runs before everything): under Node, points `locateFile` at nvim.js's dir so a data package resolves from any cwd. |
+| `pre.js` | Emscripten `--pre-js`: argv, the postMessage-channel global, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS and points `$VIMRUNTIME` at the on-disk `runtime/` tree (no data package needed); browser path uses the runtime unpacked into MEMFS by the variant's `file_packager` loader. |
 | `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll` and the postMessage-backed channel stream ops for the engine's fd 0/1. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
-| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle), `e2e.test.js` (headless end-to-end test over a Node worker engine). Uses `@msgpack/msgpack` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless end-to-end test over a Node worker engine). Uses `@msgpack/msgpack` (npm). |
 | `stage1.md` / `stage2.md` / `stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
@@ -438,8 +484,10 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
   upstream, so it otherwise builds with no I/O backend.
 - `src/nvim/CMakeLists.txt` — one `if(EMSCRIPTEN)` block: link `uv_stubs.c`,
   the JSPI / `FORCE_FILESYSTEM` + `nodefs.js` / `SUPPORT_LONGJMP=wasm` link flags,
-  `ENVIRONMENT=node,web,worker`, `--preload-file` of the runtime into MEMFS,
-  `--extern-pre-js`, `--pre-js`, `--js-library`.
+  `ENVIRONMENT=node,web,worker`, `--extern-pre-js`, `--pre-js`, `--js-library`.
+  The runtime is deliberately **not** `--preload-file`'d here — `nvim.wasm` is
+  runtime-agnostic and the runtime is packaged out-of-band per variant by
+  `build-nvim.sh` (see **Runtime bundles**).
 - `src/nvim/channel.c` — for the engine's `nvim --embed` channel, skip the
   embedded dup/redirect dance on Emscripten (fd 0/1 are virtual postMessage
   streams, not real pipes; no child to protect them from).
@@ -510,13 +558,16 @@ needs no cross-origin isolation.
   JSPI module, so the *browser* must support JSPI (Chrome ≥ 137).
 - **No special headers** — postMessage needs no `SharedArrayBuffer`, so the page
   does not have to be cross-origin isolated; it runs on any static host as-is.
-- **Filesystem** — no host FS, so `$VIMRUNTIME` is preloaded into MEMFS at build
-  time (see below). `-u NONE -i NONE` by default (no config, no shada).
+- **Filesystem** — no host FS, so `$VIMRUNTIME` is unpacked into MEMFS by the
+  selected runtime variant's `file_packager` data package, loaded before `nvim.js`
+  (see **Runtime bundles** / the `plugins` option). `-u NONE -i NONE` by default
+  (no config, no shada).
 - **Testing hook** — `window.nvim.input(keys)`, `.gridText()`, `.resize(c,r)` and
   `.state()` are exposed for driving/asserting from automation or the console.
 
 `stage3.md` records the design, what shipped, and the remaining browser follow-ups
-(trim the ~22 MB preloaded runtime, live resize, IDBFS for real files).
+(live resize, IDBFS for real files). The runtime size is now addressed by the
+`plugins` variants (full / core / minimal — see **Runtime bundles**).
 
 ### Filesystem: MEMFS + NODEFS (not NODERAWFS)
 
@@ -525,9 +576,14 @@ The wasm build uses MEMFS with a NODEFS mount of the host filesystem (set up in
 makes purely-virtual fds (the in-worker engine channel, the client's RPC fds)
 impossible. With MEMFS the channel fds are first-class virtual streams backed by
 the postMessage channel (`nvim_io.js`), while real files stay reachable through
-the NODEFS mount. In the **browser** there is no host FS, so `$VIMRUNTIME`
-is bundled into MEMFS at build time (`--preload-file runtime@/usr/share/nvim/runtime`,
-shipped as `nvim.data`) and `pre.js` skips the NODEFS mounts — same channel ops.
+the NODEFS mount. Under **Node** the runtime itself comes from that NODEFS mount:
+`nvim.wasm` no longer bakes the runtime in, so `pre.js` points `$VIMRUNTIME` at the
+on-disk `runtime/` tree (`../../runtime`, reachable via the `/home` mount). In the
+**browser** there is no host FS, so the runtime is unpacked into MEMFS at
+`/usr/share/nvim/runtime` by the selected variant's `file_packager` package
+(`nvim-<variant>.data` + loader, loaded before `nvim.js`); `pre.js` skips the
+NODEFS mounts — same channel ops. The data package's loader registers a
+run-dependency, so the engine's `main()` waits for the unpack.
 
 ## Known limitations
 

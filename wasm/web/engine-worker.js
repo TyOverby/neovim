@@ -7,12 +7,23 @@
 // so the page needs no COOP/COEP / cross-origin isolation.
 //
 // Protocol with the page:
-//   page -> worker:  first message {args, env, cwd, filesystem}  (init); then
-//                    ArrayBuffers (RPC input)
+//   page -> worker:  first message {args, env, cwd, filesystem, plugins} (init);
+//                    then ArrayBuffers (RPC input)
 //   worker -> page:  ArrayBuffers (RPC output); {kind:'booting'|'stdout'|'stderr'
 //                    |'exit'} status objects
+//
+// Runtime VARIANTS (the create({plugins}) option): nvim.wasm is runtime-agnostic,
+// so the runtime ships as a separate file_packager data package per variant
+// (nvim-<variant>.data + nvim-<variant>.data.js loader). The loader unpacks the
+// runtime into MEMFS at /usr/share/nvim/runtime and, crucially, registers a
+// run-dependency (addRunDependency / preRun) on `self.Module`, so nvim's main()
+// waits for the data before it runs. We MUST importScripts the loader BEFORE
+// nvim.js, and self.Module must already exist so the loader's
+// `var Module = typeof Module != 'undefined' ? Module : {}` binds to OUR Module
+// (the same one nvim.js then uses) rather than a throwaway object.
 'use strict';
 
+var VARIANTS = { full: 1, core: 1, minimal: 1 };
 var started = false;
 
 onmessage = function (e) {
@@ -44,7 +55,21 @@ onmessage = function (e) {
     self.Module.printErr = function (s) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
     self.Module.onExit = function () { try { postMessage({ kind: 'exit' }); } catch (_e) {} };
 
+    // Runtime variant: default 'full'. create() already validates this, but guard
+    // here too since the worker can be driven directly.
+    var variant = init.plugins || 'full';
+    if (!VARIANTS[variant]) {
+      postMessage({ kind: 'error', error: "unknown plugins variant '" + variant +
+        "' (expected 'full', 'core', or 'minimal')" });
+      return;
+    }
+
     postMessage({ kind: 'booting' });
+    // Load the variant's data-package loader FIRST (it registers a run-dependency
+    // on self.Module + a preRun that unpacks the runtime into MEMFS), THEN nvim.js
+    // (which sees the dependency and waits for the data before main()). Both
+    // resolve relative to this worker's URL, i.e. under the bundle's baseUrl.
+    importScripts('nvim-' + variant + '.data.js');
     importScripts('nvim.js');   // boots the engine; main() runs the libuv loop
     return;
   }

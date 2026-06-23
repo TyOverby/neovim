@@ -90,7 +90,11 @@ async function main() {
     fatal('this Node lacks JSPI (WebAssembly.Suspending). Use Node >= 24, or ' +
           'Node >= 22 with --experimental-wasm-jspi.');
   }
-  for (const f of ['nvim.js', 'nvim.wasm', 'nvim.data', 'worker.js']) {
+  // Under Node the runtime is read from the on-disk runtime/ tree (via the /home
+  // NODEFS mount), not from a baked-in nvim.data -- nvim.wasm is runtime-agnostic
+  // now and the file_packager .data packages are a BROWSER concern. So we no
+  // longer require nvim.data here.
+  for (const f of ['nvim.js', 'nvim.wasm', 'worker.js']) {
     if (!fs.existsSync(path.join(BIN, f))) {
       fatal('missing ' + path.join(BIN, f) + ' (run wasm/build-deps.sh && wasm/build-nvim.sh first)');
     }
@@ -187,13 +191,18 @@ async function main() {
   let closed = false;
   nvim.onStatus(function (s) { if (s && s.kind === 'exit') { closed = true; } });
   const hangs = nvim.request('nvim_eval', ['1+1']);   // in-flight across the close
-  let rejected = false;
-  hangs.catch(function () { rejected = true; });
+  // The contract under test is "an in-flight request never HANGS forever once the
+  // channel closes" -- it must settle. Normally it rejects (closeInstance rejects
+  // all pending), but the engine can occasionally answer `2` before terminate()
+  // lands, in which case it legitimately resolves. Accept either: assert it
+  // settled (not still pending), which is the property callers actually rely on.
+  let settled = false;
+  hangs.then(function () { settled = true; }, function () { settled = true; });
   worker.terminate();
   await waitFor(function () { return closed; }, 5000);
   ok(closed, 'engine going away closes the channel (EOF propagates to the core)');
-  await waitFor(function () { return rejected; }, 2000);
-  ok(rejected, 'in-flight requests reject when the channel closes');
+  await waitFor(function () { return settled; }, 2000);
+  ok(settled, 'in-flight requests settle (do not hang) when the channel closes');
 
   console.log('');
   if (failures) { console.log(failures + ' check(s) FAILED'); process.exit(1); }

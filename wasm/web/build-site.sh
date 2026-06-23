@@ -16,7 +16,10 @@ BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 OUT="${1:-${ROOT}/_site}"
 
-for f in "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${BUILD}/nvim.data"; do
+# Shared engine + the three runtime-variant packages (full/core/minimal). The
+# demo ships all three so it can switch via create({ plugins }) in the browser.
+for f in "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" \
+         "${BUILD}/nvim-full.data" "${BUILD}/nvim-full.data.js"; do
   [ -f "$f" ] || { echo "missing $f (run wasm/build-nvim.sh first)"; exit 1; }
 done
 [ -f "${MSGPACK}" ] || { echo "missing ${MSGPACK} (run: cd wasm/web && npm install)"; exit 1; }
@@ -29,8 +32,15 @@ cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" "${WEB}/app.js" 
    "${WEB}/engine-worker.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
-# wasm artifacts
-cp "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${BUILD}/nvim.data" "${OUT}/"
+# wasm artifacts: the shared engine + every runtime variant present (so the demo
+# can switch full/core/minimal). full is required (checked above); core/minimal
+# are copied if built.
+cp "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${OUT}/"
+for v in full core minimal; do
+  if [ -f "${BUILD}/nvim-${v}.data" ]; then
+    cp "${BUILD}/nvim-${v}.data" "${BUILD}/nvim-${v}.data.js" "${OUT}/"
+  fi
+done
 
 # Tell GitHub Pages not to run Jekyll, so it serves every file verbatim. The
 # transport is postMessage, so no COOP/COEP headers are needed — any static host

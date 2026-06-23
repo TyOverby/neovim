@@ -191,6 +191,9 @@
       env: config.env,
       cwd: config.cwd,
       filesystem: config.filesystem,
+      // Runtime bundle variant. engine-worker.js loads nvim-<plugins>.data.js
+      // before nvim.js. Default 'full'.
+      plugins: config.plugins,
     };
     var worker = new Worker(engineUrl);
     var t = {
@@ -246,7 +249,11 @@
   // The README-facing entry point: build a browser engine transport and a core
   // instance over it.
   //   opts: { args, baseUrl, engineUrl, transport, MessagePack,
-  //           env, cwd, filesystem }
+  //           env, cwd, filesystem, plugins }
+  // `plugins` selects the runtime bundle ('full' (default) | 'core' | 'minimal');
+  // all share one nvim.wasm and differ only in which nvim-<variant>.data the
+  // engine worker loads. It is validated here and only applies on the default
+  // browser worker path (with a caller-supplied `transport` it has no effect).
   // env/cwd/filesystem are the runtime config (see wasm/README.md): they are
   // carried in the engine worker's init message and applied by pre.js before the
   // engine's main() runs. With a caller-supplied `transport` they have no effect
@@ -267,14 +274,28 @@
   // build the facade from `instance.ready` (which already fulfills with the
   // instance) and never make the instance itself thenable. createNvim() stays a
   // plain synchronous instance and is intentionally NOT wrapped.
+  // Runtime bundle variants (the `plugins` option). nvim.wasm is shared across
+  // all of them; each is a different (nvim-<variant>.data + loader) pair:
+  //   full    - the complete runtime (default).
+  //   core    - trimmed: boot + edit + filetype/indent + a curated syntax slice.
+  //   minimal - strictly the boot/edit essentials (no syntax/ftplugin/doc).
+  var PLUGIN_VARIANTS = { full: 1, core: 1, minimal: 1 };
+
   function create(opts) {
     opts = opts || {};
+    // Validate `plugins` up front so a typo fails loudly here, not after the
+    // worker silently 404s on a missing nvim-<typo>.data.js.
+    if (opts.plugins != null && !PLUGIN_VARIANTS[opts.plugins]) {
+      throw new Error("Neovim.create: unknown plugins variant '" + opts.plugins +
+        "' (expected 'full', 'core', or 'minimal')");
+    }
     var transport = opts.transport ||
       browserEngineTransport(resolveEngineUrl(opts), {
         args: opts.args || [],
         env: opts.env,
         cwd: opts.cwd,
         filesystem: opts.filesystem,
+        plugins: opts.plugins,
       });
     var instance = createNvim({ transport: transport, MessagePack: opts.MessagePack });
 

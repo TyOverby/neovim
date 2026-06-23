@@ -19,9 +19,25 @@
   var isNode = (typeof process !== 'undefined' &&
                 process.versions && process.versions.node);
 
-  // Runtime lives at this MEMFS path in every target: under emcc it is
-  // --preload-file'd there; under Node the NODEFS mounts below skip /usr so the
-  // preloaded copy is the one that wins.
+  // Where $VIMRUNTIME lives. nvim.wasm no longer bakes the runtime in via
+  // --preload-file (it is RUNTIME-AGNOSTIC; see src/nvim/CMakeLists.txt). The two
+  // targets get the runtime differently:
+  //
+  //   * BROWSER: there is no host FS, so a file_packager data package
+  //     (nvim-<variant>.data + its loader) is loaded BEFORE nvim.js and unpacks
+  //     the runtime into MEMFS at /usr/share/nvim/runtime. So the browser default
+  //     stays /usr/share/nvim/runtime.
+  //
+  //   * NODE: the file_packager loader can't be used here -- loaded as a separate
+  //     module under require()/importScripts, its top-line
+  //     `var Module = typeof Module != 'undefined' ? Module : {}` resolves to a
+  //     fresh throwaway object (Emscripten's own `var Module` shadows any we set),
+  //     so its addRunDependency()/preRun would never reach the engine's Module.
+  //     But Node doesn't need it: the real runtime/ tree is already on disk and
+  //     reachable through the /home NODEFS mount below. So under Node we point
+  //     VIMRUNTIME at the on-disk runtime/ next to the build (build-wasm/bin ->
+  //     ../../runtime), giving every Node host (the launcher, wasm/worker.js, the
+  //     e2e test) the full runtime with zero per-host wiring and no .data at all.
   var VIMRUNTIME = '/usr/share/nvim/runtime';
 
   var args = [];
@@ -34,6 +50,15 @@
     }
     if (process.env.VIMRUNTIME) {
       VIMRUNTIME = process.env.VIMRUNTIME;
+    } else {
+      // Default to the on-disk runtime/ tree, resolved relative to nvim.js's dir
+      // (build-wasm/bin) -> ../../runtime. It is reachable inside the wasm FS via
+      // the /home NODEFS mount set up in preRun below. An explicit $VIMRUNTIME
+      // (or a host passing __nvimEnv.VIMRUNTIME) still wins.
+      try {
+        var pth = require('path');
+        VIMRUNTIME = pth.resolve(__dirname, '..', '..', 'runtime');
+      } catch (e) { /* keep the /usr default if __dirname/path are unavailable */ }
     }
   }
 
@@ -80,6 +105,13 @@
         var NODEFS = FS.filesystems.NODEFS;
         var roots = ['/home', '/etc', '/opt', '/var', '/root', '/mnt',
                      '/tmp', '/srv', '/run'];
+        // Ensure the on-disk VIMRUNTIME (default ../../runtime) is reachable even
+        // if the checkout lives outside the roots above: mount its top-level dir.
+        // (The runtime now comes from disk under Node, not a baked-in nvim.data.)
+        try {
+          var vrTop = '/' + String(VIMRUNTIME).split('/').filter(Boolean)[0];
+          if (vrTop !== '/' && roots.indexOf(vrTop) === -1) { roots.push(vrTop); }
+        } catch (e) { /* fall back to the fixed roots */ }
         for (var r = 0; r < roots.length; r++) {
           var d = roots[r];
           try {
