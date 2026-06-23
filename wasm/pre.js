@@ -4,8 +4,8 @@
 // configures things Emscripten does not derive on its own:
 //   * argv: under Node, the `node nvim.js -- <nvim args>` convention; in any
 //     environment, a host may override argv via globalThis.__nvimArgs.
-//   * a shared-memory RPC channel (globalThis.__nvimServerChannel), for the
-//     engine role (see wasm/nvim_io.js).
+//   * a postMessage RPC channel (globalThis.__nvimChannel), for the engine role
+//     (see wasm/nvim_io.js).
 //   * $VIMRUNTIME + a minimal environment (Emscripten's ENV does not inherit
 //     the host environment).
 //
@@ -44,9 +44,8 @@
     if (globalThis.__nvimArgs) {
       args = globalThis.__nvimArgs;
     }
-    if (globalThis.__nvimServerChannel) {
-      Module['nvimServerChannel'] = globalThis.__nvimServerChannel;
-      Module['nvimCanBlockSync'] = !!globalThis.__nvimCanBlockSync;
+    if (globalThis.__nvimChannel) {
+      Module['nvimChannel'] = globalThis.__nvimChannel;
     }
   }
   Module['arguments'] = args;
@@ -54,6 +53,8 @@
   // mutating Module['arguments'] in place before user code runs.
   Module['nvimUserArgs'] = args.slice();
   Module['thisProgram'] = '/usr/bin/nvim';
+  // (locateFile for the preloaded nvim.data is set in wasm/extern-pre.js, which
+  // runs before the data-package loader; --pre-js would be too late.)
 
   Module['preRun'] = Module['preRun'] || [];
   Module['preRun'].push(function () {

@@ -25,18 +25,15 @@ rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
 # Page + UI (flat, relative-path references)
-cp "${WEB}/index.html" "${WEB}/ui.js" "${WEB}/engine-worker.js" \
-   "${WEB}/coi-serviceworker.js" "${OUT}/"
-# SAB transport (lives one level up, shared with the Node target)
-cp "${ROOT}/wasm/sab.js" "${OUT}/"
+cp "${WEB}/index.html" "${WEB}/ui.js" "${WEB}/engine-worker.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
 # wasm artifacts
 cp "${BUILD}/nvim.js" "${BUILD}/nvim.wasm" "${BUILD}/nvim.data" "${OUT}/"
 
-# Tell GitHub Pages not to run Jekyll (which would drop files and ignore the
-# leading-underscore data file is fine, but Jekyll can interfere) and to serve
-# everything verbatim.
+# Tell GitHub Pages not to run Jekyll, so it serves every file verbatim. The
+# transport is postMessage, so no COOP/COEP headers are needed — any static host
+# works as-is.
 touch "${OUT}/.nojekyll"
 
 echo "==> Site assembled in ${OUT}"

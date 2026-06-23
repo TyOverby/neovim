@@ -1,10 +1,9 @@
 // wasm/web/serve.js - Dev server for the browser build.
 //
-// SharedArrayBuffer requires the page to be "cross-origin isolated", which means
-// every response must carry COOP + COEP headers. This tiny static server adds
-// them and resolves the three kinds of asset from where they actually live:
+// The transport is postMessage (not SharedArrayBuffer), so the page needs NO
+// special headers — this is a plain static server, the same as any host would
+// be. It just resolves the kinds of asset from where they live in the tree:
 //   * page assets (index.html, ui.js, engine-worker.js)  -> wasm/web/
-//   * the SAB transport (sab.js)                          -> wasm/
 //   * the msgpack UMD bundle (msgpack.min.js)             -> node_modules
 //   * the wasm build artifacts (nvim.js/.wasm/.data)      -> build-wasm/bin/
 //
@@ -40,7 +39,6 @@ function resolve(urlPath) {
   if (urlPath === '/nvim.js' || urlPath === '/nvim.wasm' || urlPath === '/nvim.data') {
     return path.join(BUILD, urlPath);
   }
-  if (urlPath === '/sab.js') { return path.join(WASM, 'sab.js'); }
   if (urlPath === '/msgpack.min.js') { return MSGPACK; }
   // Everything else from wasm/web, but never escape it.
   const p = path.normalize(path.join(WEB, urlPath));
@@ -48,8 +46,6 @@ function resolve(urlPath) {
 }
 
 http.createServer(function (req, res) {
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   res.setHeader('Cache-Control', 'no-store');
 
   const urlPath = decodeURIComponent(req.url.split('?')[0]);

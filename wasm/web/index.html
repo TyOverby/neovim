@@ -4,12 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Neovim (wasm) — grid UI</title>
-<!-- Make the page cross-origin isolated (so SharedArrayBuffer works) on static
-     hosts that can't send COOP/COEP headers, e.g. GitHub Pages. A no-op when the
-     headers are already present (the dev server, wasm/web/serve.js, sends them).
-     Must load first: on the very first visit it registers a service worker and
-     reloads once. -->
-<script src="coi-serviceworker.js"></script>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -48,8 +42,7 @@
     msgpack-RPC client rendering the <code>ext_linegrid</code> grid. Click the grid, then type.
   </div>
 
-  <!-- order matters: globals (RingChannel, MessagePack) before the UI -->
-  <script src="sab.js"></script>
+  <!-- order matters: the MessagePack global before the UI -->
   <script src="msgpack.min.js"></script>
   <script src="ui.js"></script>
 </body>

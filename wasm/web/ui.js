@@ -1,16 +1,16 @@
 // wasm/web/ui.js - Browser UI client for Neovim (main thread, pure JS).
 //
-// This is the "custom UI in JavaScript" half of the browser port. It runs on
-// the page's main thread and speaks msgpack-RPC to the engine wasm, which lives
-// in engine-worker.js. There is NO wasm and NO JSPI on this side: the engine
-// (in the Worker) blocks synchronously on the SharedArrayBuffer, while we drive
-// it asynchronously here.
+// The "custom UI in JavaScript" half of the browser port. It runs on the page's
+// main thread and speaks msgpack-RPC to the engine wasm in engine-worker.js over
+// plain postMessage. There is NO wasm, NO JSPI, and NO SharedArrayBuffer on this
+// side, so the page does not need to be cross-origin isolated -- it works on any
+// static host.
 //
 //   page (this file)                         Worker (engine-worker.js)
-//   ┌───────────────────────────┐    SAB     ┌────────────────────────┐
-//   │ keydown -> nvim_input  ────┼───ring────▶│ nvim --embed (wasm)    │
-//   │ <pre> grid  ◀── redraw ────┼───ring─────┤ editor + linegrid UI   │
-//   └───────────────────────────┘            └────────────────────────┘
+//   ┌───────────────────────────┐  postMessage ┌────────────────────────┐
+//   │ keydown -> nvim_input  ────┼────────────▶│ nvim --embed (wasm)    │
+//   │ <pre> grid  ◀── redraw ────┼─────────────┤ editor + linegrid UI   │
+//   └───────────────────────────┘             └────────────────────────┘
 //
 // We attach with ext_linegrid and render the single global grid (grid 1) as a
 // plain monospace character grid into a <pre>, with no fg/bg colouring (only a
@@ -21,11 +21,9 @@
 
 (function () {
   var COLS = 80, ROWS = 24;
-  var CAP = 1 << 20;             // 1 MiB per ring direction
 
   var statusEl = document.getElementById('status');
   var preEl = document.getElementById('screen');
-
   function setStatus(s) { if (statusEl) { statusEl.textContent = s; } }
 
   // ---- grid model ---------------------------------------------------------
@@ -47,11 +45,7 @@
 
   // ---- redraw event handlers ---------------------------------------------
   var handlers = {
-    grid_resize: function (a) {
-      // [grid, width, height]
-      cols = a[1]; rows = a[2];
-      grid = makeGrid(cols, rows);
-    },
+    grid_resize: function (a) { cols = a[1]; rows = a[2]; grid = makeGrid(cols, rows); },
     grid_clear: function () { clearGrid(); },
     grid_cursor_goto: function (a) { cursor.row = a[1]; cursor.col = a[2]; },
     grid_line: function (a) {
@@ -87,8 +81,7 @@
   function handleRedraw(batches) {
     for (var i = 0; i < batches.length; i++) {
       var batch = batches[i];
-      var name = batch[0];
-      var fn = handlers[name];
+      var fn = handlers[batch[0]];
       if (!fn) { continue; }              // ignore hl/mode/msg/etc. events
       for (var j = 1; j < batch.length; j++) { fn(batch[j]); }
     }
@@ -116,76 +109,78 @@
     preEl.innerHTML = out.join('\n');
   }
 
-  // ---- RPC transport ------------------------------------------------------
-  var made = RingChannel.create(CAP);
-  var sab = made.sab;
-  var channel = new RingChannel(sab, CAP, 'client'); // out=page->engine, in=engine->page
+  // ---- RPC transport (postMessage) ---------------------------------------
+  var worker = new Worker('engine-worker.js');
   var nextMsgId = 1;
   var pending = {};   // msgid -> {resolve, reject}
 
-  // Write a whole buffer to the out-ring, yielding if it fills up.
-  function writeAll(bytes) {
-    return new Promise(function (resolve) {
-      var off = 0;
-      function step() {
-        off += channel.out.write(bytes, off, bytes.length - off);
-        if (off >= bytes.length) { resolve(); return; }
-        setTimeout(step, 0);   // ring full; let the engine drain
-      }
-      step();
-    });
+  function send(value) {
+    // Standalone copy so we can transfer the buffer (zero-copy structured clone).
+    var ab = MessagePack.encode(value).slice().buffer;
+    worker.postMessage(ab, [ab]);
   }
   function request(method, params) {
     var id = nextMsgId++;
     var p = new Promise(function (resolve, reject) { pending[id] = { resolve: resolve, reject: reject }; });
-    writeAll(MessagePack.encode([0, id, method, params]));
+    send([0, id, method, params]);
     return p;
   }
-  function notify(method, params) {
-    return writeAll(MessagePack.encode([2, method, params]));
-  }
+  function notify(method, params) { send([2, method, params]); }
 
   function onMessage(msg) {
     if (!Array.isArray(msg)) { return; }
     var type = msg[0];
-    if (type === 1) {
-      // response: [1, msgid, error, result]
+    if (type === 1) {                       // response: [1, msgid, error, result]
       var h = pending[msg[1]];
       if (h) { delete pending[msg[1]]; if (msg[2]) { h.reject(msg[2]); } else { h.resolve(msg[3]); } }
-    } else if (type === 2) {
-      // notification: [2, method, params]
+    } else if (type === 2) {                // notification: [2, method, params]
       if (msg[1] === 'redraw') { handleRedraw(msg[2]); }
-    } else if (type === 0) {
-      // request from engine: [0, msgid, method, params] - none expected; reply nil.
-      writeAll(MessagePack.encode([1, msg[1], null, null]));
+    } else if (type === 0) {                // request from engine -> reply nil
+      send([1, msg[1], null, null]);
     }
   }
 
-  // Async generator: pull whole chunks off the in-ring as they arrive.
-  function ringChunks(ring) {
-    return (async function* () {
-      for (;;) {
-        var n = ring.available();
-        if (n === 0) {
-          if (ring.isClosed()) { return; }
-          await ring.waitReadableAsync();      // Atomics.waitAsync wake
-          n = ring.available();
-          if (n === 0) { if (ring.isClosed()) { return; } else { continue; } }
-        }
-        var buf = new Uint8Array(n);
-        ring.read(buf, 0, n);
-        yield buf;
-      }
-    })();
-  }
+  // A tiny async-iterable byte queue: worker.onmessage pushes RPC chunks in,
+  // @msgpack/msgpack's decodeMultiStream pulls whole values out (handling msgpack
+  // messages split across postMessage boundaries).
+  function ByteQueue() { this._items = []; this._waiters = []; this._done = false; }
+  ByteQueue.prototype.push = function (u8) {
+    if (this._waiters.length) { this._waiters.shift()({ value: u8, done: false }); }
+    else { this._items.push(u8); }
+  };
+  ByteQueue.prototype.close = function () {
+    this._done = true;
+    while (this._waiters.length) { this._waiters.shift()({ value: undefined, done: true }); }
+  };
+  ByteQueue.prototype[Symbol.asyncIterator] = function () {
+    var self = this;
+    return {
+      next: function () {
+        if (self._items.length) { return Promise.resolve({ value: self._items.shift(), done: false }); }
+        if (self._done) { return Promise.resolve({ value: undefined, done: true }); }
+        return new Promise(function (res) { self._waiters.push(res); });
+      },
+    };
+  };
+  var inbox = new ByteQueue();
+
+  worker.onmessage = function (e) {
+    var d = e.data;
+    if (d instanceof ArrayBuffer) { inbox.push(new Uint8Array(d)); return; }
+    if (d && d.kind === 'booting') { setStatus('engine booting (loading wasm + runtime)…'); }
+    else if (d && (d.kind === 'stdout' || d.kind === 'stderr')) { console.log('[engine ' + d.kind + ']', d.text); }
+    else if (d && d.kind === 'exit') { setStatus('engine exited'); inbox.close(); }
+  };
+  worker.onerror = function (e) {
+    console.error('worker error', e);
+    setStatus('worker error: ' + (e.message || (e.filename + ':' + e.lineno)));
+  };
 
   async function receiveLoop() {
     try {
-      for await (var msg of MessagePack.decodeMultiStream(ringChunks(channel.in))) {
-        onMessage(msg);
-      }
-    } catch (e) {
-      console.error('receive loop error', e);
+      for await (var msg of MessagePack.decodeMultiStream(inbox)) { onMessage(msg); }
+    } catch (err) {
+      console.error('receive loop error', err);
     }
     setStatus('engine exited');
   }
@@ -217,9 +212,7 @@
     if (alt) { mods += 'A-'; }
     if (e.shiftKey && special) { mods += 'S-'; }
 
-    if (!mods && !special) {
-      return base === '<' ? '<lt>' : base;     // plain printable
-    }
+    if (!mods && !special) { return base === '<' ? '<lt>' : base; }
     var inner = base === '<' ? 'lt' : base;
     return '<' + mods + inner + '>';
   }
@@ -239,24 +232,9 @@
   // ---- boot ---------------------------------------------------------------
   function boot() {
     setStatus('starting engine worker…');
-    var worker = new Worker('engine-worker.js');
-    worker.onmessage = function (e) {
-      var d = e.data || {};
-      if (d.kind === 'stdout' || d.kind === 'stderr') {
-        console.log('[engine ' + d.kind + ']', d.text);
-      } else if (d.kind === 'booting') {
-        setStatus('engine booting (loading wasm + runtime)…');
-      }
-    };
-    worker.onerror = function (e) {
-      console.error('worker error', e);
-      setStatus('worker error: ' + (e.message || e.filename + ':' + e.lineno));
-    };
-    worker.postMessage({ sab: sab, cap: CAP, args: ['-u', 'NONE', '-i', 'NONE'] });
-
     receiveLoop();
     installKeyboard();
-
+    worker.postMessage({ args: ['-u', 'NONE', '-i', 'NONE'] });   // init the engine
     request('nvim_ui_attach', [COLS, ROWS, { rgb: true, ext_linegrid: true }])
       .then(function () { setStatus('attached — click the grid and type'); })
       .catch(function (err) { setStatus('ui_attach failed: ' + JSON.stringify(err)); });
@@ -267,17 +245,10 @@
     input: function (keys) { return notify('nvim_input', [keys]); },
     request: request,
     resize: function (c, r) { return request('nvim_ui_try_resize', [c, r]); },
-    gridText: function () {
-      return grid.map(function (line) { return line.join(''); }).join('\n');
-    },
+    gridText: function () { return grid.map(function (line) { return line.join(''); }).join('\n'); },
     cursor: cursor,
     state: function () { return { cols: cols, rows: rows, cursor: cursor }; },
   };
 
-  if (!self.crossOriginIsolated) {
-    setStatus('NOT cross-origin isolated — SharedArrayBuffer unavailable. ' +
-              'Serve with COOP/COEP (use wasm/web/serve.js).');
-    return;
-  }
   boot();
 })();

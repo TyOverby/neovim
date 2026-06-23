@@ -68,9 +68,9 @@ echo "==> Building nvim_bin (the executable; runtime bundling handled separately
 cmake --build "${BUILD}" --target nvim_bin
 
 # Ship the JS runtime helpers next to nvim.js (pre.js/nvim_io.js are already
-# linked into nvim.js; these are the shared-memory client/worker harness).
+# linked into nvim.js; worker.js is the Node engine host the TUI client spawns).
 echo "==> Installing JS helpers next to nvim.js"
-cp "${ROOT}/wasm/sab.js" "${ROOT}/wasm/worker.js" "${ROOT}/wasm/demo-rpc.js" "${BUILD}/bin/"
+cp "${ROOT}/wasm/worker.js" "${BUILD}/bin/"
 cp "${ROOT}/wasm/nvim" "${BUILD}/bin/nvim"
 chmod +x "${BUILD}/bin/nvim"
 
@@ -87,6 +87,6 @@ fi
 
 echo "==> Done."
 echo "    Headless / RPC:   node ${BUILD}/bin/nvim.js -- <nvim args>"
-echo "    Shared-mem demo:  (cd ${BUILD}/bin && node demo-rpc.js)"
+echo "    Interactive TUI:  ${BUILD}/bin/nvim file.txt"
 echo "    Browser grid UI:  node ${ROOT}/wasm/web/serve.js   # then open http://localhost:8000/"
 ls -la "${BUILD}/bin/" || true

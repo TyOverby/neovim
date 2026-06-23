@@ -2,33 +2,46 @@
 //
 // The browser analogue of wasm/worker.js. Hosts the Neovim engine wasm
 // (`nvim --embed`) directly in this Worker and backs its stdin/stdout (fd 0/1)
-// with a shared-memory RingChannel (wasm/sab.js). The page never shares
-// anything with the engine except the SharedArrayBuffer; all RPC flows through
-// it. Off the main thread the engine may block in poll() via Atomics.wait.
+// with a postMessage channel to the page (wasm/nvim_io.js installs the stream
+// ops). The page and the engine only ever exchange messages -- no shared memory,
+// so the page needs no COOP/COEP / cross-origin isolation.
+//
+// Protocol with the page:
+//   page -> worker:  first message {args}  (init); then ArrayBuffers (RPC input)
+//   worker -> page:  ArrayBuffers (RPC output); {kind:'booting'|'stdout'|'stderr'
+//                    |'exit'} status objects
 'use strict';
 
-// sab.js defines the global RingChannel (it has a browser branch).
-importScripts('sab.js');
+var started = false;
 
 onmessage = function (e) {
-  var d = e.data || {};
-  // 'server' role: out = engine->page ring, in = page->engine ring.
-  var channel = new RingChannel(d.sab, d.cap, 'server');
+  if (!started) {
+    started = true;
+    var args = (e.data && e.data.args) || [];
 
-  // pre.js reads these globals before the module boots (Emscripten's own
-  // `var Module` shadows a Module we might set, so we use plain globals).
-  self.__nvimServerChannel = channel;
-  self.__nvimCanBlockSync = true;             // off main thread: Atomics.wait OK
-  self.__nvimArgs = ['--embed'].concat(d.args || []);
+    // The channel object wasm/nvim_io.js reads (Module.nvimChannel).
+    var channel = {
+      inQueue: [],
+      closed: false,
+      notify: null,
+      postOutput: function (u8) { postMessage(u8.buffer, [u8.buffer]); },
+    };
+    self.__nvimChannel = channel;
+    self.__nvimArgs = ['--embed'].concat(args);
 
-  // Surface engine stdout/stderr (panics, messages) back to the page console.
-  self.Module = self.Module || {};
-  self.Module.print = function (s) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
-  self.Module.printErr = function (s) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
+    // Surface engine stdout/stderr + exit back to the page.
+    self.Module = self.Module || {};
+    self.Module.print = function (s) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
+    self.Module.printErr = function (s) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
+    self.Module.onExit = function () { try { postMessage({ kind: 'exit' }); } catch (_e) {} };
 
-  // Booting the (non-MODULARIZE) Emscripten module starts the engine. main()
-  // then runs the libuv loop forever on this thread, blocking in Atomics.wait
-  // between events, so importScripts('nvim.js') effectively never returns.
-  postMessage({ kind: 'booting' });
-  importScripts('nvim.js');
+    postMessage({ kind: 'booting' });
+    importScripts('nvim.js');   // boots the engine; main() runs the libuv loop
+    return;
+  }
+
+  // After init, every message is RPC input bytes (a transferred ArrayBuffer).
+  var ch = self.__nvimChannel;
+  ch.inQueue.push({ buf: new Uint8Array(e.data), off: 0 });
+  if (ch.notify) { ch.notify(); }
 };

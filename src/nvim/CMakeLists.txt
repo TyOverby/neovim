@@ -790,9 +790,9 @@ if(EMSCRIPTEN)
     # Filesystem: use MEMFS (the default in-memory FS) with a NODEFS mount of the
     # host filesystem (set up in wasm/pre.js). Unlike NODERAWFS, this keeps fd 0/1
     # as first-class *virtual* streams, which is what lets wasm/nvim_io.js back
-    # them with the SharedArrayBuffer RPC channel (the engine runs in a worker
-    # with no real stdin/stdout). NODEFS still gives access to $VIMRUNTIME and
-    # real files. See wasm/stage2.md.
+    # them with the postMessage RPC channel (the engine runs in a worker with no
+    # real stdin/stdout). NODEFS still gives access to $VIMRUNTIME and real files.
+    # See wasm/stage2.md.
     -sFORCE_FILESYSTEM=1
     -lnodefs.js
     -sALLOW_MEMORY_GROWTH=1
@@ -806,13 +806,17 @@ if(EMSCRIPTEN)
     # Node the preloaded copy also wins (pre.js skips the /usr NODEFS mount). The
     # data lands in nvim.data next to nvim.js/.wasm.
     --preload-file=${PROJECT_SOURCE_DIR}/runtime@/usr/share/nvim/runtime
-    # Boot-time JS that configures argv, the SAB channel globals, $VIMRUNTIME and
-    # the runtime environment (Emscripten does not inherit the host environment).
+    # Runs before everything (incl. the data-package loader): point locateFile at
+    # nvim.js's dir under Node so nvim.data resolves from any cwd. --pre-js is too
+    # late for this (the loader computes the path at the very top).
+    --extern-pre-js=${PROJECT_SOURCE_DIR}/wasm/extern-pre.js
+    # Boot-time JS that configures argv, the postMessage channel globals,
+    # $VIMRUNTIME and the environment (Emscripten does not inherit the host env).
     --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
     # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
     --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)
