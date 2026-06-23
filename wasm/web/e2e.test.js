@@ -25,6 +25,7 @@ const { Worker } = require('worker_threads');
 const MessagePack = require('@msgpack/msgpack');
 const Neovim = require('./neovim.js');
 const NeovimUI = require('./neovim-ui.js');
+const NeovimUtils = require('./neovim-utils.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const BIN = path.join(ROOT, 'build-wasm', 'bin');
@@ -176,6 +177,56 @@ async function main() {
   // 8. cwd: pre.js chdir'd into the seeded dir, so getcwd() reflects it.
   const cwd = await nvim.request('nvim_eval', ['getcwd()']);
   ok(cwd === '/work', "cwd took effect (getcwd() = '" + cwd + "')");
+
+  // ---- neovim-utils.js helpers (the high-level free-function layer) ----------
+  // These drive the REAL engine over the same instance API the browser uses.
+
+  // 10. write_file then read_file round-trips a known string through the engine FS.
+  const SAMPLE = 'alpha\nbeta\ngamma';
+  await NeovimUtils.write_file(nvim, '/work/util.txt', SAMPLE);
+  const roundtrip = await NeovimUtils.read_file(nvim, '/work/util.txt');
+  ok(roundtrip === SAMPLE,
+     "write_file + read_file round-trips a known string (got " + JSON.stringify(roundtrip) + ')');
+
+  // read_file on a missing file returns null (documented behavior), not a reject.
+  const missing = await NeovimUtils.read_file(nvim, '/work/does-not-exist.txt');
+  ok(missing === null, 'read_file on a missing file resolves to null (got ' + JSON.stringify(missing) + ')');
+
+  // 11. open_file_in_editor makes the file the current buffer.
+  await NeovimUtils.open_file_in_editor(nvim, '/work/util.txt');
+  const bufname = await nvim.request('nvim_eval', ['bufname("%")']);
+  ok(/util\.txt$/.test(bufname), "open_file_in_editor makes util.txt the current buffer (bufname = '" + bufname + "')");
+  const firstLine = await nvim.request('nvim_buf_get_lines', [0, 0, 1, false]);
+  ok(Array.isArray(firstLine) && firstLine[0] === 'alpha',
+     "the opened buffer's first line is 'alpha' (got " + JSON.stringify(firstLine) + ')');
+
+  // 12. create_autocmd returns an id (a thin nvim_create_autocmd wrapper).
+  const acId = await NeovimUtils.create_autocmd(nvim, 'User', { pattern: 'NvimUtilsProbe', command: 'echom "probe"' });
+  ok(typeof acId === 'number' && acId > 0, 'create_autocmd returns an autocmd id (' + acId + ')');
+
+  // 13. on_autocmd: the combined rpcnotify round-trip. Register for BufWritePost,
+  //     `:w` the open buffer, and assert the handler fires with the saved path.
+  let fired = null;
+  const handle = await NeovimUtils.on_autocmd(nvim, 'BufWritePost', { pattern: '*' }, function (payload) {
+    fired = payload;
+  });
+  ok(typeof handle.id === 'number' && handle.name && typeof handle.unsubscribe === 'function',
+     'on_autocmd returns a handle { id, group, name, unsubscribe }');
+  // The util.txt buffer is current (from check 11); save it to fire BufWritePost.
+  await nvim.request('nvim_command', ['write']);
+  const sawSave = await waitFor(function () { return fired !== null; }, 5000);
+  ok(sawSave, 'on_autocmd handler fires on :w (BufWritePost)');
+  ok(sawSave && /util\.txt$/.test(fired.file),
+     "the payload.file is the saved path (got " + (fired && JSON.stringify(fired.file)) + ')');
+  ok(sawSave && typeof fired.buffer === 'number' && fired.buffer > 0,
+     'the payload.buffer is the current buffer number (' + (fired && fired.buffer) + ')');
+
+  // unsubscribe stops further notifications: clear, save again, assert no re-fire.
+  await handle.unsubscribe();
+  fired = null;
+  await nvim.request('nvim_command', ['write']);
+  const reFired = await waitFor(function () { return fired !== null; }, 1000);
+  ok(!reFired, 'on_autocmd unsubscribe() stops further notifications');
 
   // 9. Lifecycle: when the engine goes away, the core must observe EOF and tear
   // down. This is the path the browser relies on (engine-worker posts

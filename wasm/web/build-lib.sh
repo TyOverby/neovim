@@ -81,8 +81,8 @@ rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
 # --- library JS: UMD source + ESM entry points + engine worker ---------------
-cp "${WEB}/neovim.js" "${WEB}/neovim-ui.js" \
-   "${WEB}/neovim.mjs" "${WEB}/neovim-ui.mjs" \
+cp "${WEB}/neovim.js" "${WEB}/neovim-ui.js" "${WEB}/neovim-utils.js" \
+   "${WEB}/neovim.mjs" "${WEB}/neovim-ui.mjs" "${WEB}/neovim-utils.mjs" \
    "${WEB}/engine-worker.js" "${OUT}/"
 # msgpack UMD dep (the <script> global path; also handed to engine-worker.js)
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
@@ -131,6 +131,11 @@ cat > "${OUT}/package.json" <<JSON
       "import": "./neovim-ui.mjs",
       "require": "./neovim-ui.js",
       "default": "./neovim-ui.mjs"
+    },
+    "./utils": {
+      "import": "./neovim-utils.mjs",
+      "require": "./neovim-utils.js",
+      "default": "./neovim-utils.mjs"
     },
     "./engine-worker.js": "./engine-worker.js",
     "./nvim.js": "./nvim.js",

@@ -236,15 +236,69 @@ keystrokes. `screen` is a `NeovimUI.Screen` (the headless grid model);
 `redraw`. `NeovimUI.Screen` and `NeovimUI.keyToNvim` are also exported for
 headless use.
 
+#### The helper layer (`neovim-utils.js`)
+
+`neovim-utils.js` (UMD global `globalThis.NeovimUtils`; ESM `neovim-utils.mjs`;
+`./utils` subpath in the `build-lib.sh` bundle) is a thin layer of **free
+functions** over the instance. They are deliberately **not** instance methods —
+the core surface above stays exactly as-is. Each helper takes the instance as its
+first argument and is built only on the public API (`request` / `onNotification` /
+`chan`), so the same code runs in the browser and under the Node e2e test.
+
+```html
+<script src="neovim-utils.js"></script>   <!-- after neovim-ui.js: globalThis.NeovimUtils -->
+```
+```js
+import { open_file_in_editor, on_autocmd } from './neovim-utils.mjs';
+```
+
+| Helper | Description |
+|---|---|
+| `open_file_in_editor(instance, path)` → `Promise` | Open `path` in the current window via `nvim_cmd({ cmd: 'edit', args: [path] }, {})` (no manual `:edit` escaping). Resolves when the edit completes. |
+| `read_file(instance, path)` → `Promise<string \| null>` | Read `path` from the **engine's** in-memory FS (the JS client can't touch it directly) and return the contents as one string, lines joined by `'\n'`. Resolves to **`null`** if the file does not exist / is unreadable (only a real Lua/RPC error rejects). |
+| `write_file(instance, path, content)` → `Promise` | Write the string `content` to `path` in the engine FS, creating missing parent dirs (`mkdir(..., 'p')`). Splits on `'\n'` via `writefile(vim.split(content,'\n'), path)`. Resolves when the write completes. |
+| `create_autocmd(instance, events, opts)` → `Promise<number>` | Thin wrapper over `nvim_create_autocmd`; `events` (string or array) and `opts` pass straight through. Resolves to the autocmd id. |
+| `add_notify_handler(instance, name, fn)` → `unsubscribe()` | Sugar over `instance.onNotification(name, fn)` — subscribe `fn` (receives the params array) to RPC notifications named `name`. Returns the unsubscribe fn. |
+| `on_autocmd(instance, events, opts, fn)` → `Promise<handle>` | **The combined convenience.** Creates a dedicated augroup + an autocmd whose action `rpcnotify`s this client, AND registers `fn` for that notification — the whole "notify me on `<event>`" round-trip in one call. See below. |
+
+`on_autocmd(instance, events, opts, fn)` collapses the ~15-line autocmd +
+`rpcnotify` + `onNotification` dance. `events` is a string or array (e.g.
+`'BufWritePost'`); `opts` is merged into the `nvim_create_autocmd` opts
+(`pattern` defaults to `'*'`; a caller `command`/`callback`/`group` is ignored —
+the helper owns the action and the group). The generated autocmd runs
+`call rpcnotify(<instance.chan>, '<generated-name>', expand('<afile>:p'), bufnr('%'))`.
+Call it **after** the instance is ready (`instance.chan` must be set); it awaits
+`instance.ready` and throws if there is still no channel.
+
+`fn` is invoked as `fn(payload)` where the **payload** is:
+
+```js
+{
+  file:   '<string>',  // absolute path the event fired for (expand('<afile>:p'); '' if N/A)
+  buffer: <number>,    // current buffer number (bufnr('%'))
+  event:  <events>,    // the `events` argument, as passed in
+  params: [file, buffer],  // the raw rpcnotify params array
+}
+```
+
+It resolves to a **handle** `{ id, group, name, unsubscribe() }`: `id` is the
+autocmd id, `group` the augroup id, `name` the generated notification name, and
+`unsubscribe()` removes the notification handler **and** deletes the augroup (so
+the engine stops firing the rpcnotify); it returns a Promise and is idempotent.
+
 ### Planned API
 
 The snippet below is the longer-term vision for the embedding API. Parts of it
 run today — each feature is annotated with its current status. ESM `import`,
 `baseUrl`, the `build-lib.sh` bundle, an **awaitable `create()`**, the
-**`env` / `cwd` / `filesystem`** runtime config, and **`plugins`** (runtime-bundle
-selection) now ship (see "Available today"). Still planned: the `clipboard`
-option, `neovim_utils.js`, and the `create_autocmd` / `add_notify_handler` /
-`read_file` instance methods. Same-origin-only is the one remaining ESM gap: `import` works,
+**`env` / `cwd` / `filesystem`** runtime config, **`plugins`** (runtime-bundle
+selection), and **`neovim-utils.js`** (the `open_file_in_editor` /
+`read_file` / `write_file` / `create_autocmd` / `add_notify_handler` /
+`on_autocmd` **free functions** — see "Available today") now ship. Still planned:
+the `clipboard` option and the renderer's `font_family` / `font_size`. Note the
+helpers ship as free functions `helper(instance, ...)`, **not** as instance
+methods (`instance.helper(...)`) — the snippet below uses the planned-method
+shape, but the real calls are the free-function form. Same-origin-only is the one remaining ESM gap: `import` works,
 but `new Worker()` (and thus `baseUrl`) can't point at a different-origin CDN yet
 — `https://tyoverby.com/neovim.js` from a different origin needs a Blob-bootstrap
 shim that isn't built.
@@ -257,10 +311,13 @@ import neovim from 'https://tyoverby.com/neovim.js';
 
 // utilities for hooking up a neovim instance to a dom element (SHIPS TODAY at
 // neovim-ui.mjs; cross-origin URL still PLANNED as above)
-import { mount_into } from 'https://tyoverby.com/neovim_ui.js';
+import { mount_into } from 'https://tyoverby.com/neovim-ui.js';
 
-// PLANNED: neovim_utils.js does not exist yet.
-import { open_file_in_editor } from 'https://tyoverby.com/neovim_utils.js';
+// SHIPS TODAY at neovim-utils.mjs: the helpers are FREE FUNCTIONS that take the
+// instance as the first arg (helper(instance, ...)), NOT instance methods.
+// (cross-origin URL still PLANNED as above.)
+import { open_file_in_editor, on_autocmd, read_file }
+  from 'https://tyoverby.com/neovim-utils.js';
 
 // SHIPS TODAY: `await neovim.create(...)` resolves to a ready instance (create()
 // returns an awaitable promise-facade). The synchronous pattern still works too:
@@ -281,27 +338,23 @@ const instance = await neovim.create({
   clipboard: "browser"
 });
 
-// PLANNED: neovim_utils.js helper — does not exist yet.
+// SHIPS TODAY: a free function (instance is the first arg).
 await open_file_in_editor(instance, "/bar/foo.txt");
 
-const notification_name = "file_saved";
-
-// PLANNED: instance.create_autocmd is not a method today. You can already get
-// the same effect with the real API by sending the equivalent nvim_command /
-// nvim_create_autocmd RPC via `instance.request(...)`, using `instance.chan`.
-await instance.create_autocmd(["BufWritePost"], {
-    "pattern": ["*"],
-    "group": "MyPlugin",
-    "command": `call rpcnotify(${instance.chan}, '${notification_name}', expand('<afile>:p'), bufnr('%'))`
-});
-
-// PLANNED: instance.add_notify_handler is not a method today. The shipping
-// equivalent is `instance.onNotification('file_saved', fn)`.
-await instance.add_notify_handler('file_saved', async function ([filename]) {
-  // PLANNED: instance.read_file does not exist yet.
-  let contents = await instance.read_file(filename);
-  alert(filename + " has been saved: " + contents);
-});
+// SHIPS TODAY: the whole "notify me on save" round-trip in one call. on_autocmd
+// creates the augroup + autocmd whose action rpcnotify()s back at us AND
+// registers the handler; `payload.file` is expand('<afile>:p'). It replaces the
+// ~15-line create_autocmd + add_notify_handler dance shown previously. The
+// lower-level free functions (create_autocmd(instance, events, opts),
+// add_notify_handler(instance, name, fn)) are also available if you want to wire
+// the two halves yourself.
+const handle = await on_autocmd(instance, ["BufWritePost"], { pattern: ["*"] },
+  async ({ file }) => {
+    // read_file(instance, path) reads the engine FS (null if missing).
+    let contents = await read_file(instance, file);
+    alert(file + " has been saved: " + contents);
+  });
+// handle.unsubscribe();  // stop notifications + delete the augroup
 
 // mount_into ships today, but PLANNED: it accepts only { cols, rows } now —
 // `font_family` / `font_size` are not yet supported, and rendering is monochrome.

@@ -28,7 +28,8 @@ rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
 # Page + library layers (flat, relative-path references)
-cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" "${WEB}/app.js" \
+cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" \
+   "${WEB}/neovim-utils.js" "${WEB}/neovim-utils.mjs" "${WEB}/app.js" \
    "${WEB}/engine-worker.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
