@@ -70,10 +70,15 @@ jobs:
           cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=Release
           cmake --build build --target nlua0
 
-      - name: Cache wasm deps (.deps-wasm)
+      # Cache ONLY the install output (libs + headers), never the CMake configure
+      # tree. The configure tree hard-codes emsdk's absolute path, and setup-emsdk
+      # reinstalls emsdk to a fresh random temp dir each run, so a cached configure
+      # tree points at a now-deleted toolchain and breaks the build. usr/ is
+      # path-independent and is all build-nvim.sh consumes (DEPS=.deps-wasm/usr).
+      - name: Cache wasm deps (.deps-wasm/usr)
         uses: actions/cache@v4
         with:
-          path: .deps-wasm
+          path: .deps-wasm/usr
           key: wasm-deps-${{ runner.os }}-${{ env.EM_VERSION }}-${{ hashFiles('cmake.deps/**', 'wasm/build-deps.sh', 'wasm/shim.h') }}
 
       - name: Cross-compile bundled deps to wasm

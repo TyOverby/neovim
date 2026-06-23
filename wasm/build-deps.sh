@@ -20,7 +20,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPS_BIN="${ROOT}/.deps-wasm"
+DEPS_USR="${DEPS_BIN}/usr"
 DOWNLOADS="${DEPS_BIN}/build/downloads"
+
+# Fast path: reuse a previously built install. In CI only .deps-wasm/usr is
+# cached (the path-independent libs + headers) -- never the CMake configure
+# tree, which embeds emsdk's absolute path and goes stale when emsdk is
+# reinstalled to a new temp dir. If the install is already present, there is
+# nothing to do; build-nvim.sh consumes only ${DEPS_USR}.
+if [ -f "${DEPS_USR}/lib/liblua.a" ] && [ -d "${DEPS_USR}/include" ]; then
+  echo "==> Reusing existing wasm deps under ${DEPS_USR} (skipping build)"
+  ls -la "${DEPS_USR}/lib" || true
+  exit 0
+fi
 
 # Force-include the wasm shim into every emcc invocation, and use wasm-native
 # setjmp/longjmp. The latter is REQUIRED for JSPI: the default emscripten
