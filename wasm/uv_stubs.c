@@ -382,4 +382,367 @@ int __wrap_uv_process_kill(uv_process_t *process, int signum)
   return 0;
 }
 
+// ===========================================================================
+// Stage 4 / TCP socket proxy (additive, opt-in): proxy outbound TCP + DNS.
+// ===========================================================================
+// nvim's TCP (src/nvim/event/socket.c: uv_getaddrinfo SYNC -> uv_tcp_connect ->
+// connect_cb -> uv_read_start/uv_write) AND luv/vim.uv (ASYNC getaddrinfo + the
+// same connect/read/write) both funnel through libuv uv_tcp_connect +
+// uv_getaddrinfo. We intercept all three with the wasm linker's
+//   -Wl,--wrap=uv_tcp_connect / --wrap=uv_getaddrinfo / --wrap=uv_freeaddrinfo
+// (set wasm-only in src/nvim/CMakeLists.txt). The real implementations remain
+// reachable as __real_uv_*; the wraps fall through to them when no proxy is
+// active, so the no-proxy build is byte-for-byte unchanged.
+//
+// The uv_tcp_t's bytes are carried over the SAME MEMFS-backed virtual pollable
+// fd the spawn-stdio proxy uses (nvim_proxy_alloc_fd): uv_tcp_open(handle, fd)
+// accepts it (de-risked by SPIKE S1 -- no real socket / no socketpair). The JS
+// half is wasm/nvim_sock_proxy.js (a sibling --js-library), which speaks the
+// sock.* protocol over globalThis.__nvimProxy and routes server pushes.
+//
+// This mirrors the shipped __wrap_uv_spawn EXACTLY: --wrap + handle/req init +
+// fire-the-libuv-cb-on-a-server-event KEEPALIVE entry. The only new bookkeeping
+// vs. the spawn wrap is uv__req_init / uv__req_unregister for the connect req
+// (proven by SPIKE S2) and a synthesized heap addrinfo owned by the freeaddrinfo
+// wrap (SPIKE S3). All gated behind __EMSCRIPTEN__.
+
+# include <arpa/inet.h>
+# include <netinet/in.h>
+# include <netdb.h>
+# include <stdint.h>
+
+// The real libuv functions (renamed by --wrap). Declared so we can fall through
+// to them when no proxy is configured.
+int __real_uv_tcp_connect(uv_connect_t *req, uv_tcp_t *handle,
+                          const struct sockaddr *addr, uv_connect_cb cb);
+int __real_uv_getaddrinfo(uv_loop_t *loop, uv_getaddrinfo_t *req,
+                          uv_getaddrinfo_cb cb, const char *node,
+                          const char *service, const struct addrinfo *hints);
+void __real_uv_freeaddrinfo(struct addrinfo *ai);
+
+// JS bridge for proxied sockets / DNS (wasm/nvim_sock_proxy.js).
+//   nvim_sock_alloc_fd()      : a bidirectional virtual pollable fd (read = server
+//                               sock.data; write -> server sock.write). Returns
+//                               the fd or -1.
+//   nvim_sock_connect(req, handle, fd, host, port):
+//                               register the connect, fire sock.connect{host,port}
+//                               async. The server's reply -> nvim_sock_on_connect.
+//   nvim_sock_register_async(req, host, service):
+//                               register an ASYNC getaddrinfo req; the server's
+//                               reply -> nvim_sock_on_addrinfo_queued.
+//   nvim_sock_resolve_sync(host, service) [__async]:
+//                               round-trip sock.getaddrinfo and SUSPEND via JSPI;
+//                               the result port is read back via
+//                               nvim_sock_take_sync_port().
+extern int nvim_proxy_active(void);
+extern int nvim_sock_alloc_fd(void);
+extern void nvim_sock_connect(void *req, void *handle, int fd,
+                              const char *host, int port);
+extern void nvim_sock_close_fd(int fd);
+extern void nvim_sock_register_async(void *req, const char *host,
+                                     const char *service);
+extern void nvim_sock_resolve_sync(const char *host, const char *service);
+extern int nvim_sock_take_sync_port(void);
+extern int nvim_sock_take_sync_status(void);
+
+// We tag our synthesized addrinfo so __wrap_uv_freeaddrinfo knows it is ours (a
+// real getaddrinfo result would NOT carry this sentinel in ai_canonname). Same
+// approach as SPIKE S3.
+static const char SOCK_AI_SENTINEL[] = "NVIM_PROXY_AI";
+
+// Build a one-entry heap struct addrinfo carrying a sockaddr_in (port from
+// `service`, a loopback placeholder IP -- __wrap_uv_tcp_connect ignores the IP
+// and routes by host:port, so a placeholder is fine). Tagged so our
+// freeaddrinfo frees it. `host` is unused in the addr itself (the host string is
+// carried separately to the server by the connect wrap).
+static struct addrinfo *sock_synth_addrinfo(const char *service)
+{
+  struct addrinfo *ai = calloc(1, sizeof(struct addrinfo));
+  struct sockaddr_in *sa = calloc(1, sizeof(struct sockaddr_in));
+  if (ai == NULL || sa == NULL) {
+    free(ai);
+    free(sa);
+    return NULL;
+  }
+  int port = service ? atoi(service) : 0;
+  sa->sin_family = AF_INET;
+  sa->sin_port = htons((uint16_t)port);
+  inet_pton(AF_INET, "127.0.0.1", &sa->sin_addr);
+  ai->ai_family = AF_INET;
+  ai->ai_socktype = SOCK_STREAM;
+  ai->ai_protocol = IPPROTO_TCP;
+  ai->ai_addrlen = sizeof(struct sockaddr_in);
+  ai->ai_addr = (struct sockaddr *)sa;
+  ai->ai_canonname = (char *)SOCK_AI_SENTINEL;  // sentinel (not freed)
+  ai->ai_next = NULL;
+  return ai;
+}
+
+// --- getaddrinfo ASYNC bookkeeping -----------------------------------------
+// For the ASYNC form (luv), the caller's req carries the cb; we stash the port
+// the server resolves so the KEEPALIVE entry can build the addrinfo + fire cb.
+// We key by req pointer through a tiny fixed table (luv issues these one at a
+// time in practice; a small ring is plenty and avoids a malloc'd map).
+
+// --- deferred-callback queue + drain --------------------------------------
+// CRITICAL JSPI CONSTRAINT: the libuv callbacks we fire (a connect_cb / luv's
+// getaddrinfo cb) run nvim code that re-enters the event loop and can hit the
+// JSPI-suspending __syscall_poll. They MUST therefore run on the engine's MAIN
+// stack, which is already inside a `promising` frame (suspended in poll). If JS
+// fired them via a plain Module.ccall from a macrotask (no promising frame), the
+// first suspension aborts with "trying to suspend without WebAssembly.promising".
+//
+// So the JS half does NOT call the cb directly. Instead it ENQUEUES the (req,
+// status) pair here (nvim_sock_queue_connect / _queue_addrinfo) and wakes the
+// poll (NvimIO.signalWake). A uv_check handle registered on the loop -- whose
+// callback runs INSIDE uv_run, i.e. inside the engine's suspendable main frame
+// -- then drains the queue and fires the cbs. Cbs may suspend freely there.
+typedef struct {
+  int kind;   // 0 = connect, 1 = addrinfo
+  void *req;
+  int status;
+  int port;
+} sock_pending_t;
+
+# define SOCK_PENDING_CAP 64
+static sock_pending_t g_sock_pending[SOCK_PENDING_CAP];
+static int g_sock_pending_head = 0;
+static int g_sock_pending_tail = 0;
+static uv_check_t g_sock_check;
+static int g_sock_check_started = 0;
+
+static void sock_drain_check(uv_check_t *check);
+
+// Ensure the drain check handle is running on `loop` (registered once, the first
+// time a socket connect/getaddrinfo is intercepted). A uv_check is a no-cost
+// loop handle whose cb runs each loop iteration after polling.
+static void sock_ensure_check(uv_loop_t *loop)
+{
+  if (g_sock_check_started) {
+    return;
+  }
+  g_sock_check_started = 1;
+  uv_check_init(loop, &g_sock_check);
+  uv_check_start(&g_sock_check, sock_drain_check);
+  // Don't let the check handle keep the loop alive on its own.
+  uv_unref((uv_handle_t *)&g_sock_check);
+}
+
+static void sock_enqueue(int kind, void *req, int status, int port)
+{
+  int next = (g_sock_pending_tail + 1) % SOCK_PENDING_CAP;
+  if (next == g_sock_pending_head) {
+    return;  // full (should never happen in practice); drop rather than corrupt
+  }
+  g_sock_pending[g_sock_pending_tail].kind = kind;
+  g_sock_pending[g_sock_pending_tail].req = req;
+  g_sock_pending[g_sock_pending_tail].status = status;
+  g_sock_pending[g_sock_pending_tail].port = port;
+  g_sock_pending_tail = next;
+}
+
+// Fire one queued connect result. Runs on the main frame (inside uv_run).
+static void sock_fire_connect(uv_connect_t *req, int status)
+{
+  if (req == NULL) {
+    return;
+  }
+  uv_connect_cb cb = req->cb;
+  // Unregister the req from the loop (real uv_tcp_connect's connect path does
+  // this before invoking the cb). We registered it with uv__req_init.
+  if (req->handle != NULL && req->handle->loop != NULL) {
+    uv__req_unregister(req->handle->loop);
+  }
+  if (cb != NULL) {
+    cb(req, status);
+  }
+}
+
+// Fire one queued ASYNC getaddrinfo result. Runs on the main frame.
+static void sock_fire_addrinfo(uv_getaddrinfo_t *req, int status, int port)
+{
+  if (req == NULL) {
+    return;
+  }
+  uv_getaddrinfo_cb cb = (uv_getaddrinfo_cb)req->cb;
+  if (req->loop != NULL) {
+    uv__req_unregister(req->loop);
+  }
+  if (status != 0) {
+    if (cb != NULL) {
+      cb(req, status, NULL);
+    }
+    return;
+  }
+  char svc[16];
+  snprintf(svc, sizeof(svc), "%d", port);
+  struct addrinfo *ai = sock_synth_addrinfo(svc);
+  req->addrinfo = ai;
+  if (cb != NULL) {
+    cb(req, ai ? 0 : UV_ENOMEM, ai);
+  }
+}
+
+// The uv_check callback: drain the pending queue, firing each cb on the main
+// (suspendable) frame. A cb may itself enqueue more (rare), but each drains on
+// the next loop iteration; we snapshot the tail so this pass is bounded.
+static void sock_drain_check(uv_check_t *check)
+{
+  (void)check;
+  int tail = g_sock_pending_tail;
+  while (g_sock_pending_head != tail) {
+    sock_pending_t p = g_sock_pending[g_sock_pending_head];
+    g_sock_pending_head = (g_sock_pending_head + 1) % SOCK_PENDING_CAP;
+    if (p.kind == 0) {
+      sock_fire_connect((uv_connect_t *)p.req, p.status);
+    } else {
+      sock_fire_addrinfo((uv_getaddrinfo_t *)p.req, p.status, p.port);
+    }
+  }
+}
+
+// EMSCRIPTEN_KEEPALIVE entries: the JS half calls these when the server's
+// sock.connect_ok / sock.connect_err (or sock.addrinfo) arrives. They only
+// ENQUEUE + return; the drain check fires the actual cb on the main frame. JS
+// must signalWake() after calling these so the suspended poll resumes and the
+// loop runs the check.
+EMSCRIPTEN_KEEPALIVE
+void nvim_sock_on_connect(uv_connect_t *req, int status)
+{
+  if (req == NULL) {
+    return;
+  }
+  sock_enqueue(0, req, status, 0);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void nvim_sock_on_addrinfo_queued(uv_getaddrinfo_t *req, int status, int port)
+{
+  if (req == NULL) {
+    return;
+  }
+  sock_enqueue(1, req, status, port);
+}
+
+
+// __wrap_uv_tcp_connect: the linker redirects every uv_tcp_connect call here.
+int __wrap_uv_tcp_connect(uv_connect_t *req, uv_tcp_t *handle,
+                          const struct sockaddr *addr, uv_connect_cb cb)
+{
+  // No proxy -> behave EXACTLY as today (the real uv_tcp_connect, which in wasm
+  // has no usable network but is byte-for-byte the unchanged path).
+  if (!nvim_proxy_active()) {
+    return __real_uv_tcp_connect(req, handle, addr, cb);
+  }
+
+  // Extract host:port from the sockaddr (the synthesized addrinfo from our
+  // getaddrinfo wrap, or a real numeric sockaddr from luv's uv.tcp_connect).
+  char host[INET6_ADDRSTRLEN] = "127.0.0.1";
+  int port = 0;
+  if (addr->sa_family == AF_INET) {
+    const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+    uv_ip4_name(in, host, sizeof(host));
+    port = ntohs(in->sin_port);
+  } else if (addr->sa_family == AF_INET6) {
+    const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)addr;
+    uv_ip6_name(in6, host, sizeof(host));
+    port = ntohs(in6->sin6_port);
+  }
+
+  // Make sure the deferred-callback drain check is running on this loop so the
+  // server's connect result fires the cb on the suspendable main frame.
+  sock_ensure_check(handle->loop);
+
+  // Back the uv_tcp_t with a virtual pollable fd (SPIKE S1): uv_tcp_open accepts
+  // it, and uv_read_start / uv_write then flow over it.
+  int fd = nvim_sock_alloc_fd();
+  if (fd < 0) {
+    // Mirror real uv_tcp_connect's contract on failure: register + fire cb with
+    // an error so the caller's connect path completes (doesn't hang).
+    uv__req_init(handle->loop, req, UV_CONNECT);
+    req->cb = cb;
+    req->handle = (uv_stream_t *)handle;
+    nvim_sock_on_connect(req, UV_ENOMEM);
+    return 0;
+  }
+  // CRITICAL: socket.c calls uv_tcp_nodelay(tcp, true) BEFORE connect, which sets
+  // UV_HANDLE_TCP_NODELAY. uv_tcp_open -> uv__stream_open then does
+  // setsockopt(TCP_NODELAY) on the fd -- which FAILS on our MEMFS-backed virtual
+  // fd (it isn't a real socket; ENOTSOCK), making uv_tcp_open return an error and
+  // NOT open the handle (so reads/writes silently go nowhere). Clear the TCP
+  // option flags before opening; the REAL socket on the server already sets
+  // TCP_NODELAY (net.setNoDelay), so no behavior is lost.
+  handle->flags &= ~(unsigned int)(UV_HANDLE_TCP_NODELAY | UV_HANDLE_TCP_KEEPALIVE);
+  uv_tcp_open(handle, fd);
+
+  // Register the connect req with the loop so the loop stays alive until the cb
+  // fires (real uv_tcp_connect does this; SPIKE S2). Balanced by
+  // uv__req_unregister in nvim_sock_on_connect.
+  uv__req_init(handle->loop, req, UV_CONNECT);
+  req->cb = cb;
+  req->handle = (uv_stream_t *)handle;
+
+  // Fire sock.connect{host,port} async; the server's reply -> nvim_sock_on_connect.
+  nvim_sock_connect(req, handle, fd, host, port);
+  return 0;
+}
+
+// __wrap_uv_getaddrinfo: the linker redirects every uv_getaddrinfo call here.
+int __wrap_uv_getaddrinfo(uv_loop_t *loop, uv_getaddrinfo_t *req,
+                          uv_getaddrinfo_cb cb, const char *node,
+                          const char *service, const struct addrinfo *hints)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_getaddrinfo(loop, req, cb, node, service, hints);
+  }
+
+  if (cb != NULL) {
+    // ASYNC form (luv): register the req + fire the cb later from the deferred
+    // drain (nvim_sock_on_addrinfo_queued). Stash the cb/loop on the req.
+    req->loop = loop;
+    req->cb = cb;
+    req->addrinfo = NULL;
+    uv__req_init(loop, req, UV_GETADDRINFO);
+    sock_ensure_check(loop);
+    nvim_sock_register_async(req, node ? node : "", service ? service : "");
+    return 0;
+  }
+
+  // SYNC form (socket.c): SUSPEND via JSPI for the server round-trip, then
+  // synthesize the heap addrinfo and return 0 (SPIKE S3). nvim_sock_resolve_sync
+  // is __async; it returns a Promise the wasm frame suspends on.
+  nvim_sock_resolve_sync(node ? node : "", service ? service : "");
+  int status = nvim_sock_take_sync_status();
+  if (status != 0) {
+    req->addrinfo = NULL;
+    return status;  // negative uv errno -> socket.c reports "failed to lookup host"
+  }
+  // The resolved port equals the requested numeric service (DNS resolves only the
+  // host, carried separately to the server). Use the service the caller passed.
+  struct addrinfo *ai = sock_synth_addrinfo(service);
+  if (ai == NULL) {
+    req->addrinfo = NULL;
+    return UV_ENOMEM;
+  }
+  req->addrinfo = ai;
+  return 0;
+}
+
+// __wrap_uv_freeaddrinfo: free OUR synthesized addrinfo (recognized by the
+// sentinel in ai_canonname); delegate anything else to the real implementation.
+void __wrap_uv_freeaddrinfo(struct addrinfo *ai)
+{
+  if (ai != NULL && ai->ai_canonname == SOCK_AI_SENTINEL) {
+    struct addrinfo *cur = ai;
+    while (cur != NULL) {
+      struct addrinfo *next = cur->ai_next;
+      free(cur->ai_addr);
+      free(cur);
+      cur = next;
+    }
+    return;
+  }
+  __real_uv_freeaddrinfo(ai);
+}
+
 #endif  // __EMSCRIPTEN__

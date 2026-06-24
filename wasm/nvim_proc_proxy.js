@@ -252,9 +252,12 @@ addToLibrary({
       ProcProxy.pushWired = true;
 
       // IMPORTANT: compose with any existing push handler (the fs-proxy doesn't
-      // use pushes today, but be defensive so we never clobber one).
-      var prev = px.__procProxyPrevOnPush;
-      px.onPush(function (method, params, payload) {
+      // use pushes today; the sock proxy DOES -- both must coexist). We chain to
+      // whatever handler is currently installed (recorded in px.__nvimPushChain
+      // by every proxy that wires one) and record ourselves there so a later
+      // wirePush (sock proxy) chains to US. Order-independent.
+      var prev = px.__nvimPushChain || null;
+      var handler = function (method, params, payload) {
         var id = params && params.id;
         var entry = (id != null) ? ProcProxy.byServerId[id] : null;
         if (method === 'proc.stdout' || method === 'proc.stderr') {
@@ -328,7 +331,9 @@ addToLibrary({
           return;
         }
         if (prev) { try { prev(method, params, payload); } catch (e) { /* ignore */ } }
-      });
+      };
+      px.__nvimPushChain = handler;
+      px.onPush(handler);
     },
 
     // Deliver a child's exit into C by calling the right EMSCRIPTEN_KEEPALIVE

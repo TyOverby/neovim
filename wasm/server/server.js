@@ -55,6 +55,10 @@ const { registerFsHandlers } = require('./fs-handlers.js');
 // / ...). cwd jailed to ctx.config.root; children killed when the connection drops.
 const { registerProcHandlers, cleanupConnection } = require('./proc-handlers.js');
 
+// Stage 4 / TCP socket proxy: outbound TCP (sock.connect/write/close) + DNS
+// (sock.getaddrinfo). Sockets tracked per connection; destroyed on disconnect.
+const { registerSockHandlers, cleanupSockets } = require('./sock-handlers.js');
+
 // Phase 5: the PTY proxy handlers (pty.spawn / pty.write / pty.resize / pty.kill,
 // pty.data / pty.exit pushes) backed by node-pty. cwd jailed to ctx.config.root;
 // ptys killed when the connection drops. Loaded lazily so the server still starts
@@ -158,6 +162,7 @@ function serveConnection(ws, registry, serverConfig) {
   ws.on('close', function () {
     try { cleanupConnection(ctx); } catch (_e) { /* ignore */ }
     try { if (cleanupPtys) { cleanupPtys(ctx); } } catch (_e) { /* ignore */ }
+    try { cleanupSockets(ctx); } catch (_e) { /* ignore */ }
   });
 }
 
@@ -199,6 +204,7 @@ function createServer(config) {
   registerPhase1Handlers(registry);
   registerFsHandlers(registry);   // Phase 2: jailed filesystem proxy handlers
   registerProcHandlers(registry); // Phase 3: jailed process-spawn proxy handlers
+  registerSockHandlers(registry); // Stage 4: outbound TCP + DNS proxy handlers
   if (registerPtyHandlers) { registerPtyHandlers(registry); }  // Phase 5: PTY (node-pty)
 
   // When SERVED BY server.js (not the plain serve.js static demo), expose the

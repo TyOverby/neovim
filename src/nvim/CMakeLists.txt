@@ -794,6 +794,14 @@ if(EMSCRIPTEN)
     # proxy is active (ENOSYS, exactly as today). Wasm-only; native build untouched.
     -Wl,--wrap=uv_spawn
     -Wl,--wrap=uv_process_kill
+    # Stage 4 / TCP socket proxy (additive, opt-in): intercept uv_tcp_connect /
+    # uv_getaddrinfo / uv_freeaddrinfo so outbound TCP connections + DNS run on
+    # the IO-proxy SERVER. The real implementations remain reachable as
+    # __real_uv_*; uv_stubs.c's __wrap_* falls through to them when no proxy is
+    # active (unchanged wasm no-network behavior). Wasm-only; native untouched.
+    -Wl,--wrap=uv_tcp_connect
+    -Wl,--wrap=uv_getaddrinfo
+    -Wl,--wrap=uv_freeaddrinfo
     # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
     # suspend on async JS promises via WebAssembly stack-switching.
     -sJSPI
@@ -845,6 +853,11 @@ if(EMSCRIPTEN)
     # routing for src/nvim/event/proxy_proc.c. With no proxy configured the C
     # backend is never taken, so none of this runs. See the file header.
     --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js
+    # Stage 4 / TCP socket proxy (additive, opt-in): the JS half of the socket
+    # wraps -- a virtual bidirectional pollable fd backing each uv_tcp_t plus the
+    # sock.connect/write/close/getaddrinfo routing + server pushes. With no proxy
+    # configured the C wraps fall through to __real_uv_*, so none of this runs.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js
     # The js-library delivers the server child's exit into C by calling
     # Module._nvim_proxy_proc_on_exit. That C entry is marked EMSCRIPTEN_KEEPALIVE
     # (in proxy_proc.c), which both keeps it from being DCE'd AND adds it to the
@@ -854,7 +867,7 @@ if(EMSCRIPTEN)
     # the handle pointer + read strings.
     -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)

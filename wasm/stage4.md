@@ -201,15 +201,46 @@ global is present and chdir/opens the mount so the user lands in the server's
 files; when it's absent (the plain `serve.js` static demo, or the library used
 without `proxy`) the no-proxy path is byte-for-byte unchanged.
 
-### Known gap: TCP sockets
+### TCP sockets (shipped — the sixth seam)
 
-`socket.c` / raw `vim.uv.tcp` connections are **not proxied** — they still get
-wasm's no-network behavior, and do not reach the server. Most things route
-through stdio (jobs, LSP, PTY, `vim.system`), which **is** proxied, so this is
-narrow in practice: it only affects TCP-only language servers / tools and code
-that opens raw sockets. Proxying `socket.c` over the same transport is a
-straightforward later addition (a `net.*` handler family + a virtual-fd backend
-like seam 2); it was deliberately deferred rather than rushed.
+Outbound **TCP connections + DNS** are now proxied too, over the same transport.
+`socket.c` (`sockconnect('tcp', …)`, `:%!nc`-style channels) AND luv/`vim.uv.tcp`
+both funnel through libuv's `uv_tcp_connect` + `uv_getaddrinfo`, so a wasm-only
+linker `--wrap` of those (plus `uv_freeaddrinfo`) — mirroring the shipped
+`--wrap=uv_spawn` — runs the real connect + lookup on the server:
+
+- `__wrap_uv_tcp_connect` backs the `uv_tcp_t` with the **same MEMFS-backed
+  virtual pollable fd** the spawn-stdio proxy uses (`uv_tcp_open(handle, fd)`
+  accepts it — no real socket, no `socketpair`), fires `sock.connect{host,port}`
+  async, and the server's `sock.connect_ok`/`sock.connect_err` push drives the
+  libuv connect callback. Bytes then ride the fd: `sock.data` push → fd queue;
+  nvim `uv_write` → `sock.write`; close → `sock.close`.
+- `__wrap_uv_getaddrinfo` handles BOTH the **sync** form (`socket.c`, `cb==NULL`
+  — JSPI-suspends for the server round-trip, then synthesizes a heap `addrinfo`)
+  and the **async** luv form (`cb!=NULL` — fires the cb later). `--wrap=uv_freeaddrinfo`
+  frees our synthesized `addrinfo` (recognized by a sentinel).
+- **Deferred-callback drain (the JSPI subtlety):** the libuv connect/getaddrinfo
+  callbacks re-enter the event loop and can hit the suspending `__syscall_poll`,
+  so they MUST run on the engine's main (suspendable) frame — not a plain
+  `ccall` from a macrotask (which aborts with "suspend without
+  `WebAssembly.promising`"). The JS half therefore only ENQUEUES the result into
+  C and wakes the poll; a `uv_check` registered on the loop drains the queue and
+  fires the cbs INSIDE `uv_run`. (Also load-bearing: the wrap clears
+  `UV_HANDLE_TCP_NODELAY`/`KEEPALIVE` before `uv_tcp_open`, since `socket.c`'s
+  `uv_tcp_nodelay(true)` would otherwise make `uv__stream_open` `setsockopt` on
+  our non-socket fd and fail the open.)
+
+Server-side, `wasm/server/sock-handlers.js` runs Node `net.connect` +
+`dns.lookup`. **Security:** outbound network is the whole point of the seam, so
+there is no jail on the *destination* (the server can reach any host it can
+route to); the loopback-only bind of the server itself is the load-bearing
+protection, exactly as for the proc/PTY seams.
+
+**Still not done (follow-ups):** listen/accept (inbound TCP servers), unix-domain
+sockets (`sockconnect('pipe', …)` still uses the unproxied `uv_pipe_connect`),
+and IPv6 is carried but the synthesized sync `addrinfo` is IPv4-shaped (the proxy
+routes by host:port, so the literal IP is advisory — the server resolves the
+real address). Async vs sync getaddrinfo are both handled.
 
 ## De-risking spikes (done)
 
