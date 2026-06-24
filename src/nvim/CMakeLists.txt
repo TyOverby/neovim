@@ -820,9 +820,14 @@ if(EMSCRIPTEN)
     # $VIMRUNTIME and the environment (Emscripten does not inherit the host env).
     --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
     # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
-    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js)
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js
+    # Stage 4 / Phase 2 (additive, opt-in): async server-backed filesystem
+    # syscalls scoped to a proxy mount prefix. With no proxy mount configured
+    # (globalThis.__nvimProxy / __nvimProxyMount), every override delegates to the
+    # default behavior, so MEMFS/NODEFS IO is byte-for-byte unchanged. See file.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)

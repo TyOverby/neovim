@@ -61,7 +61,21 @@ if (typeof workerData.cwd === 'string') { globalThis.__nvimCwd = workerData.cwd;
 if (workerData.proxy && workerData.proxy.url) {
   try {
     const { createProxyClient } = require(path.join(__dirname, 'proxy-client.js'));
-    const WebSocket = require('ws');
+    // Resolve `ws` robustly. worker.js is copied into build-wasm/bin (where there
+    // is no node_modules), so a bare require('ws') fails there. Try, in order:
+    // a workerData-provided path, a bare require (when worker.js runs in-tree),
+    // and the repo's web-bundle node_modules (../../wasm/web/node_modules from
+    // build-wasm/bin). The web bundle is where build-nvim.sh npm-installs ws.
+    let WebSocket = null;
+    const wsCandidates = [];
+    if (workerData.proxy.wsModule) { wsCandidates.push(workerData.proxy.wsModule); }
+    wsCandidates.push('ws');
+    wsCandidates.push(path.resolve(__dirname, '..', '..', 'wasm', 'web', 'node_modules', 'ws'));
+    wsCandidates.push(path.resolve(__dirname, 'node_modules', 'ws'));
+    for (const cand of wsCandidates) {
+      try { WebSocket = require(cand); break; } catch (_e) { /* try next */ }
+    }
+    if (!WebSocket) { throw new Error("the 'ws' npm package could not be resolved"); }
     const ws = new WebSocket(workerData.proxy.url);
     const transport = {
       send: function (data) { ws.send(data); },
@@ -69,15 +83,22 @@ if (workerData.proxy && workerData.proxy.url) {
     };
     const client = createProxyClient(transport);
     globalThis.__nvimProxy = client;
+    // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
+    // '/host' when a proxy is configured but no mount was given (documented).
+    globalThis.__nvimProxyMount = (typeof workerData.proxy.mount === 'string' &&
+      workerData.proxy.mount.length) ? workerData.proxy.mount : '/host';
     ws.on('message', function (d) { if (transport.onFrame) { transport.onFrame(d); } });
     ws.on('open', function () {
-      client.hello({ mount: workerData.proxy.mount, root: workerData.proxy.root })
+      client.hello({ mount: globalThis.__nvimProxyMount, root: workerData.proxy.root })
         .catch(function () { /* ignore; engine keeps running */ });
     });
     ws.on('close', function () { if (client.onTransportClosed) { client.onTransportClosed(); } });
-    ws.on('error', function () { /* ignore; no IO depends on it in Phase 1 */ });
-  } catch (_e) {
-    // proxy-client.js or ws missing -> skip the seam; the engine still boots.
+    ws.on('error', function () { /* ignore; transport errors surface as close */ });
+  } catch (e) {
+    // proxy-client.js or ws missing -> skip the seam; the engine still boots
+    // (MEMFS/NODEFS only). Surface it on stderr so a misconfigured proxy isn't
+    // a silent no-op (Phase 2: mount-path file ops would then fail to open).
+    try { process.stderr.write('nvim worker: proxy setup failed: ' + (e && e.message || e) + '\n'); } catch (_e) {}
   }
 }
 

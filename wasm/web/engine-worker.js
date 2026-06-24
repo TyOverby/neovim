@@ -128,11 +128,15 @@ function setupProxy(proxy) {
   var client = self.ProxyClient.createProxyClient(transport);
   // Future phases' js-library (FS / proc_spawn) finds the proxy here.
   self.__nvimProxy = client;
+  // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
+  // '/host' when a proxy is configured but no mount was given (documented).
+  self.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
+    ? proxy.mount : '/host';
 
   ws.onmessage = function (ev) { if (transport.onFrame) { transport.onFrame(ev.data); } };
   ws.onopen = function () {
     // Handshake: carry the mount prefix + jail root to the server (Phase 1 acks).
-    client.hello({ mount: proxy.mount, root: proxy.root }).then(function () {
+    client.hello({ mount: self.__nvimProxyMount, root: proxy.root }).then(function () {
       try { postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url }); } catch (_e) {}
     }, function (err) {
       try { postMessage({ kind: 'stderr', text: 'proxy hello failed: ' + (err && err.message || err) }); } catch (_e) {}

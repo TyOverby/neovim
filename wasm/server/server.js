@@ -47,6 +47,10 @@ try {
 // decodeFrame). The server reuses those so both ends agree on the wire format.
 const { encodeFrame, decodeFrame } = require('../proxy-client.js');
 
+// Phase 2: the filesystem proxy handlers (fs.open / fs.read / fs.write / ...),
+// jailed to ctx.config.root. Additive -- registered alongside the Phase 1 stubs.
+const { registerFsHandlers } = require('./fs-handlers.js');
+
 // ---- handler registry -------------------------------------------------------
 // register(method, async (params, payload, ctx) => result | { result, payload }).
 // A handler may return a bare result (JSON) or { result, payload } to also send
@@ -80,9 +84,12 @@ function serveConnection(ws, registry, serverConfig) {
 
   async function dispatch(header, payload) {
     if (header.t === 'hello') {
-      // Handshake: store the client's proxy config (mount/root) and ack it with a
-      // res-shaped frame carrying the same id. Phase 1 just echoes/acks.
+      // Handshake: store the client's proxy config (mount) and ack it. SECURITY:
+      // the jail `root` is the SERVER's --root, authoritative -- a client-supplied
+      // `root` in the hello must NOT be able to widen/relocate the jail, so we
+      // force the server's root back AFTER merging the client's params.
       ctx.config = Object.assign({}, ctx.config, header.params || {});
+      ctx.config.root = serverConfig.root;   // server's --root wins, always
       transport.send(encodeFrame({
         t: 'res', id: header.id, ok: true,
         result: { hello: true, config: ctx.config },
@@ -164,6 +171,7 @@ function createServer(config) {
   const serverConfig = { root: config.root || process.cwd() };
   const registry = createRegistry();
   registerPhase1Handlers(registry);
+  registerFsHandlers(registry);   // Phase 2: jailed filesystem proxy handlers
 
   const httpServer = http.createServer(serve.handleStaticRequest);
 
