@@ -594,6 +594,50 @@ process's privileges. The defaults reflect that:
   demo and the Node e2e suites; the `serve.js` static demo intentionally has no
   proxy.
 
+### Where this is going — `rvim` (stage 5, designed)
+
+> **Status: design + spikes.** Full design and phase plan in `stage5.md`; the two
+> riskiest mechanisms are de-risked (spikes green). Not yet built.
+
+Stage 4 proxies IO to a server on **the same machine** that serves the page.
+Stage 5 (`rvim`, "remote vim") separates those roles, because the machine holding
+your files may not be internet-exposed and may have no TLS certs — so it can't
+safely host the page itself. An **intermediary** (in practice your laptop on
+`127.0.0.1`, or a host behind your nginx/Kerberos proxy) terminates HTTP/TLS,
+serves the page, and forwards all IO to the remote over SSH:
+
+```
+   browser (wasm engine + proxy client)
+        │  http + websocket
+        ▼
+   rvim  (app/web server, FS routing + jail)
+        │  ssh stdio   (or in-process when local — no remote hop)
+        ▼
+   rvim --serve-stdio   (io-proxy on the remote: your files)
+```
+
+The headline pieces (see `stage5.md`):
+
+- **One Go binary, three modes** — app/web server, `--serve-stdio` remote
+  io-proxy, and the local case (io-proxy in-process). Go because the goal is a
+  *small static binary with no runtime dependency and easy cross-compilation* —
+  exactly Node's weak spots. The same stage-4 frame protocol rides every
+  transport (WebSocket / SSH stdio / in-process), gaining a `version` field and a
+  `cancel` frame.
+- **`rvim` / `rvim --remote user@host`** — SSH stdio is the remote transport
+  (ssh handles encryption + auth; the remote io-proxy binds no ports). `--site`
+  and `--rc` (`bundled`|`local`|`remote`) pick where the runtime files and your
+  config come from, via a two-layer prefix-routing table.
+- **Reconnect contract** — *the browser engine is the only durable state; on any
+  disconnect, in-flight ops fail fast (`-EIO`, never hang), live handles tear
+  down, then the transport reconnects so the next op succeeds.* No transparent
+  replay. (Spike confirmed the engine-side `-EIO` rejection arm already exists.)
+- **Auth** — `127.0.0.1` by default (covers nginx-on-loopback); binding wider
+  requires a token + TLS.
+- **Testing** — Go unit tests on the io-proxy library, a language-neutral
+  protocol conformance suite (the stage-4 Node server is the reference oracle),
+  and `chromedp`-driven headless-browser e2e including fault injection.
+
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
 This directory contains everything needed to cross-compile Neovim to WebAssembly
