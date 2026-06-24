@@ -1,0 +1,3 @@
+# Built binaries (go build -o rvim ./cmd/rvim)
+/rvim
+/cmd/rvim/rvim
