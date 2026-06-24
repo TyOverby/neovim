@@ -783,9 +783,12 @@ if(EMSCRIPTEN)
   # uv_process_t handle bookkeeping (uv__handle_init / uv__handle_start /
   # uv__queue_*), which lives in libuv's INTERNAL header uv-common.h. Scope that
   # internal include dir to THIS ONE translation unit only (it is not on nvim's
-  # normal include path). The header is a build artifact of the wasm libuv build.
+  # normal include path). wasm/build-deps.sh vendors uv-common.h (+ queue.h /
+  # strscpy.h) into .deps-wasm/usr/include/libuv-src; we point here (not at the
+  # libuv build/source tree) because CI caches only usr/, so the build tree may
+  # be absent on a deps-cache hit.
   set_source_files_properties(${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c PROPERTIES
-    INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/.deps-wasm/build/src/libuv/src)
+    INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/.deps-wasm/usr/include/libuv-src)
   target_link_options(nvim_bin PRIVATE
     # Stage 4 / Phase 4 (additive, opt-in): intercept uv_spawn / uv_process_kill
     # so LSP servers + vim.system() + any luv subprocess run on the IO-proxy
