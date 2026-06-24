@@ -34,6 +34,40 @@ go test ./...                       # frame codec unit tests + conformance vs No
 go run ./cmd/conformance             # same suite, summary output
 ```
 
+## Building the binary
+
+```sh
+go build -o rvim ./cmd/rvim          # ~9.4MB static binary
+```
+
+Two ways to serve the browser bundle:
+
+- **`--assets-dir` (dev):** serve the bundle off disk, no rebuild to swap assets.
+
+  ```sh
+  ../web/build-site.sh /tmp/rvim-site         # assemble the flat bundle
+  ./rvim --assets-dir /tmp/rvim-site --root ~/project --proxy
+  ```
+
+- **Embedded (release):** bake the bundle into the binary so it's a single
+  self-contained file (no `--assets-dir` needed). The embed is gated behind the
+  `embed_assets` build tag, so the default build compiles without a bundle
+  present.
+
+  ```sh
+  # 1. build the wasm engine first (produces build-wasm/bin/nvim.{js,wasm,data}):
+  ../build-deps.sh && ../build-nvim.sh
+  # 2. assemble the flat bundle INTO the embed dir (server/site/, gitignored):
+  ../web/build-site.sh server/site
+  # 3. build with the tag — server/site/ is embedded via //go:embed:
+  go build -tags embed_assets -o rvim ./cmd/rvim
+  ./rvim --root ~/project --proxy            # serves the baked-in bundle
+  ```
+
+  Step 1 is the prerequisite for a *real* bundle: `build-site.sh` needs
+  `build-wasm/bin/nvim.{js,wasm,data}`. Without the wasm build there's nothing
+  substantive to embed. Cross-compile a release with the usual `GOOS`/`GOARCH`.
+
 > Module cache: this environment's `$HOME/go` is read-only; point the cache at a
 > writable dir, e.g. `GOMODCACHE=/tmp/gomodcache go test ./...`. Deps are vendored
 > (`vendor/`), so builds are hermetic and need no network.

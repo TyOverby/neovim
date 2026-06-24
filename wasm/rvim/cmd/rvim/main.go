@@ -54,8 +54,16 @@ func main() {
 		Mount:       *mount,
 		ProxyConfig: *proxy,
 	}
+	// Static assets: an explicit --assets-dir (dev) wins; otherwise fall back to a
+	// bundle embedded at build time (`-tags embed_assets`), so a release binary is
+	// self-contained. With neither, the server runs without static serving.
+	assetSource := ""
 	if *assetsDir != "" {
 		cfg.Assets = server.NewAssetServer(os.DirFS(*assetsDir))
+		assetSource = "--assets-dir " + *assetsDir
+	} else if fsys, ok := server.EmbeddedAssets(); ok {
+		cfg.Assets = server.NewAssetServer(fsys)
+		assetSource = "embedded bundle"
 	}
 
 	srv := server.New(cfg, server.NewRegistry())
@@ -69,7 +77,9 @@ func main() {
 	fmt.Printf("  filesystem root : %s  (jail root; mount %s)\n", jailRoot, *mount)
 	fmt.Printf("  bound to %s (loopback default; no token — single-user model)\n", *bind)
 	if cfg.Assets == nil {
-		fmt.Printf("  NOTE: no --assets-dir; static bundle not served (run wasm/web/build-site.sh first)\n")
+		fmt.Printf("  NOTE: no static bundle (pass --assets-dir <build-site.sh output>, or build with -tags embed_assets)\n")
+	} else {
+		fmt.Printf("  static bundle   : %s\n", assetSource)
 	}
 	if !*proxy {
 		fmt.Printf("  NOTE: --proxy off; serving the no-proxy demo (Phase 2 has only base handlers)\n")
