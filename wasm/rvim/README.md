@@ -62,8 +62,17 @@ go run ./cmd/conformance             # same suite, summary output
   response frame) guarantees the `{id}` reaches the client before any push
   referencing it. `GoTarget` caps now `{base, fs, proc, pty}`; all proc/pty
   scenarios pass (clean under `-race`, stable across repeated runs).
-- Later phases: sockets, `cancel` + reconnect, SSH-stdio remote, FS routing,
-  auth/TLS.
+- **Phase 5 (done):** socket + DNS proxy (`server/sock.go`) — the Go port of
+  `sock-handlers.js`: `sock.connect` (TCP + unix), `sock.write/close`,
+  `sock.getaddrinfo`, and inbound `sock.listen/accept/listen_close` with the
+  `sock.incoming`/`connect_ok`/`connect_err`/`data`/`closed` pushes; sockets +
+  listeners tracked per connection and torn down on disconnect. **`GoTarget` now
+  reaches FULL parity with the Node oracle — all 16 conformance scenarios pass
+  against the Go server** (clean under `-race`, stable across 10× runs). The Go
+  server now implements every IO seam the stage-4 Node server does.
+- Later phases: `cancel` + reconnect (ReconnectingProxy, the fault-injection
+  phase), SSH-stdio remote (`--remote`/`--serve-stdio`), FS routing
+  (`--site`/`--rc`), auth/TLS.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
 …}` in `conformance/gotarget.go`; each handler phase adds its cap there and the

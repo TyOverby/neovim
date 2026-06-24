@@ -20,7 +20,7 @@ func TestNodeReference(t *testing.T) {
 // in-process Go server. The implemented-caps set grows each phase until it
 // matches the Node oracle.
 func TestGoServer(t *testing.T) {
-	runAgainst(t, GoTarget{Implemented: []string{"base", "fs", "proc", "pty"}})
+	runAgainst(t, GoTarget{Implemented: []string{"base", "fs", "proc", "pty", "sock"}})
 }
 
 func runAgainst(t *testing.T, target Target) {

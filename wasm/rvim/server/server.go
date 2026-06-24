@@ -55,6 +55,7 @@ func NewRegistry() *Registry {
 	RegisterFS(r)   // seam 1: filesystem proxy
 	RegisterProc(r) // seam 2: process spawn proxy
 	RegisterPTY(r)  // seam 2: PTY proxy
+	RegisterSock(r) // seam 3: TCP/unix sockets + DNS (outbound + inbound)
 	return r
 }
 
