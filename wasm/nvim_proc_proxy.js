@@ -144,19 +144,49 @@ addToLibrary({
     // Allocate a virtual pollable fd. Opens a real MEMFS file to get a
     // first-class FS stream (so fcntl works for uv_pipe_open), O_RDWR so libuv
     // marks the handle readable+writable, then swaps in the pollable ops.
+    //
+    // mode 0 = readable (child stdout/stderr); 1 = writable (child stdin);
+    // 2 = PTY (bidirectional): one channel; the fd's stream reads server output
+    // (mode 'r'), and ptyDupFd() opens a SECOND stream that writes input ('w')
+    // onto the SAME channel -- mirroring the native pty, where one master fd is
+    // dup()'d into proc->in (write) and proc->out (read). (Phase 5.)
     allocFd: function (mode) {
-      var modeStr = mode === 1 ? 'w' : 'r';
+      var modeStr = mode === 1 ? 'w' : 'r';  // pty (2) reads via its primary fd
       var name = '/.nvim-proc-proxy-fd-' + ProcProxy.nextFd;
       try {
         FS.writeFile(name, new Uint8Array(0));
         var stream = FS.open(name, 2 /* O_RDWR */);
         var ch = { inQueue: [], closed: false, onWrite: null, onClose: null };
         ProcProxy.applyOps(stream, ch, modeStr);
-        ProcProxy.fds[stream.fd] = { ch: ch, mode: modeStr, path: name };
+        ProcProxy.fds[stream.fd] = { ch: ch, mode: modeStr, path: name, pty: (mode === 2) };
         ProcProxy.nextFd++;
         return stream.fd;
       } catch (e) {
         ProcProxy.dbg('allocFd failed: ' + (e && e.message || e));
+        return -1;
+      }
+    },
+
+    // Phase 5: open a SECOND virtual fd ('w' ops) onto the SAME channel as an
+    // existing pty fd, so nvim can dup the one pty "master" into both proc->out
+    // (the readable primary fd) and proc->in (this writable dup). Writes to this
+    // fd become terminal INPUT (-> ch.onWrite -> pty.write). Returns the new fd or
+    // -1. The two fds share `ch`, so a server pty.data push (queued on the primary
+    // fd's ch.inQueue) is read via the primary fd, and terminal input written to
+    // this dup reaches the same server pty.
+    ptyDupFd: function (fd) {
+      var primary = ProcProxy.fds[fd];
+      if (!primary) { return -1; }
+      var name = '/.nvim-proc-proxy-fd-' + ProcProxy.nextFd;
+      try {
+        FS.writeFile(name, new Uint8Array(0));
+        var stream = FS.open(name, 2 /* O_RDWR */);
+        ProcProxy.applyOps(stream, primary.ch, 'w');  // shares the SAME channel
+        ProcProxy.fds[stream.fd] = { ch: primary.ch, mode: 'w', path: name, pty: true, dupOf: fd };
+        ProcProxy.nextFd++;
+        return stream.fd;
+      } catch (e) {
+        ProcProxy.dbg('ptyDupFd failed: ' + (e && e.message || e));
         return -1;
       }
     },
@@ -262,6 +292,37 @@ addToLibrary({
               entry.released = true;
               var releaseEntry = entry;
               setTimeout(function () { ProcProxy.releaseEntry(releaseEntry); }, 0);
+            }
+          }
+          return;
+        }
+        // ---- Phase 5: PTY pushes (pty.data / pty.exit) ----------------------
+        // A pty entry has a single bidirectional channel: server output arrives
+        // as pty.data and is queued on the (readable) primary fd (entry.fdOut),
+        // which nvim reads through proc->out. pty.exit drives the same exit flow
+        // as a Proc child (the entry's exitEntry is nvim_proxy_proc_on_exit).
+        if (method === 'pty.data') {
+          if (entry && entry.fdOut >= 0 && payload && payload.length) {
+            ProcProxy.pushBytes(entry.fdOut, payload.slice ? payload.slice() : new Uint8Array(payload));
+          }
+          return;
+        }
+        if (method === 'pty.exit') {
+          if (entry && !entry.exited) {
+            entry.exited = true;
+            // EOF the readable side so nvim's read_cb sees the end.
+            if (entry.fdOut >= 0) { ProcProxy.closeFd(entry.fdOut); }
+            var pcode = (params && typeof params.code === 'number') ? params.code : 0;
+            var psig = (params && typeof params.signal === 'number') ? params.signal : 0;
+            ProcProxy.deliverExit(entry, pcode, psig);
+            // A pty proc (kProcTypePty) has NO C close hook that releases JS
+            // bookkeeping (proc_close -> pty_proc_close kills + runs close_cb but
+            // never calls back into JS), so release here, deferred past the
+            // synchronous exit_cb -> uv_close -> FS.close teardown.
+            if (!entry.released) {
+              entry.released = true;
+              var ptyRelease = entry;
+              setTimeout(function () { ProcProxy.releaseEntry(ptyRelease); }, 0);
             }
           }
           return;
@@ -397,6 +458,96 @@ addToLibrary({
       return localId;
     },
 
+    // Phase 5: PTY spawn driver. C has allocated ONE bidirectional virtual fd
+    // (fdOut, the readable primary that nvim's proc->out reads) and a write dup
+    // (fdIn, nvim's proc->in for terminal input), both sharing one channel, and
+    // uv_pipe_open'd them. Here we register the pty entry, wire the input writer
+    // (nvim writes the pty input fd -> pty.write), fire `pty.spawn` async with the
+    // initial cols/rows, and return a local id synchronously. Exit drives
+    // nvim_proxy_proc_on_exit (a pty proc's exit_cb is on_proc_exit, exactly like
+    // a Proc child). A spawn FAILURE is delivered through the exit path (127).
+    spawnPty: function (handle, argvPtr, cwdPtr, envPtr, fd, fdIn, cols, rows) {
+      var px = ProcProxy.proxy();
+      if (!px) { return -1; }
+
+      var argv = ProcProxy.readStrv(argvPtr);
+      if (argv.length === 0) { return -1; }
+      var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
+      var envList = ProcProxy.readStrv(envPtr);
+      var env = null;
+      if (envList.length) {
+        env = {};
+        for (var i = 0; i < envList.length; i++) {
+          var eq = envList[i].indexOf('=');
+          if (eq > 0) { env[envList[i].slice(0, eq)] = envList[i].slice(eq + 1); }
+        }
+      }
+
+      var localId = ProcProxy.nextLocalId++;
+      var entry = {
+        handle: handle, localId: localId, serverId: null,
+        fdIn: (fdIn | 0), fdOut: (fd | 0), fdErr: -1,
+        exited: false, isPty: true,
+        exitEntry: 'nvim_proxy_proc_on_exit',
+      };
+      ProcProxy.byHandle[handle] = entry;
+
+      // Stamp ownership on both shared-channel fds (see freeFd's OWNERSHIP GUARD).
+      if (entry.fdOut >= 0 && ProcProxy.fds[entry.fdOut]) { ProcProxy.fds[entry.fdOut].owner = localId; }
+      if (entry.fdIn >= 0 && ProcProxy.fds[entry.fdIn]) { ProcProxy.fds[entry.fdIn].owner = localId; }
+
+      // Wire the input writer: nvim writes the pty input fd -> pty.write request.
+      // Both fds share one channel, so install onWrite on that shared channel.
+      var ch = (entry.fdOut >= 0 && ProcProxy.fds[entry.fdOut]) ? ProcProxy.fds[entry.fdOut].ch : null;
+      if (ch) {
+        ch.onWrite = function (bytes) {
+          if (entry.serverId == null) {
+            (entry.inBuf || (entry.inBuf = [])).push(bytes);
+            return;
+          }
+          px.request('pty.write', { id: entry.serverId }, bytes)
+            .catch(function () { /* pty gone; reads will EOF */ });
+        };
+        // A pty has no stdin-EOF concept; closing a stream just drops the channel.
+        ch.onClose = function () { /* teardown handled via pty.kill on close */ };
+      }
+
+      ProcProxy.wirePush();
+
+      px.request('pty.spawn', {
+        argv: argv, cwd: cwd, env: env, cols: (cols | 0), rows: (rows | 0),
+      }).then(function (resp) {
+        var sid = resp && resp.result && resp.result.id;
+        if (sid == null) { throw new Error('pty.spawn: no id'); }
+        entry.serverId = sid;
+        ProcProxy.byServerId[sid] = entry;
+        if (entry.killOnAck != null) {
+          px.request('pty.kill', { id: sid, signal: entry.killOnAck }).catch(function () {});
+          entry.killOnAck = null;
+        }
+        if (entry.resizeOnAck) {
+          px.request('pty.resize', { id: sid, cols: entry.resizeOnAck.cols, rows: entry.resizeOnAck.rows })
+            .catch(function () {});
+          entry.resizeOnAck = null;
+        }
+        if (entry.inBuf && entry.inBuf.length) {
+          for (var j = 0; j < entry.inBuf.length; j++) {
+            px.request('pty.write', { id: sid }, entry.inBuf[j]).catch(function () {});
+          }
+          entry.inBuf = null;
+        }
+      }, function (e) {
+        ProcProxy.dbg('pty.spawn failed: ' + (e && e.message || e));
+        if (!entry.exited) {
+          entry.exited = true;
+          if (entry.fdOut >= 0) { ProcProxy.closeFd(entry.fdOut); }
+          ProcProxy.deliverExit(entry, 127, 0);
+        }
+      });
+
+      return localId;
+    },
+
     // Read a NUL-separated, double-NUL-terminated C buffer into a JS string array
     // (stops at the empty trailing string). Mirrors flatten_strv() in C.
     readStrv: function (ptr) {
@@ -429,6 +580,71 @@ addToLibrary({
   nvim_proxy_alloc_fd__deps: ['$ProcProxy'],
   nvim_proxy_alloc_fd: function (mode) {
     return ProcProxy.allocFd(mode);
+  },
+
+  // --------------------------------------------------------------------------
+  // Phase 5 PTY entries (called from src/nvim/os/pty_proc_unix.c, EMSCRIPTEN +
+  // nvim_proxy_active()-gated). A :terminal child runs on the server over ONE
+  // bidirectional virtual fd; resize/exit ride pty.resize / pty.exit.
+  // --------------------------------------------------------------------------
+
+  // nvim_proxy_pty_dup_fd(fd): open a 2nd ('w') stream on fd's channel (the dup
+  // of the pty master into proc->in). Returns the new fd or -1.
+  nvim_proxy_pty_dup_fd__deps: ['$ProcProxy'],
+  nvim_proxy_pty_dup_fd: function (fd) {
+    return ProcProxy.ptyDupFd(fd);
+  },
+
+  // nvim_proxy_pty_spawn(handle, argvPtr, cwdPtr, envPtr, fd, fdIn, cols, rows):
+  // register the pty, wire the input writer + push routing, fire `pty.spawn`
+  // async with the initial size, return a local id. Exit/failure flow as a Proc.
+  nvim_proxy_pty_spawn__deps: ['$ProcProxy'],
+  nvim_proxy_pty_spawn: function (handle, argvPtr, cwdPtr, envPtr, fd, cols, rows) {
+    // The C signature is (handle, argv, cwd, env, fd, cols, rows): the write-side
+    // dup fd is found from the channel, but C also opens proc->in onto a dup whose
+    // number we recover by scanning for the sibling sharing fd's channel.
+    var fdIn = -1;
+    var primary = ProcProxy.fds[fd];
+    if (primary) {
+      for (var k in ProcProxy.fds) {
+        if (ProcProxy.fds[k] !== primary && ProcProxy.fds[k].ch === primary.ch) {
+          fdIn = (k | 0);
+          break;
+        }
+      }
+    }
+    return ProcProxy.spawnPty(handle, argvPtr, cwdPtr, envPtr, fd, fdIn, cols, rows);
+  },
+
+  // nvim_proxy_pty_resize(handle, cols, rows): forward a resize to the server pty.
+  nvim_proxy_pty_resize__deps: ['$ProcProxy'],
+  nvim_proxy_pty_resize: function (handle, cols, rows) {
+    var entry = ProcProxy.byHandle[handle];
+    if (!entry) { return; }
+    var px = ProcProxy.proxy();
+    if (!px) { return; }
+    if (entry.serverId != null) {
+      px.request('pty.resize', { id: entry.serverId, cols: (cols | 0), rows: (rows | 0) })
+        .catch(function () {});
+    } else {
+      entry.resizeOnAck = { cols: (cols | 0), rows: (rows | 0) };
+    }
+  },
+
+  // nvim_proxy_pty_kill(handle, signum): ask the server to kill the pty child
+  // (the close path's analogue of hanging up the master). The server's pty.exit
+  // push then drives the normal exit/close/refcount flow.
+  nvim_proxy_pty_kill__deps: ['$ProcProxy'],
+  nvim_proxy_pty_kill: function (handle, signum) {
+    var entry = ProcProxy.byHandle[handle];
+    if (!entry) { return; }
+    var px = ProcProxy.proxy();
+    if (!px) { return; }
+    if (entry.serverId != null) {
+      px.request('pty.kill', { id: entry.serverId, signal: signum }).catch(function () {});
+    } else {
+      entry.killOnAck = signum;
+    }
   },
 
   // --------------------------------------------------------------------------

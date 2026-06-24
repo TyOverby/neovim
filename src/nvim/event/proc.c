@@ -28,6 +28,8 @@
 extern int nvim_proxy_active(void);
 // Defined in wasm/nvim_proc_proxy.js: send a signal to the server child.
 extern void nvim_proxy_proc_kill(void *handle, int signum);
+// Defined in wasm/nvim_proc_proxy.js (Phase 5): kill the server PTY for a handle.
+extern void nvim_proxy_pty_kill(void *handle, int signum);
 #endif
 
 #include "event/proc.c.generated.h"
@@ -301,6 +303,13 @@ static void children_kill_cb(uv_timer_t *handle)
       // unrelated local process).
       proc->exit_signal = SIGKILL;
       nvim_proxy_proc_kill(proc, SIGKILL);
+      continue;
+    }
+    if (proc->type == kProcTypePty && nvim_proxy_active()) {
+      // Phase 5: same reasoning -- proc->pid is the SERVER's pty id. Escalate the
+      // kill on the server, never via os_proc_tree_kill().
+      proc->exit_signal = SIGKILL;
+      nvim_proxy_pty_kill(proc, SIGKILL);
       continue;
     }
 #endif

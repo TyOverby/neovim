@@ -55,6 +55,22 @@ const { registerFsHandlers } = require('./fs-handlers.js');
 // / ...). cwd jailed to ctx.config.root; children killed when the connection drops.
 const { registerProcHandlers, cleanupConnection } = require('./proc-handlers.js');
 
+// Phase 5: the PTY proxy handlers (pty.spawn / pty.write / pty.resize / pty.kill,
+// pty.data / pty.exit pushes) backed by node-pty. cwd jailed to ctx.config.root;
+// ptys killed when the connection drops. Loaded lazily so the server still starts
+// (for FS/proc work) if the native node-pty module is missing -- :terminal then
+// fails cleanly via the unknown-method path instead of crashing the server.
+let registerPtyHandlers = null;
+let cleanupPtys = null;
+try {
+  const pty = require('./pty-handlers.js');
+  registerPtyHandlers = pty.registerPtyHandlers;
+  cleanupPtys = pty.cleanupPtys;
+} catch (e) {
+  console.error('server.js: PTY support disabled (node-pty unavailable): ' +
+                ((e && e.message) || e));
+}
+
 // ---- handler registry -------------------------------------------------------
 // register(method, async (params, payload, ctx) => result | { result, payload }).
 // A handler may return a bare result (JSON) or { result, payload } to also send
@@ -141,6 +157,7 @@ function serveConnection(ws, registry, serverConfig) {
   // closed tab/worker leaves no orphans (Phase 3). Best-effort; never throws.
   ws.on('close', function () {
     try { cleanupConnection(ctx); } catch (_e) { /* ignore */ }
+    try { if (cleanupPtys) { cleanupPtys(ctx); } } catch (_e) { /* ignore */ }
   });
 }
 
@@ -182,6 +199,7 @@ function createServer(config) {
   registerPhase1Handlers(registry);
   registerFsHandlers(registry);   // Phase 2: jailed filesystem proxy handlers
   registerProcHandlers(registry); // Phase 3: jailed process-spawn proxy handlers
+  if (registerPtyHandlers) { registerPtyHandlers(registry); }  // Phase 5: PTY (node-pty)
 
   const httpServer = http.createServer(serve.handleStaticRequest);
 
