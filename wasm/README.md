@@ -477,6 +477,12 @@ configured and follow them around between sites.
 
 ## As a standalone application
 
+> **Status: in progress.** The architecture and a phased implementation plan are
+> written up in `stage4.md`; the two hardest mechanisms (async server-backed
+> filesystem syscalls, and proxied child-process stdio over virtual fds) have been
+> de-risked with running wasm spikes. The phases below are being built and tested
+> in series. This section will be rewritten to a quickstart once it ships.
+
 The most ambitious part of the project, the standalone `neovim.js` application
 is designed to be a full replacement for running neovim on a remote server.
 With a standard neovim setup, typing responsiveness is tied to the latency of
@@ -488,6 +494,23 @@ is local to your browser, text editing and plugin execution is lightning fast.
 Filesystem access, network connections, shells, LSP servers, commands, and
 PTY's are all transparently proxied through the server, so they run for real on
 the system that you care about.
+
+**How it works (see `stage4.md` for the full design).** The engine keeps running
+in the browser Web Worker exactly as the library does, but the worker also opens a
+WebSocket to the server and routes the engine's real IO over it. Two seams carry
+that IO: server-backed **filesystem** syscalls (made async via JSPI, scoped to a
+mount prefix so MEMFS stays fast and local) and a **process/PTY** proxy backend in
+`proc_spawn` whose children's stdio rides virtual pollable fds — the same fd
+mechanism that already backs the engine's own stdin/stdout. Because most language
+servers are spawned as stdio jobs, **LSP falls out of the process proxy** with no
+extra work. The server runs on the machine you care about and executes the real
+filesystem ops, child processes, PTYs, and (eventually) sockets.
+
+> **Security.** The server runs real commands on its host (`:!`, `:terminal`,
+> `jobstart()`), so it binds **`127.0.0.1` only** by default and jails the
+> filesystem proxy to a configured root. It is the single-user "edit my own box"
+> tool the description above implies — not a multi-tenant sandbox. Exposing it
+> beyond loopback is an explicit, documented opt-in.
 
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
@@ -523,7 +546,8 @@ What works today (`node nvim.js -- <args>`):
 | Engine in a worker + JS client over `postMessage` | ✅ |
 | **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `stage3.md`, `wasm/web/`) |
 | Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
-| `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed (no spawn in wasm) |
+| `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone library (no spawn in wasm) |
+| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | 🚧 in progress (stage 4 — see `stage4.md`; mechanisms de-risked) |
 
 ## Prerequisites
 
