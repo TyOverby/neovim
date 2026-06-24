@@ -41,7 +41,7 @@
 // ============================================================================
 // SERVER PROTOCOL (handled in wasm/server/sock-handlers.js)
 // ============================================================================
-//   sock.connect     {host, port}            -> {id}        (server connection id)
+//   sock.connect     {host, port} | {path}   -> {id}        ({path} = unix socket)
 //   sock.write       {id} + payload<bytes>   -> {ok}        (write to the socket)
 //   sock.close       {id}                    -> {ok}        (end/destroy the socket)
 //   sock.getaddrinfo {host, service}         -> {addrs:[{family,address,port}]}
@@ -269,6 +269,80 @@ addToLibrary({
       }
       SockProxy.wake();  // resume the suspended poll so the loop runs the check
     },
+
+    // Shared connect driver for BOTH TCP ({host,port}) and UNIX ({path}). Register
+    // the entry, wire the socket's outbound write/close to the server, fire
+    // `sock.connect` (with connectParams) async, and map the returned server id so
+    // sock.data/connect_ok/connect_err pushes route. The connect RESULT itself is
+    // delivered by the server's sock.connect_ok / sock.connect_err push (see
+    // wirePush) -- identical for both transports.
+    startConnect: function (req, handle, fd, connectParams) {
+      var px = SockProxy.proxy();
+      var slot = SockProxy.fds[fd];
+      var entry = {
+        req: req, handle: handle, fd: (fd | 0), serverId: null,
+        settled: false, params: connectParams,
+      };
+      SockProxy.byReq[req] = entry;
+
+      // Wire the socket's outbound writes + close to the server. Buffer writes
+      // that race ahead of the server id (rare: nvim waits for connect_cb first).
+      if (slot) {
+        slot.ch.onWrite = function (bytes) {
+          if (entry.serverId == null) {
+            (entry.outBuf || (entry.outBuf = [])).push(bytes);
+            return;
+          }
+          px.request('sock.write', { id: entry.serverId }, bytes)
+            .catch(function () { /* socket gone; reads will EOF */ });
+        };
+        slot.ch.onClose = function () {
+          if (entry.serverId != null && !entry.closeSent) {
+            entry.closeSent = true;
+            px.request('sock.close', { id: entry.serverId }).catch(function () {});
+          } else {
+            entry.closeOnAck = true;
+          }
+        };
+      }
+
+      SockProxy.wirePush();
+
+      if (!px) {
+        // No proxy (shouldn't happen: the C wrap only calls in when active) ->
+        // fail the connect cleanly.
+        SockProxy.eofFd(fd);
+        SockProxy.deliverConnect(entry, SockProxy.UV_ECONNREFUSED);
+        return;
+      }
+
+      px.request('sock.connect', connectParams).then(function (resp) {
+        var sid = resp && resp.result && resp.result.id;
+        if (sid == null) { throw new Error('sock.connect: no id'); }
+        entry.serverId = sid;
+        SockProxy.byId[sid] = entry;
+        // Flush any buffered writes that raced ahead of the id.
+        if (entry.outBuf && entry.outBuf.length) {
+          for (var j = 0; j < entry.outBuf.length; j++) {
+            px.request('sock.write', { id: sid }, entry.outBuf[j]).catch(function () {});
+          }
+          entry.outBuf = null;
+        }
+        if (entry.closeOnAck && !entry.closeSent) {
+          entry.closeSent = true;
+          px.request('sock.close', { id: sid }).catch(function () {});
+        }
+        // The server pushes sock.connect_ok / sock.connect_err separately.
+      }, function (e) {
+        SockProxy.dbg('sock.connect request failed: ' + (e && e.message || e));
+        if (!entry.settled) {
+          entry.settled = true;
+          SockProxy.eofFd(fd);
+          SockProxy.deliverConnect(entry, SockProxy.UV_ECONNREFUSED);
+          SockProxy.releaseEntry(entry);
+        }
+      });
+    },
   },
 
   // --------------------------------------------------------------------------
@@ -283,78 +357,26 @@ addToLibrary({
   // --------------------------------------------------------------------------
   // nvim_sock_connect(req, handle, fd, hostPtr, port): register the connect (so
   // a later server push finds the req/fd), wire the socket's write/close to the
-  // server, and fire `sock.connect` async. The reply -> nvim_sock_on_connect.
+  // server, and fire `sock.connect{host,port}` async (TCP). The reply ->
+  // nvim_sock_on_connect.
   // --------------------------------------------------------------------------
   nvim_sock_connect__deps: ['$SockProxy'],
   nvim_sock_connect: function (req, handle, fd, hostPtr, port) {
-    var px = SockProxy.proxy();
     var host = hostPtr ? UTF8ToString(hostPtr) : '';
-    var slot = SockProxy.fds[fd];
-    var entry = {
-      req: req, handle: handle, fd: (fd | 0), serverId: null,
-      settled: false, host: host, port: (port | 0),
-    };
-    SockProxy.byReq[req] = entry;
+    SockProxy.startConnect(req, handle, fd, { host: host, port: (port | 0) });
+  },
 
-    // Wire the socket's outbound writes + close to the server. Buffer writes that
-    // happen before the server id arrives (rare: nvim waits for connect_cb first,
-    // but be safe).
-    if (slot) {
-      slot.ch.onWrite = function (bytes) {
-        if (entry.serverId == null) {
-          (entry.outBuf || (entry.outBuf = [])).push(bytes);
-          return;
-        }
-        px.request('sock.write', { id: entry.serverId }, bytes)
-          .catch(function () { /* socket gone; reads will EOF */ });
-      };
-      slot.ch.onClose = function () {
-        if (entry.serverId != null && !entry.closeSent) {
-          entry.closeSent = true;
-          px.request('sock.close', { id: entry.serverId }).catch(function () {});
-        } else {
-          entry.closeOnAck = true;
-        }
-      };
-    }
-
-    SockProxy.wirePush();
-
-    if (!px) {
-      // No proxy (shouldn't happen: the C wrap only calls in when active) ->
-      // fail the connect cleanly.
-      SockProxy.eofFd(fd);
-      SockProxy.deliverConnect(entry, SockProxy.UV_ECONNREFUSED);
-      return;
-    }
-
-    px.request('sock.connect', { host: host, port: (port | 0) }).then(function (resp) {
-      var sid = resp && resp.result && resp.result.id;
-      if (sid == null) { throw new Error('sock.connect: no id'); }
-      entry.serverId = sid;
-      SockProxy.byId[sid] = entry;
-      // Flush any buffered writes that raced ahead of the id.
-      if (entry.outBuf && entry.outBuf.length) {
-        for (var j = 0; j < entry.outBuf.length; j++) {
-          px.request('sock.write', { id: sid }, entry.outBuf[j]).catch(function () {});
-        }
-        entry.outBuf = null;
-      }
-      if (entry.closeOnAck && !entry.closeSent) {
-        entry.closeSent = true;
-        px.request('sock.close', { id: sid }).catch(function () {});
-      }
-      // The server pushes sock.connect_ok / sock.connect_err separately (a
-      // 'connect' event or an 'error'); the connect result is delivered there.
-    }, function (e) {
-      SockProxy.dbg('sock.connect request failed: ' + (e && e.message || e));
-      if (!entry.settled) {
-        entry.settled = true;
-        SockProxy.eofFd(fd);
-        SockProxy.deliverConnect(entry, SockProxy.UV_ECONNREFUSED);
-        SockProxy.releaseEntry(entry);
-      }
-    });
+  // --------------------------------------------------------------------------
+  // nvim_sock_connect_unix(req, handle, fd, pathPtr): the UNIX-domain variant.
+  // Identical wiring to nvim_sock_connect, but the sock.connect request carries
+  // `{path}` instead of `{host,port}` (the server net.connect's a unix socket).
+  // Everything downstream (sock.data/write/close/connect_ok/connect_err, the fd
+  // table, push routing) is shared.
+  // --------------------------------------------------------------------------
+  nvim_sock_connect_unix__deps: ['$SockProxy'],
+  nvim_sock_connect_unix: function (req, handle, fd, pathPtr) {
+    var path = pathPtr ? UTF8ToString(pathPtr) : '';
+    SockProxy.startConnect(req, handle, fd, { path: path });
   },
 
   // --------------------------------------------------------------------------

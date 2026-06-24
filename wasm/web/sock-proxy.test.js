@@ -105,6 +105,22 @@ async function main() {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nvim-sockproxy-'));
   const realRoot = fs.realpathSync(tmpRoot);
 
+  // ---- fixture UNIX-domain socket echo server (in THIS process) -------------
+  // Same echo behavior, but on a unix socket path. The proxy seam does NOT jail
+  // the destination (outbound network is its purpose), so the path can live in a
+  // temp dir of its own, outside the server's --root jail.
+  const sockDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'nvim-unixsock-')));
+  const unixPath = path.join(sockDir, 'echo.sock');
+  const unixEcho = net.createServer(function (sock) {
+    sock.on('data', function (buf) { try { sock.write(buf); } catch (e) {} });
+    sock.on('error', function () { /* ignore */ });
+  });
+  await new Promise(function (resolve, reject) {
+    unixEcho.on('error', reject);
+    unixEcho.listen(unixPath, resolve);
+  });
+  console.log('# unix echo server on ' + unixPath);
+
   // ---- start the real proxy server jailed to realRoot -----------------------
   const srv = serverMod.createServer({ root: realRoot });
   await new Promise(function (resolve) { srv.httpServer.listen(0, '127.0.0.1', resolve); });
@@ -241,13 +257,88 @@ async function main() {
   }
 
   // ==========================================================================
-  // 4. clean teardown with a LIVE socket: open one and DON'T close it, then
-  //    dispose. The worker terminate + ws close must not hang; the server
-  //    destroys the orphan.
+  // 4. vim.uv UNIX-domain pipe: new_pipe():connect(path, cb) + read/write echo.
+  //    Exercises the --wrap=uv_pipe_connect path (connect by PATH).
+  // ==========================================================================
+  await lua(nvim, [
+    '_G.__up = { connected = false, got = "", err = nil }',
+    'local p = vim.uv.new_pipe(false)',
+    '_G.__up.p = p',
+    'p:connect(' + JSON.stringify(unixPath) + ', function(err)',
+    '  if err then _G.__up.err = err; return end',
+    '  _G.__up.connected = true',
+    '  p:read_start(function(rerr, chunk)',
+    '    if rerr then _G.__up.err = rerr; return end',
+    '    if chunk then _G.__up.got = _G.__up.got .. chunk end',
+    '  end)',
+    '  p:write("ping-pipe\\n")',
+    'end)',
+    'return true',
+  ].join('\n'));
+
+  const upConnected = await waitFor(async function () {
+    return await lua(nvim, 'return _G.__up.connected') === true;
+  }, 10000);
+  ok(upConnected, 'vim.uv new_pipe():connect(path) fired its connect callback (unix socket)');
+
+  const upEchoed = await waitFor(async function () {
+    const got = await lua(nvim, 'return _G.__up.got');
+    return typeof got === 'string' && got.indexOf('ping-pipe') >= 0;
+  }, 10000);
+  const upErr = await lua(nvim, 'return _G.__up.err');
+  ok(upEchoed, 'vim.uv pipe: wrote "ping-pipe" and the echo came back' + (upErr ? (' (err=' + upErr + ')') : ''));
+  await lua(nvim, 'if _G.__up.p then _G.__up.p:close() end; return true');
+
+  // ==========================================================================
+  // 5. nvim sockconnect('pipe', path, {rpc=false, on_data}) + chansend round-trip.
+  //    Exercises socket.c's pipe branch (uv_pipe_connect by path).
+  // ==========================================================================
+  await lua(nvim, [
+    '_G.__pc = { data = "", chan = nil, err = nil, done = false }',
+    'vim.fn.timer_start(0, function()',
+    '  local ok, res = pcall(function()',
+    '    return vim.fn.sockconnect("pipe", ' + JSON.stringify(unixPath) + ', {',
+    '      rpc = false,',
+    '      on_data = function(_, d, _)',
+    '        _G.__pc.data = _G.__pc.data .. table.concat(d, "\\n")',
+    '      end,',
+    '    })',
+    '  end)',
+    '  _G.__pc.done = true',
+    '  if not ok then _G.__pc.err = tostring(res) else _G.__pc.chan = res end',
+    'end)',
+    'return true',
+  ].join('\n'));
+  await waitFor(async function () {
+    return await lua(nvim, 'return _G.__pc.done') === true;
+  }, 10000);
+  const pcOk = await lua(nvim, 'return _G.__pc.chan');
+  const pcErr = await lua(nvim, 'return _G.__pc.err');
+  ok(typeof pcOk === 'number' && pcOk > 0,
+     'sockconnect("pipe", path) returned a channel id (' + pcOk + ')' + (pcErr ? (' err=' + pcErr) : ''));
+
+  if (typeof pcOk === 'number' && pcOk > 0) {
+    await lua(nvim, 'vim.fn.chansend(_G.__pc.chan, "ping-pipe-sock\\n"); return true');
+    const pcEchoed = await waitFor(async function () {
+      const d = await lua(nvim, 'return _G.__pc.data');
+      return typeof d === 'string' && d.indexOf('ping-pipe-sock') >= 0;
+    }, 10000);
+    ok(pcEchoed, 'sockconnect("pipe") + chansend: the echo "ping-pipe-sock" came back via on_data');
+    await lua(nvim, 'pcall(vim.fn.chanclose, _G.__pc.chan); return true');
+  } else {
+    ok(false, 'sockconnect("pipe") + chansend: skipped (connect failed)');
+  }
+
+  // ==========================================================================
+  // 6. clean teardown with a LIVE socket + a LIVE pipe: open both and DON'T
+  //    close them, then dispose. The worker terminate + ws close must not hang;
+  //    the server destroys the orphans.
   // ==========================================================================
   await lua(nvim, [
     '_G.__live = vim.uv.new_tcp()',
     '_G.__live:connect("127.0.0.1", ' + echoPort + ', function(err) end)',
+    '_G.__livep = vim.uv.new_pipe(false)',
+    '_G.__livep:connect(' + JSON.stringify(unixPath) + ', function(err) end)',
     'return true',
   ].join('\n'));
   await sleep(200);
@@ -261,7 +352,9 @@ async function main() {
   // ---- teardown -------------------------------------------------------------
   await new Promise(function (resolve) { srv.wss.close(function () { srv.httpServer.close(resolve); }); });
   await new Promise(function (resolve) { echo.close(resolve); });
+  await new Promise(function (resolve) { unixEcho.close(resolve); });
   try { fs.rmSync(realRoot, { recursive: true, force: true }); } catch (e) {}
+  try { fs.rmSync(sockDir, { recursive: true, force: true }); } catch (e) {}
 
   console.log('');
   if (failures) { console.log(failures + ' of ' + checks + ' sock-proxy check(s) FAILED'); process.exit(1); }

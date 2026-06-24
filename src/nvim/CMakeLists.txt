@@ -802,6 +802,11 @@ if(EMSCRIPTEN)
     -Wl,--wrap=uv_tcp_connect
     -Wl,--wrap=uv_getaddrinfo
     -Wl,--wrap=uv_freeaddrinfo
+    # Unix-domain (pipe) sockets: sockconnect('pipe', path) + vim.uv.new_pipe()
+    # :connect / pipe_connect2 connect to a UNIX socket on the server, over the
+    # SAME virtual-fd backing + connect-result drain as the TCP wraps above.
+    -Wl,--wrap=uv_pipe_connect
+    -Wl,--wrap=uv_pipe_connect2
     # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
     # suspend on async JS promises via WebAssembly stack-switching.
     -sJSPI

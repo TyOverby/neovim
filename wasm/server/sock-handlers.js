@@ -5,7 +5,8 @@
 // ============================================================================
 // PROTOCOL (mirrors wasm/nvim_sock_proxy.js)
 // ============================================================================
-//   sock.connect     {host, port}            -> {id}        (server connection id)
+//   sock.connect     {host, port} | {path}   -> {id}        (server connection id;
+//                                                            {path} = unix socket)
 //   sock.write       {id} + payload<bytes>   -> {ok}        (write to the socket)
 //   sock.close       {id}                    -> {ok}        (end/destroy the socket)
 //   sock.getaddrinfo {host, service}         -> {addrs:[{family,address,port}]}
@@ -59,12 +60,19 @@ function registerSockHandlers(registry) {
   // (sock.connect_ok / sock.connect_err) so the wasm side fires the libuv
   // connect cb only once the real connect resolves (matching uv_tcp_connect).
   registry.register('sock.connect', function (params, payload, ctx) {
-    const host = (typeof params.host === 'string' && params.host) ? params.host : '127.0.0.1';
-    const port = params.port | 0;
-    if (!port) {
-      const e = new Error('sock.connect: missing/invalid port');
-      e.errno = 22;
-      throw e;
+    // Two transports share this handler: TCP ({host,port}) and UNIX-domain
+    // ({path}). A `path` selects a unix socket (Node net.connect(path)); else
+    // host:port. Everything downstream (data/write/close, cleanup) is identical.
+    const isUnix = (typeof params.path === 'string' && params.path.length > 0);
+    let host, port;
+    if (!isUnix) {
+      host = (typeof params.host === 'string' && params.host) ? params.host : '127.0.0.1';
+      port = params.port | 0;
+      if (!port) {
+        const e = new Error('sock.connect: missing/invalid port');
+        e.errno = 22;
+        throw e;
+      }
     }
 
     const tbl = sockTable(ctx);
@@ -74,14 +82,17 @@ function registerSockHandlers(registry) {
 
     let socket;
     try {
-      socket = net.connect({ host: host, port: port });
+      // Node net.connect with a STRING path = a unix-domain socket; with an
+      // options object = TCP.
+      socket = isUnix ? net.connect(params.path) : net.connect({ host: host, port: port });
     } catch (e) {
       // Synchronous failure (rare): report as a connect error push.
       setImmediate(function () { ctx.push('sock.connect_err', { id: id, code: (e && e.code) || 'ECONNREFUSED' }); });
       return { result: { id: id } };
     }
     rec.socket = socket;
-    socket.setNoDelay(true);
+    // TCP_NODELAY is meaningless on a unix socket; only set it for TCP.
+    if (!isUnix) { try { socket.setNoDelay(true); } catch (e) { /* ignore */ } }
 
     socket.on('connect', function () {
       rec.connected = true;

@@ -390,9 +390,13 @@ int __wrap_uv_process_kill(uv_process_t *process, int signum)
 // same connect/read/write) both funnel through libuv uv_tcp_connect +
 // uv_getaddrinfo. We intercept all three with the wasm linker's
 //   -Wl,--wrap=uv_tcp_connect / --wrap=uv_getaddrinfo / --wrap=uv_freeaddrinfo
-// (set wasm-only in src/nvim/CMakeLists.txt). The real implementations remain
-// reachable as __real_uv_*; the wraps fall through to them when no proxy is
-// active, so the no-proxy build is byte-for-byte unchanged.
+// (set wasm-only in src/nvim/CMakeLists.txt). UNIX-domain sockets
+// (sockconnect('pipe', path) + vim.uv.new_pipe():connect / pipe_connect2) go
+// through uv_pipe_connect / uv_pipe_connect2, wrapped too -- they reuse the whole
+// TCP machinery, just connecting by PATH instead of host:port (no getaddrinfo).
+// The real implementations remain reachable as __real_uv_*; the wraps fall
+// through to them when no proxy is active, so the no-proxy build is byte-for-byte
+// unchanged.
 //
 // The uv_tcp_t's bytes are carried over the SAME MEMFS-backed virtual pollable
 // fd the spawn-stdio proxy uses (nvim_proxy_alloc_fd): uv_tcp_open(handle, fd)
@@ -419,6 +423,13 @@ int __real_uv_getaddrinfo(uv_loop_t *loop, uv_getaddrinfo_t *req,
                           uv_getaddrinfo_cb cb, const char *node,
                           const char *service, const struct addrinfo *hints);
 void __real_uv_freeaddrinfo(struct addrinfo *ai);
+// Unix-domain (pipe) connect: the void form (socket.c + luv vim.uv.new_pipe()
+// :connect) and the int form (luv pipe_connect2). Both connect by PATH.
+void __real_uv_pipe_connect(uv_connect_t *req, uv_pipe_t *handle,
+                            const char *name, uv_connect_cb cb);
+int __real_uv_pipe_connect2(uv_connect_t *req, uv_pipe_t *handle,
+                            const char *name, size_t namelen,
+                            unsigned int flags, uv_connect_cb cb);
 
 // JS bridge for proxied sockets / DNS (wasm/nvim_sock_proxy.js).
 //   nvim_sock_alloc_fd()      : a bidirectional virtual pollable fd (read = server
@@ -438,6 +449,12 @@ extern int nvim_proxy_active(void);
 extern int nvim_sock_alloc_fd(void);
 extern void nvim_sock_connect(void *req, void *handle, int fd,
                               const char *host, int port);
+//   nvim_sock_connect_unix(req, handle, fd, path):
+//                               register the connect, fire sock.connect{path}
+//                               async (a UNIX-domain socket). The server's reply
+//                               -> nvim_sock_on_connect, exactly like TCP.
+extern void nvim_sock_connect_unix(void *req, void *handle, int fd,
+                                   const char *path);
 extern void nvim_sock_close_fd(int fd);
 extern void nvim_sock_register_async(void *req, const char *host,
                                      const char *service);
@@ -743,6 +760,77 @@ void __wrap_uv_freeaddrinfo(struct addrinfo *ai)
     return;
   }
   __real_uv_freeaddrinfo(ai);
+}
+
+// --- unix-domain (pipe) connect wraps --------------------------------------
+// nvim sockconnect('pipe', path) (socket.c's else branch) and luv
+// vim.uv.new_pipe():connect(path, cb) both go through uv_pipe_connect; luv's
+// pipe_connect2 goes through uv_pipe_connect2. Both connect by PATH (a unix
+// socket on the server), so there is NO getaddrinfo, NO sockaddr, and NO nodelay
+// trap (uv_pipe_open on a virtual fd is clean -- it only fcntl's, never
+// setsockopt's). Otherwise this mirrors __wrap_uv_tcp_connect exactly: back the
+// uv_pipe_t with the SAME virtual pollable fd, uv__req_init the connect req, fire
+// sock.connect{path} async, and let the server's sock.connect_ok / sock.connect_err
+// push drive the connect cb via the shared enqueue + uv_check drain.
+//
+// Shared body for both wraps. Returns 0 on success (cb will fire later) or a
+// negative uv errno after firing the cb with that error (so the caller's connect
+// path completes rather than hangs).
+static int sock_pipe_connect_common(uv_connect_t *req, uv_pipe_t *handle,
+                                    const char *name, uv_connect_cb cb)
+{
+  // Make sure the deferred-callback drain check is running on this loop.
+  sock_ensure_check(handle->loop);
+
+  int fd = nvim_sock_alloc_fd();
+  if (fd < 0) {
+    uv__req_init(handle->loop, req, UV_CONNECT);
+    req->cb = cb;
+    req->handle = (uv_stream_t *)handle;
+    nvim_sock_on_connect(req, UV_ENOMEM);
+    return UV_ENOMEM;
+  }
+  // uv_pipe_open accepts a MEMFS-backed virtual fd (proven by spikeB / the
+  // shipped spawn-stdio path): it only fcntl's the fd, never uv_guess_handle's or
+  // setsockopt's. No flag-clearing needed (no TCP_NODELAY on a pipe).
+  uv_pipe_open(handle, fd);
+
+  // Register the connect req with the loop so it stays alive until the cb fires.
+  uv__req_init(handle->loop, req, UV_CONNECT);
+  req->cb = cb;
+  req->handle = (uv_stream_t *)handle;
+
+  // Fire sock.connect{path} async; the server's reply -> nvim_sock_on_connect.
+  nvim_sock_connect_unix(req, handle, fd, name ? name : "");
+  return 0;
+}
+
+// __wrap_uv_pipe_connect: the void form (errors reported via cb only). nvim
+// socket.c and luv vim.uv.new_pipe():connect both land here.
+void __wrap_uv_pipe_connect(uv_connect_t *req, uv_pipe_t *handle,
+                            const char *name, uv_connect_cb cb)
+{
+  if (!nvim_proxy_active()) {
+    __real_uv_pipe_connect(req, handle, name, cb);
+    return;
+  }
+  (void)sock_pipe_connect_common(req, handle, name, cb);
+}
+
+// __wrap_uv_pipe_connect2: the int form (luv pipe_connect2). A sync validation
+// error returns a negative uv errno; otherwise 0 and the cb fires later. The
+// abstract-namespace flag (UV_PIPE_NO_TRUNCATE etc.) is irrelevant to the proxy
+// (the server opens the path verbatim), so we ignore `namelen`/`flags` and route
+// by the NUL-terminated name -- unix socket PATHS (the only thing the server can
+// connect) are NUL-terminated, not abstract-namespace.
+int __wrap_uv_pipe_connect2(uv_connect_t *req, uv_pipe_t *handle,
+                            const char *name, size_t namelen,
+                            unsigned int flags, uv_connect_cb cb)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_pipe_connect2(req, handle, name, namelen, flags, cb);
+  }
+  return sock_pipe_connect_common(req, handle, name, cb);
 }
 
 #endif  // __EMSCRIPTEN__

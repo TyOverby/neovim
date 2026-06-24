@@ -236,11 +236,20 @@ there is no jail on the *destination* (the server can reach any host it can
 route to); the loopback-only bind of the server itself is the load-bearing
 protection, exactly as for the proc/PTY seams.
 
-**Still not done (follow-ups):** listen/accept (inbound TCP servers), unix-domain
-sockets (`sockconnect('pipe', …)` still uses the unproxied `uv_pipe_connect`),
-and IPv6 is carried but the synthesized sync `addrinfo` is IPv4-shaped (the proxy
-routes by host:port, so the literal IP is advisory — the server resolves the
-real address). Async vs sync getaddrinfo are both handled.
+**Unix-domain sockets too.** `sockconnect('pipe', '/path.sock')` and
+`vim.uv.new_pipe():connect(path, cb)` / `pipe_connect2` go through libuv's
+`uv_pipe_connect` / `uv_pipe_connect2`, wrapped the same way — they reuse the
+whole TCP machinery (the same virtual fd, the same connect-result drain, the same
+`sock.data`/`write`/`close` routing), just connecting by **path** instead of
+host:port (no getaddrinfo, and no nodelay trap since `uv_pipe_open` on a virtual
+fd only `fcntl`s). The server's connect handler `net.connect(path)`s a real unix
+socket when the request carries `{path}`, else the existing `{host,port}` TCP path.
+
+**Still not done (follow-ups):** listen/accept (inbound TCP/pipe servers —
+`sockopen`/`serverstart` over a socket), and IPv6 is carried but the synthesized
+sync `addrinfo` is IPv4-shaped (the proxy routes by host:port, so the literal IP
+is advisory — the server resolves the real address). Async vs sync getaddrinfo
+are both handled.
 
 ## De-risking spikes (done)
 
