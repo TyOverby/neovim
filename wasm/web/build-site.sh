@@ -35,6 +35,11 @@ cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" \
 # importScripts('proxy-client.js') at runtime when a `proxy` config is passed, so
 # it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.
 cp "${ROOT}/wasm/proxy-client.js" "${OUT}/"
+# index.html unconditionally loads proxy-config.js (the standalone-app hook that
+# server.js generates with a real proxy config). A static deployment (Pages) has
+# no proxy server, so ship a no-op so the page runs as the no-proxy demo without a
+# 404. (`node serve.js` serves the same no-op dynamically; server.js overrides it.)
+printf '%s\n' '// no proxy: static deployment runs the no-proxy demo.' > "${OUT}/proxy-config.js"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
 # wasm artifacts: the shared engine + every runtime variant present (so the demo

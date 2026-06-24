@@ -75,6 +75,18 @@ function serveStaticFile(file, urlPath, res) {
 // The request handler used by both servers: resolve the URL, serve the file.
 function handleStaticRequest(req, res) {
   const urlPath = decodeURIComponent(req.url.split('?')[0]);
+  // The page unconditionally loads /proxy-config.js (the stage-4 standalone-app
+  // hook): server.js GENERATES it with the real proxy config so visiting the
+  // server is the standalone app. The plain static dev server has NO proxy, so
+  // serve a no-op 200 (not a 404) — the page then runs as the ordinary no-proxy
+  // demo (window.__NVIM_PROXY stays undefined). server.js intercepts this path
+  // before delegating here, so this branch only applies to `node serve.js`.
+  if (urlPath === '/proxy-config.js') {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+    res.end('// no proxy: the plain static dev server (serve.js) runs the no-proxy demo.\n');
+    return;
+  }
   serveStaticFile(resolveStaticPath(urlPath), urlPath, res);
 }
 
