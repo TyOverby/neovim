@@ -115,6 +115,15 @@ Two ways to serve the browser bundle:
   fail-fast, during-outage fail-fast, auto-reconnect, pushes survive). The
   `cancel` frame (abort a long in-flight op without a disconnect) is reserved in
   the protocol but not yet sent/honored — the remaining Phase 6 sub-item.
+- **Browser e2e (done):** `e2e/` — a headless-Chrome integration test (separate
+  module so chromedp's deps stay out of the production build) that boots the real
+  wasm engine against the real in-process Go server and asserts FS read/write,
+  `system()` proc spawn, `glob` readdir, and a `:terminal` PTY command all hit the
+  server's disk. This is the durable verification that replaces the Node oracle.
+  **It caught a real Go-server bug** the conformance suite structurally couldn't:
+  per-request goroutine dispatch reordered rapid `pty.write` frames and scrambled
+  terminal input — now fixed by in-order dispatch (`server/server.go`; DNS stays
+  async via `Response.Deferred`).
 - Later phases: SSH-stdio remote (`--remote`/`--serve-stdio`), FS routing
   (`--site`/`--rc`), auth/TLS.
 

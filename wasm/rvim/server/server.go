@@ -35,6 +35,11 @@ type Response struct {
 	Result  any
 	Payload []byte
 	After   func()
+	// Deferred means the handler will send the response itself later (via
+	// ctx.Respond/RespondErr) — dispatch sends nothing. Used by handlers that
+	// block on slow work (DNS) so they don't stall the in-order read loop while
+	// still preserving response correlation by id.
+	Deferred bool
 }
 
 // HandlerFunc handles one request. Returning an error becomes an ok:false
@@ -79,10 +84,34 @@ type Ctx struct {
 
 	conn *conn
 
+	// reqID is the id of the request currently being dispatched. Safe to read in
+	// a handler body (dispatch is sequential per connection); a Deferred handler
+	// captures it before spawning its async goroutine.
+	reqID int
+
 	mu       sync.Mutex
 	state    map[string]any
 	cleanups []func()
 }
+
+// Respond sends a successful response for a Deferred handler.
+func (c *Ctx) Respond(id int, result any, payload []byte) {
+	var rj json.RawMessage
+	if result != nil {
+		if b, err := json.Marshal(result); err == nil {
+			rj = b
+		}
+	}
+	_ = c.conn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: rj}, payload)
+}
+
+// RespondErr sends an error response for a Deferred handler.
+func (c *Ctx) RespondErr(id int, msg string) {
+	_ = c.conn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(false), Error: msg}, nil)
+}
+
+// ReqID returns the id of the request being dispatched (for Deferred handlers).
+func (c *Ctx) ReqID() int { return c.reqID }
 
 // Push sends an unsolicited push frame (stdout chunks, exit, socket data, …).
 func (c *Ctx) Push(method string, params any, payload []byte) {
@@ -284,31 +313,41 @@ func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 				Error: fmt.Sprintf("unknown method '%s'", h.Method)}, nil)
 			return
 		}
-		// Each request runs in its own goroutine so the read loop stays responsive
-		// (a long handler must not block stdin / cancel frames). Writes are
-		// serialized by conn.writeMu, so out-of-order completion is fine.
-		go func(id int, method string, params json.RawMessage, pl []byte) {
-			resp, err := callHandler(fn, ctx, params, pl)
-			if err != nil {
-				_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(false), Error: err.Error()}, nil)
+		// Dispatch SYNCHRONOUSLY, in frame order. This is load-bearing: streaming
+		// writes (pty.write / proc.stdin / sock.write) MUST be applied in the order
+		// they arrived — a per-request goroutine would reorder rapid keystrokes and
+		// scramble terminal input. Handlers that block on slow work don't stall the
+		// loop because they defer it: network connect/accept/listen stream via
+		// After (goroutines), and DNS uses Response.Deferred. fs ops are fast local
+		// I/O. (Matches the Node server's single-threaded in-order semantics.)
+		ctx.reqID = h.ID
+		resp, err := callHandler(fn, ctx, h.Params, payload)
+		if err != nil {
+			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(false), Error: err.Error()}, nil)
+			return
+		}
+		if resp.Deferred {
+			return // the handler will Respond/RespondErr itself when its async work finishes
+		}
+		var resultJSON json.RawMessage
+		if resp.Result != nil {
+			b, mErr := json.Marshal(resp.Result)
+			if mErr != nil {
+				_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(false), Error: mErr.Error()}, nil)
 				return
 			}
-			var resultJSON json.RawMessage
-			if resp.Result != nil {
-				b, mErr := json.Marshal(resp.Result)
-				if mErr != nil {
-					_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(false), Error: mErr.Error()}, nil)
-					return
-				}
-				resultJSON = b
-			}
-			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: resultJSON}, resp.Payload)
-			// Ordering primitive: pushes referencing the just-returned id (exit,
-			// connect_ok, …) run only after the response is on the wire.
-			if resp.After != nil {
-				resp.After()
-			}
-		}(h.ID, h.Method, h.Params, payload)
+			resultJSON = b
+		}
+		_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(true), Result: resultJSON}, resp.Payload)
+		// Ordering primitive: pushes referencing the just-returned id (exit,
+		// connect_ok, …) run only after the response is on the wire — guaranteed
+		// because the response is written above, BEFORE After is invoked. After
+		// runs in a goroutine so a blocking body (e.g. sock.connect's net.Dial)
+		// never stalls the in-order read loop; the handler body already did the
+		// order-sensitive work synchronously.
+		if resp.After != nil {
+			go resp.After()
+		}
 
 	case proxy.TCancel:
 		// Phase 6 wires real cancellation; for now there is nothing long-lived to

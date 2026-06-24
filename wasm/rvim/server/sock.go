@@ -249,20 +249,24 @@ func sockGetaddrinfo(c *Ctx, params json.RawMessage, payload []byte) (Response, 
 		host = "127.0.0.1"
 	}
 
-	addrs := []map[string]any{}
-	// A literal IP resolves trivially.
+	// A literal IP resolves trivially and synchronously.
 	if ip := net.ParseIP(host); ip != nil {
-		addrs = append(addrs, ipAddr(ip, port))
-		return Response{Result: map[string]any{"addrs": addrs}}, nil
+		return Response{Result: map[string]any{"addrs": []map[string]any{ipAddr(ip, port)}}}, nil
 	}
-	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
-	if err != nil || len(ips) == 0 {
-		return Response{Result: map[string]any{"addrs": addrs}}, nil
-	}
-	for _, ip := range ips {
-		addrs = append(addrs, ipAddr(ip, port))
-	}
-	return Response{Result: map[string]any{"addrs": addrs}}, nil
+	// A hostname needs a (blocking) DNS lookup. Dispatch is in-order and
+	// synchronous, so do the lookup in a goroutine and respond when it finishes —
+	// otherwise a slow resolver would stall pty/terminal input on the connection.
+	id := c.ReqID()
+	go func() {
+		addrs := []map[string]any{}
+		if ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host); err == nil {
+			for _, ip := range ips {
+				addrs = append(addrs, ipAddr(ip, port))
+			}
+		}
+		c.Respond(id, map[string]any{"addrs": addrs}, nil)
+	}()
+	return Response{Deferred: true}, nil
 }
 
 func ipAddr(ip net.IP, port int) map[string]any {
