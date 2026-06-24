@@ -51,6 +51,10 @@ const { encodeFrame, decodeFrame } = require('../proxy-client.js');
 // jailed to ctx.config.root. Additive -- registered alongside the Phase 1 stubs.
 const { registerFsHandlers } = require('./fs-handlers.js');
 
+// Phase 3: the process-spawn proxy handlers (proc.spawn / proc.stdin / proc.kill
+// / ...). cwd jailed to ctx.config.root; children killed when the connection drops.
+const { registerProcHandlers, cleanupConnection } = require('./proc-handlers.js');
+
 // ---- handler registry -------------------------------------------------------
 // register(method, async (params, payload, ctx) => result | { result, payload }).
 // A handler may return a bare result (JSON) or { result, payload } to also send
@@ -133,6 +137,11 @@ function serveConnection(ws, registry, serverConfig) {
     dispatch(frame.header, frame.payload);
   });
   ws.on('error', function () { /* swallow; 'close' follows */ });
+  // When the connection drops, kill any child processes this client spawned so a
+  // closed tab/worker leaves no orphans (Phase 3). Best-effort; never throws.
+  ws.on('close', function () {
+    try { cleanupConnection(ctx); } catch (_e) { /* ignore */ }
+  });
 }
 
 // ---- Phase 1 handlers -------------------------------------------------------
@@ -172,6 +181,7 @@ function createServer(config) {
   const registry = createRegistry();
   registerPhase1Handlers(registry);
   registerFsHandlers(registry);   // Phase 2: jailed filesystem proxy handlers
+  registerProcHandlers(registry); // Phase 3: jailed process-spawn proxy handlers
 
   const httpServer = http.createServer(serve.handleStaticRequest);
 

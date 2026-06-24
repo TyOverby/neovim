@@ -144,6 +144,14 @@ struct socket_watcher {
 typedef enum {
   kProcTypeUv,
   kProcTypePty,
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 3 (wasm only): a child process spawned on the IO-proxy
+  // server, with its stdio carried over virtual pollable fds (see
+  // src/nvim/event/proxy_proc.c + wasm/nvim_proc_proxy.js). This enum value
+  // exists ONLY under Emscripten so the native build's exhaustive switches over
+  // ProcType stay exhaustive and untouched.
+  kProcTypeProxy,
+#endif
 } ProcType;
 
 /// OS process

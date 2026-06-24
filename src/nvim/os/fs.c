@@ -54,6 +54,11 @@
 # include <sys/uio.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+// Stage 4 / Phase 3: nonzero iff an IO-proxy is configured (wasm/nvim_proc_proxy.js).
+extern int nvim_proxy_active(void);
+#endif
+
 #ifdef MSWIN
 # include "nvim/mbyte.h"
 # include "nvim/option.h"
@@ -349,6 +354,24 @@ static bool is_executable_ext(const char *name, char **abspath)
 static bool is_executable_in_path(const char *name, char **abspath)
   FUNC_ATTR_NONNULL_ARG(1)
 {
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 3 (additive, opt-in): when an IO-proxy is active the child
+  // runs on the SERVER, so a bare command resolved via $PATH lives on the
+  // server's filesystem, not in MEMFS. The local is_executable check below would
+  // always fail (MEMFS has no /usr/bin), wrongly blocking jobstart()/system()
+  // before the spawn even happens. So optimistically report it executable: the
+  // server does the real PATH resolution and reports a missing binary as a
+  // non-zero (127) exit through the normal job-exit path. With NO proxy this is
+  // skipped -> behavior is unchanged (spawning still fails as today). We report
+  // the bare `name` as the "resolved" path (tv_to_argv puts it back as argv[0],
+  // and the server resolves it via its own PATH), since MEMFS has no abspath.
+  if (nvim_proxy_active()) {
+    if (abspath != NULL) {
+      *abspath = xstrdup(name);
+    }
+    return true;
+  }
+#endif
   char *path_env = os_getenv("PATH");
   if (path_env == NULL) {
     return false;

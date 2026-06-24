@@ -825,9 +825,22 @@ if(EMSCRIPTEN)
     # syscalls scoped to a proxy mount prefix. With no proxy mount configured
     # (globalThis.__nvimProxy / __nvimProxyMount), every override delegates to the
     # default behavior, so MEMFS/NODEFS IO is byte-for-byte unchanged. See file.
-    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js)
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js
+    # Stage 4 / Phase 3 (additive, opt-in): the IO-proxy process-spawn backend's
+    # JS half -- the virtual stdio fd table + spawn/stdin/stdout/stderr/exit
+    # routing for src/nvim/event/proxy_proc.c. With no proxy configured the C
+    # backend is never taken, so none of this runs. See the file header.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js
+    # The js-library delivers the server child's exit into C by calling
+    # Module._nvim_proxy_proc_on_exit. That C entry is marked EMSCRIPTEN_KEEPALIVE
+    # (in proxy_proc.c), which both keeps it from being DCE'd AND adds it to the
+    # module's exported functions -- so we do NOT restrict EXPORTED_FUNCTIONS here
+    # (that would replace emcc's default export set and risk dropping symbols nvim
+    # relies on). We only need a few runtime methods the js-library uses to pass
+    # the handle pointer + read strings.
+    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)
