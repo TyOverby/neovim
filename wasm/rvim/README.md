@@ -48,9 +48,13 @@ go run ./cmd/conformance             # same suite, summary output
   serving, gated `/proxy-config.js`) and `cmd/rvim`. A `GoTarget` runs the
   in-process Go server through the conformance suite; the `base` scenarios pass
   against it. Layout below gains `server/` and `cmd/rvim/`.
-- Later phases: the io-proxy handlers (FS/proc/PTY/sockets — each grows the Go
-  server's conformance caps), `cancel` + reconnect, SSH-stdio remote, FS routing,
-  auth/TLS.
+- **Phase 3 (done):** the filesystem proxy (`server/fs.go`) — the Go port of
+  `fs-handlers.js`: `fs.open/read/write/close/stat/lstat/readdir/mkdir/unlink/
+  rename` with the realpath-prefix jail (`resolveJailed`). `GoTarget` caps now
+  include `fs`; the 4 fs scenarios (incl. the jail-escape rejection) pass, plus a
+  dedicated jail containment unit test (`..`, absolute, and symlink escapes).
+- Later phases: proc/PTY/sockets (each grows the Go server's conformance caps),
+  `cancel` + reconnect, SSH-stdio remote, FS routing, auth/TLS.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
 …}` in `conformance/gotarget.go`; each handler phase adds its cap there and the

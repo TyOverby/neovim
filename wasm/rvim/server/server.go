@@ -39,10 +39,13 @@ type Registry struct {
 	handlers map[string]HandlerFunc
 }
 
-// NewRegistry returns a registry preloaded with the base handlers (ping/echo).
+// NewRegistry returns a registry preloaded with all implemented handler families
+// (base + the IO seams). Mirrors createServer in wasm/server/server.js, which
+// registers every handler family onto one registry.
 func NewRegistry() *Registry {
 	r := &Registry{handlers: map[string]HandlerFunc{}}
 	registerBase(r)
+	RegisterFS(r) // seam 1: filesystem proxy
 	return r
 }
 
