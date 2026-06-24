@@ -180,11 +180,37 @@ addToLibrary({
     // Free the MEMFS backing of a virtual fd. The uv handle wrapping it was (or
     // will be) uv_close()'d by nvim's stream teardown; here we just drop our
     // side-table entry + the scratch file. Best-effort.
-    freeFd: function (fd) {
+    //
+    // OWNERSHIP GUARD (fixes a fd-number-reuse race): emscripten's FS.open reuses
+    // the LOWEST free fd number, so once child A's stdio fd is FS.close()'d, child
+    // B's allocFd can be handed the SAME fd NUMBER. The exit-driven release of
+    // child A is deferred (a macrotask), so without this guard A's late
+    // freeFd(n)/delete fds[n] would clobber B's freshly-installed slot for the
+    // reused number n -- B's stdin onWrite/onClose would vanish, EOF would never
+    // reach the server, and a `cat` child would hang forever. So we only free a
+    // slot when its `owner` still matches the caller's expected owner token.
+    freeFd: function (fd, owner) {
       var slot = ProcProxy.fds[fd];
       if (!slot) { return; }
+      if (owner != null && slot.owner !== owner) { return; }  // reused by another child
       delete ProcProxy.fds[fd];
       try { FS.unlink(slot.path); } catch (e) { /* ignore */ }
+    },
+
+    // Drop all JS-side bookkeeping for a child entry: the byHandle/byServerId
+    // maps and the three virtual fds (each freeFd unlinks its scratch MEMFS file;
+    // an already-open stream survives the unlink, POSIX-style, until uv_close).
+    // Idempotent. Shared by the Phase 3 release (called from C) and the Phase 4
+    // deferred release (called from the exit push, since uv-spawn has no C hook).
+    releaseEntry: function (entry) {
+      if (!entry) { return; }
+      if (entry.handle != null) { delete ProcProxy.byHandle[entry.handle]; }
+      if (entry.serverId != null) { delete ProcProxy.byServerId[entry.serverId]; }
+      // Pass this entry's owner token so a fd NUMBER that was already reused by a
+      // newer child is NOT freed out from under it (see freeFd's OWNERSHIP GUARD).
+      if (entry.fdIn >= 0) { ProcProxy.freeFd(entry.fdIn, entry.localId); }
+      if (entry.fdOut >= 0) { ProcProxy.freeFd(entry.fdOut, entry.localId); }
+      if (entry.fdErr >= 0) { ProcProxy.freeFd(entry.fdErr, entry.localId); }
     },
 
     // Route a server push (proc.stdout/proc.stderr/proc.exit) to the right child.
@@ -227,6 +253,16 @@ addToLibrary({
             var code = (params && typeof params.code === 'number') ? params.code : 0;
             var sig = (params && typeof params.signal === 'number') ? params.signal : 0;
             ProcProxy.deliverExit(entry, code, sig);
+            // Phase 3 Proc children are released from C (proxy_proc_close). uv-spawn
+            // children have NO C close hook (luv uv_close()s the handle directly),
+            // so release their JS bookkeeping here. Defer to a macrotask so the
+            // synchronous exit_cb -> uv_close -> pipe FS.close (which runs our
+            // applyOps.close) has completed before we drop the fds / scratch files.
+            if (entry.exitEntry === 'nvim_uv_proxy_on_exit' && !entry.released) {
+              entry.released = true;
+              var releaseEntry = entry;
+              setTimeout(function () { ProcProxy.releaseEntry(releaseEntry); }, 0);
+            }
           }
           return;
         }
@@ -234,19 +270,131 @@ addToLibrary({
       });
     },
 
-    // Deliver a child's exit into C: call the EMSCRIPTEN_KEEPALIVE entry
-    // _nvim_proxy_proc_on_exit(handle, status, signal). This drives proc->status
-    // + on_proc_exit() -> the close/refcount/proc->cb teardown on the main loop.
+    // Deliver a child's exit into C by calling the right EMSCRIPTEN_KEEPALIVE
+    // entry for that child's spawn path. Two kinds of children share this table:
+    //   - Phase 3 nvim-Proc children -> nvim_proxy_proc_on_exit(handle, status,
+    //     signal): drives proc->status + on_proc_exit() (close/refcount/proc->cb).
+    //   - Phase 4 uv_spawn children (LSP / vim.system / luv) ->
+    //     nvim_uv_proxy_on_exit(handle, status, signal): drives uv_spawn's own
+    //     exit_cb + the uv_process_t close lifecycle.
+    // entry.exitEntry names the C function; default is the Phase 3 Proc entry.
     // We pass the handle pointer as a number (it is a wasm i32 pointer).
     deliverExit: function (entry, code, signal) {
+      var fn = entry.exitEntry || 'nvim_proxy_proc_on_exit';
       try {
-        // ccall signature: void nvim_proxy_proc_on_exit(void* handle, int, int).
+        // ccall signature: void <fn>(void* handle, int status, int signal).
         // 'number' marshals the pointer + the ints directly.
-        Module.ccall('nvim_proxy_proc_on_exit', null,
+        Module.ccall(fn, null,
           ['number', 'number', 'number'], [entry.handle, code, signal]);
       } catch (e) {
-        ProcProxy.dbg('deliverExit ccall failed: ' + (e && e.message || e));
+        ProcProxy.dbg('deliverExit ccall failed (' + fn + '): ' + (e && e.message || e));
       }
+    },
+
+    // Shared spawn driver for BOTH the Phase 3 nvim-Proc path and the Phase 4
+    // uv_spawn path. C has already allocated + uv_pipe_open'd the virtual stdio
+    // fds and handed us their numbers; here we register the child, wire the stdin
+    // writer + push routing, fire `proc.spawn` async, and return a local id
+    // synchronously. The only per-path difference is `exitEntry` (which C exit
+    // function the server's `proc.exit` push must call) -- everything else (fd
+    // table, stdin->proc.stdin, stdout/stderr pushes, exit handling) is identical
+    // and shared. A spawn FAILURE is delivered through the exit path (status 127)
+    // so the caller's job/lifecycle completes cleanly rather than hanging.
+    spawnChild: function (handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr, exitEntry) {
+      var px = ProcProxy.proxy();
+      if (!px) { return -1; }
+
+      var argv = ProcProxy.readStrv(argvPtr);
+      if (argv.length === 0) { return -1; }
+      var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
+      var envList = ProcProxy.readStrv(envPtr);
+      var env = null;
+      if (envList.length) {
+        env = {};
+        for (var i = 0; i < envList.length; i++) {
+          var eq = envList[i].indexOf('=');
+          if (eq > 0) { env[envList[i].slice(0, eq)] = envList[i].slice(eq + 1); }
+        }
+      }
+
+      var localId = ProcProxy.nextLocalId++;
+      var entry = {
+        handle: handle, localId: localId, serverId: null,
+        fdIn: (fdIn | 0), fdOut: (fdOut | 0), fdErr: (fdErr | 0),
+        exited: false, stdinClosed: false,
+        exitEntry: exitEntry || 'nvim_proxy_proc_on_exit',
+      };
+      ProcProxy.byHandle[handle] = entry;
+
+      // Stamp ownership on each adopted fd slot so a deferred release of a PRIOR
+      // child that happened to be handed the same (reused) fd number cannot free
+      // THIS child's slot. (See freeFd's OWNERSHIP GUARD.)
+      var stampOwner = function (fd) {
+        if (fd >= 0 && ProcProxy.fds[fd]) { ProcProxy.fds[fd].owner = localId; }
+      };
+      stampOwner(entry.fdIn);
+      stampOwner(entry.fdOut);
+      stampOwner(entry.fdErr);
+
+      // Wire the stdin writer: nvim writes to the stdin fd -> proc.stdin request.
+      if (entry.fdIn >= 0) {
+        var inSlot = ProcProxy.fds[entry.fdIn];
+        if (inSlot) {
+          inSlot.ch.onWrite = function (bytes) {
+            if (entry.serverId == null) {
+              (entry.stdinBuf || (entry.stdinBuf = [])).push(bytes);
+              return;
+            }
+            px.request('proc.stdin', { id: entry.serverId }, bytes)
+              .catch(function () { /* child gone; reads will EOF */ });
+          };
+          inSlot.ch.onClose = function () {
+            if (entry.serverId != null && !entry.stdinClosed) {
+              entry.stdinClosed = true;
+              px.request('proc.stdin_close', { id: entry.serverId }).catch(function () {});
+            }
+          };
+        }
+      }
+
+      ProcProxy.wirePush();
+
+      px.request('proc.spawn', {
+        argv: argv, cwd: cwd, env: env,
+        wantIn: entry.fdIn >= 0, wantOut: entry.fdOut >= 0, wantErr: entry.fdErr >= 0,
+      }).then(function (resp) {
+        var sid = resp && resp.result && resp.result.id;
+        if (sid == null) { throw new Error('proc.spawn: no id'); }
+        entry.serverId = sid;
+        ProcProxy.byServerId[sid] = entry;
+        if (entry.killOnAck != null) {
+          px.request('proc.kill', { id: sid, signal: entry.killOnAck }).catch(function () {});
+          entry.killOnAck = null;
+        }
+        if (entry.stdinBuf && entry.stdinBuf.length) {
+          for (var j = 0; j < entry.stdinBuf.length; j++) {
+            px.request('proc.stdin', { id: sid }, entry.stdinBuf[j]).catch(function () {});
+          }
+          entry.stdinBuf = null;
+        }
+        if (entry.fdIn >= 0) {
+          var slot = ProcProxy.fds[entry.fdIn];
+          if (slot && slot.ch.closed && !entry.stdinClosed) {
+            entry.stdinClosed = true;
+            px.request('proc.stdin_close', { id: sid }).catch(function () {});
+          }
+        }
+      }, function (e) {
+        ProcProxy.dbg('proc.spawn failed: ' + (e && e.message || e));
+        if (!entry.exited) {
+          entry.exited = true;
+          if (entry.fdOut >= 0) { ProcProxy.closeFd(entry.fdOut); }
+          if (entry.fdErr >= 0) { ProcProxy.closeFd(entry.fdErr); }
+          ProcProxy.deliverExit(entry, 127, 0);
+        }
+      });
+
+      return localId;
     },
 
     // Read a NUL-separated, double-NUL-terminated C buffer into a JS string array
@@ -291,90 +439,52 @@ addToLibrary({
   // --------------------------------------------------------------------------
   nvim_proxy_proc_spawn__deps: ['$ProcProxy'],
   nvim_proxy_proc_spawn: function (handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr) {
+    // Phase 3 nvim-Proc child: exit drives nvim_proxy_proc_on_exit (the default).
+    return ProcProxy.spawnChild(handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr,
+                                'nvim_proxy_proc_on_exit');
+  },
+
+  // --------------------------------------------------------------------------
+  // nvim_uv_proxy_spawn(handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr):
+  // Phase 4 -- register a uv_spawn child (LSP / vim.system / luv). Identical
+  // wiring to the Proc path, but the server's `proc.exit` push must drive
+  // uv_spawn's own exit_cb via nvim_uv_proxy_on_exit (see wasm/uv_stubs.c), so
+  // the uv_process_t lifecycle (kill/exit/uv_close) completes correctly.
+  // --------------------------------------------------------------------------
+  nvim_uv_proxy_spawn__deps: ['$ProcProxy'],
+  nvim_uv_proxy_spawn: function (handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr) {
+    return ProcProxy.spawnChild(handle, argvPtr, cwdPtr, envPtr, fdIn, fdOut, fdErr,
+                                'nvim_uv_proxy_on_exit');
+  },
+
+  // --------------------------------------------------------------------------
+  // nvim_uv_proxy_kill(handle, signum): ask the server to signal a uv-spawn
+  // child. (Same as the Proc kill; shares the byHandle table.)
+  // --------------------------------------------------------------------------
+  nvim_uv_proxy_kill__deps: ['$ProcProxy'],
+  nvim_uv_proxy_kill: function (handle, signum) {
+    var entry = ProcProxy.byHandle[handle];
+    if (!entry) { return; }
     var px = ProcProxy.proxy();
-    if (!px) { return -1; }
-
-    var argv = ProcProxy.readStrv(argvPtr);
-    if (argv.length === 0) { return -1; }
-    var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
-    var envList = ProcProxy.readStrv(envPtr);
-    var env = null;
-    if (envList.length) {
-      env = {};
-      for (var i = 0; i < envList.length; i++) {
-        var eq = envList[i].indexOf('=');
-        if (eq > 0) { env[envList[i].slice(0, eq)] = envList[i].slice(eq + 1); }
-      }
+    if (!px) { return; }
+    if (entry.serverId != null) {
+      px.request('proc.kill', { id: entry.serverId, signal: signum }).catch(function () {});
+    } else {
+      entry.killOnAck = signum;
     }
+  },
 
-    var localId = ProcProxy.nextLocalId++;
-    var entry = {
-      handle: handle, localId: localId, serverId: null,
-      fdIn: (fdIn | 0), fdOut: (fdOut | 0), fdErr: (fdErr | 0),
-      exited: false, stdinClosed: false,
-    };
-    ProcProxy.byHandle[handle] = entry;
-
-    // Wire the stdin writer: nvim writes to the stdin fd -> proc.stdin request.
-    if (entry.fdIn >= 0) {
-      var inSlot = ProcProxy.fds[entry.fdIn];
-      if (inSlot) {
-        inSlot.ch.onWrite = function (bytes) {
-          if (entry.serverId == null) {
-            // Spawn not acked yet: buffer until we have a server id.
-            (entry.stdinBuf || (entry.stdinBuf = [])).push(bytes);
-            return;
-          }
-          px.request('proc.stdin', { id: entry.serverId }, bytes)
-            .catch(function () { /* child gone; reads will EOF */ });
-        };
-        inSlot.ch.onClose = function () {
-          if (entry.serverId != null && !entry.stdinClosed) {
-            entry.stdinClosed = true;
-            px.request('proc.stdin_close', { id: entry.serverId }).catch(function () {});
-          }
-        };
-      }
-    }
-
-    ProcProxy.wirePush();
-
-    // Fire the spawn. On ack: record the server id, flush buffered stdin. On
-    // failure: deliver an exit(127) so nvim's job machinery completes cleanly.
-    px.request('proc.spawn', {
-      argv: argv, cwd: cwd, env: env,
-      wantIn: entry.fdIn >= 0, wantOut: entry.fdOut >= 0, wantErr: entry.fdErr >= 0,
-    }).then(function (resp) {
-      var sid = resp && resp.result && resp.result.id;
-      if (sid == null) { throw new Error('proc.spawn: no id'); }
-      entry.serverId = sid;
-      ProcProxy.byServerId[sid] = entry;
-      // Flush any stdin written before the ack.
-      if (entry.stdinBuf && entry.stdinBuf.length) {
-        for (var j = 0; j < entry.stdinBuf.length; j++) {
-          px.request('proc.stdin', { id: sid }, entry.stdinBuf[j]).catch(function () {});
-        }
-        entry.stdinBuf = null;
-      }
-      if (entry.fdIn >= 0) {
-        var slot = ProcProxy.fds[entry.fdIn];
-        // If nvim already closed stdin while the ack was pending, propagate it.
-        if (slot && slot.ch.closed && !entry.stdinClosed) {
-          entry.stdinClosed = true;
-          px.request('proc.stdin_close', { id: sid }).catch(function () {});
-        }
-      }
-    }, function (e) {
-      ProcProxy.dbg('proc.spawn failed: ' + (e && e.message || e));
-      if (!entry.exited) {
-        entry.exited = true;
-        if (entry.fdOut >= 0) { ProcProxy.closeFd(entry.fdOut); }
-        if (entry.fdErr >= 0) { ProcProxy.closeFd(entry.fdErr); }
-        ProcProxy.deliverExit(entry, 127, 0);
-      }
-    });
-
-    return localId;
+  // --------------------------------------------------------------------------
+  // nvim_uv_proxy_release(handle): drop the JS-side bookkeeping + free the
+  // virtual fds for a uv-spawn child (called after uv_close tears the handle
+  // down). Same as nvim_proxy_proc_release; shares the table.
+  // --------------------------------------------------------------------------
+  nvim_uv_proxy_release__deps: ['$ProcProxy'],
+  nvim_uv_proxy_release: function (handle) {
+    var entry = ProcProxy.byHandle[handle];
+    if (!entry || entry.released) { return; }
+    entry.released = true;
+    ProcProxy.releaseEntry(entry);
   },
 
   // --------------------------------------------------------------------------
@@ -402,11 +512,8 @@ addToLibrary({
   nvim_proxy_proc_release__deps: ['$ProcProxy'],
   nvim_proxy_proc_release: function (handle) {
     var entry = ProcProxy.byHandle[handle];
-    if (!entry) { return; }
-    delete ProcProxy.byHandle[handle];
-    if (entry.serverId != null) { delete ProcProxy.byServerId[entry.serverId]; }
-    if (entry.fdIn >= 0) { ProcProxy.freeFd(entry.fdIn); }
-    if (entry.fdOut >= 0) { ProcProxy.freeFd(entry.fdOut); }
-    if (entry.fdErr >= 0) { ProcProxy.freeFd(entry.fdErr); }
+    if (!entry || entry.released) { return; }
+    entry.released = true;
+    ProcProxy.releaseEntry(entry);
   },
 });

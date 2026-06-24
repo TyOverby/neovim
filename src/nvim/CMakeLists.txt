@@ -779,7 +779,21 @@ target_link_libraries(nvim_bin PRIVATE main_lib PUBLIC libuv)
 if(EMSCRIPTEN)
   target_sources(nvim_bin PRIVATE
     ${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c)
+  # Stage 4 / Phase 4: uv_stubs.c's __wrap_uv_spawn replicates real uv_spawn's
+  # uv_process_t handle bookkeeping (uv__handle_init / uv__handle_start /
+  # uv__queue_*), which lives in libuv's INTERNAL header uv-common.h. Scope that
+  # internal include dir to THIS ONE translation unit only (it is not on nvim's
+  # normal include path). The header is a build artifact of the wasm libuv build.
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c PROPERTIES
+    INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/.deps-wasm/build/src/libuv/src)
   target_link_options(nvim_bin PRIVATE
+    # Stage 4 / Phase 4 (additive, opt-in): intercept uv_spawn / uv_process_kill
+    # so LSP servers + vim.system() + any luv subprocess run on the IO-proxy
+    # SERVER. The real implementations remain reachable as __real_uv_spawn /
+    # __real_uv_process_kill; uv_stubs.c's __wrap_* falls through to them when no
+    # proxy is active (ENOSYS, exactly as today). Wasm-only; native build untouched.
+    -Wl,--wrap=uv_spawn
+    -Wl,--wrap=uv_process_kill
     # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
     # suspend on async JS promises via WebAssembly stack-switching.
     -sJSPI
