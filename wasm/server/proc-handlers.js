@@ -33,7 +33,9 @@
 'use strict';
 
 const { spawn } = require('child_process');
-const { resolveJailed } = require('./fs-handlers.js');
+// resolveCwd is shared with pty-handlers (mount-aware: maps the mount prefix to
+// the jail root, defaults non-mount/MEMFS cwds to the root). See fs-handlers.js.
+const { resolveCwd, childEnv } = require('./fs-handlers.js');
 
 // Per-connection child table lives on ctx (created lazily).
 function childTable(ctx) {
@@ -41,18 +43,6 @@ function childTable(ctx) {
     ctx.__procChildren = { next: 1, byId: Object.create(null) };
   }
   return ctx.__procChildren;
-}
-
-// Resolve the child's working directory, jailed to the root. An empty/missing
-// cwd defaults to the jail root (NOT the server's cwd). A cwd that escapes the
-// jail throws (the spawn then fails with that error -> nvim sees exit 127).
-function resolveCwd(ctx, cwd) {
-  const root = ctx.config && ctx.config.root;
-  if (!cwd) { return root || process.cwd(); }
-  // A server-relative cwd ('/sub') jails like the fs paths; an absolute host cwd
-  // is treated as server-relative too (leading slash stripped by resolveJailed)
-  // so it cannot point outside root.
-  return resolveJailed(root, cwd.charAt(0) === '/' ? cwd : '/' + cwd);
 }
 
 function registerProcHandlers(registry) {
@@ -78,10 +68,10 @@ function registerProcHandlers(registry) {
       throw e;
     }
 
-    // Env: the client sends an explicit env dict or null (inherit). nvim builds
-    // the child env itself (jobstart {env=...} merges onto the parent), so when a
-    // dict is supplied we use it verbatim; otherwise inherit the server's env.
-    const env = (params.env && typeof params.env === 'object') ? params.env : process.env;
+    // Env: the client sends an explicit env dict or null (inherit). The browser
+    // engine sends no PATH, so childEnv backfills the server's PATH (else a bare
+    // command — e.g. `sh` for `:!` — fails execvp on the server). See fs-handlers.
+    const env = childEnv(params);
 
     const tbl = childTable(ctx);
     const id = tbl.next++;

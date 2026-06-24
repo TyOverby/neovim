@@ -31,7 +31,9 @@
 'use strict';
 
 const path = require('path');
-const { resolveJailed } = require('./fs-handlers.js');
+// resolveCwd + childEnv are shared with proc-handlers (mount-aware cwd; PATH
+// backfill so the server can exec a bare shell). See fs-handlers.js.
+const { resolveCwd, childEnv } = require('./fs-handlers.js');
 
 // node-pty is a NATIVE module installed under wasm/web/node_modules (the web
 // bundle's npm dep dir, alongside ws/@msgpack). Resolve it from there so this
@@ -55,14 +57,6 @@ function ptyTable(ctx) {
   return ctx.__ptys;
 }
 
-// Resolve the pty's working directory, jailed to the root (same rule as the proc
-// handlers): an empty/missing cwd defaults to the jail root; a `..`/absolute cwd
-// is treated as server-relative so it cannot escape root.
-function resolveCwd(ctx, cwd) {
-  const root = ctx.config && ctx.config.root;
-  if (!cwd) { return root || process.cwd(); }
-  return resolveJailed(root, cwd.charAt(0) === '/' ? cwd : '/' + cwd);
-}
 
 function registerPtyHandlers(registry) {
   // pty.spawn: forkpty a child on the server, stream its output back as pty.data
@@ -78,12 +72,10 @@ function registerPtyHandlers(registry) {
     const args = argv.slice(1);
     const cwd = resolveCwd(ctx, params.cwd);  // may throw (jail violation) -> fails the spawn
 
-    // Env: nvim builds the child env itself (jobstart {env=...} / :terminal). When
-    // a dict is supplied use it verbatim; otherwise inherit the server's env. A pty
-    // also needs a sane TERM if nvim didn't set one (node-pty defaults xterm-256color).
-    const env = (params.env && typeof params.env === 'object')
-      ? params.env
-      : Object.assign({}, process.env);
+    // Env: nvim builds the child env itself (jobstart {env=...} / :terminal), but
+    // the browser engine sends no PATH -> childEnv backfills the server's so a bare
+    // shell execs. A pty also needs a sane TERM (node-pty defaults xterm-256color).
+    const env = childEnv(params);
 
     const cols = (params.cols | 0) || 80;
     const rows = (params.rows | 0) || 24;

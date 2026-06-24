@@ -109,6 +109,52 @@ function resolveJailed(root, rel) {
   return realCandidate;
 }
 
+// Resolve a CHILD's working directory (for proc.spawn / pty.spawn) to a real
+// server path, mapping the in-engine cwd the way the FS proxy maps file paths.
+//
+// The engine's cwd is an IN-ENGINE path: either under the mount prefix (e.g.
+// '/host/sub', which maps to <root>/sub on the server's disk) or a MEMFS-only
+// path the server has no equivalent for (e.g. '/root', '/tmp', '/'). The FS
+// proxy strips the mount prefix client-side for file ops, but a spawn's cwd
+// arrives RAW, so we strip it here:
+//   - empty / missing      -> the jail root
+//   - exactly the mount    -> the jail root
+//   - under the mount      -> <root>/<rest>, jailed
+//   - any other abs path   -> the jail root (a MEMFS dir with no server twin;
+//                             honoring it literally would jail to <root>/<that>,
+//                             a path that does not exist -> the child fails to
+//                             chdir and execvp reports ENOENT). This is the bug
+//                             that made `:terminal` fail while `system()` (which
+//                             sends no cwd) worked.
+function resolveCwd(ctx, cwd) {
+  const root = ctx.config && ctx.config.root;
+  const mount = (ctx.config && ctx.config.mount) || '/host';
+  if (!cwd) { return root || process.cwd(); }
+  if (cwd === mount) { return resolveJailed(root, '/'); }
+  if (cwd.indexOf(mount + '/') === 0) {
+    return resolveJailed(root, cwd.slice(mount.length));   // keep the leading '/'
+  }
+  // A non-mount in-engine path (MEMFS): no server equivalent -> run in the root.
+  return root ? resolveJailed(root, '/') : process.cwd();
+}
+
+// Build the environment for a spawned child (proc.spawn / pty.spawn). nvim builds
+// the child env itself, but the child actually runs on the SERVER, so it needs the
+// SERVER's PATH to resolve bare commands — notably the shell `sh` that `:terminal`
+// and `:!` exec. The BROWSER wasm engine's PATH is synthetic and useless on the
+// server (it has no PATH at all in wasm/pre.js, and nvim then defaults it to "/"),
+// so a bare `execvp("sh")` fails ENOENT. (Under Node the engine inherits the real
+// host PATH, which is why this only bit in the browser.) So: take the supplied env
+// (else the server's) and APPEND the server's PATH, so the engine's own PATH entries
+// (if any are meaningful) still take precedence but server binaries always resolve.
+function childEnv(params) {
+  const supplied = params && params.env && typeof params.env === 'object' ? params.env : null;
+  const env = supplied ? Object.assign({}, supplied) : Object.assign({}, process.env);
+  const serverPath = process.env.PATH || '/usr/bin:/bin';
+  env.PATH = env.PATH ? (env.PATH + path.delimiter + serverPath) : serverPath;
+  return env;
+}
+
 // Map a Node fs.Stats into the {exists, isDir, size, mode, mtime} shape the
 // wasm side fills a struct stat from. `mode` is the FULL st_mode (type bits +
 // perms), so S_IFREG / S_IFDIR survive to the wasm doStat.
@@ -302,4 +348,6 @@ function registerFsHandlers(registry) {
 module.exports = {
   registerFsHandlers: registerFsHandlers,
   resolveJailed: resolveJailed,   // exported for the jail unit test
+  resolveCwd: resolveCwd,         // shared by proc.spawn / pty.spawn (mount-aware)
+  childEnv: childEnv,             // shared by proc.spawn / pty.spawn (PATH backfill)
 };

@@ -477,40 +477,117 @@ configured and follow them around between sites.
 
 ## As a standalone application
 
-> **Status: in progress.** The architecture and a phased implementation plan are
-> written up in `stage4.md`; the two hardest mechanisms (async server-backed
-> filesystem syscalls, and proxied child-process stdio over virtual fds) have been
-> de-risked with running wasm spikes. The phases below are being built and tested
-> in series. This section will be rewritten to a quickstart once it ships.
+> **Status: ✅ shipped (stage 4).** The standalone app is the same in-browser
+> engine as the library, but the engine worker also opens a WebSocket to a small
+> server that performs all real IO. Visit the page the server hosts and you get a
+> full editor whose **filesystem, `:!`, `jobstart()`, `:terminal`, and LSP run on
+> the server**, jailed to a configured root. See `stage4.md` for the full design.
 
 The most ambitious part of the project, the standalone `neovim.js` application
-is designed to be a full replacement for running neovim on a remote server.
-With a standard neovim setup, typing responsiveness is tied to the latency of
-your connection to the machine that is running neovim, so if you're renting a
-computer half way around the world, the experience is borderline unusable.  But
-with the standalone `neovim.js` application, you start the server on a remote
-machine, and visit the page that it's hosting.  Because the entire vim engine
-is local to your browser, text editing and plugin execution is lightning fast.
-Filesystem access, network connections, shells, LSP servers, commands, and
-PTY's are all transparently proxied through the server, so they run for real on
-the system that you care about.
+is a full replacement for running neovim on a remote server. With a standard
+neovim setup, typing responsiveness is tied to the latency of your connection to
+the machine running neovim, so if you're renting a computer half way around the
+world, the experience is borderline unusable. With the standalone `neovim.js`
+application you start the server on that machine and visit the page it hosts —
+the entire vim engine runs **locally in your browser**, so text editing and
+plugin execution are lightning fast, while filesystem access, shells, commands,
+PTYs, and LSP servers are transparently proxied to the server so they run for
+real on the system you care about. (Only per-IO round-trips travel the wire, and
+IO is far less latency-sensitive than per-keystroke redraw.)
 
-**How it works (see `stage4.md` for the full design).** The engine keeps running
-in the browser Web Worker exactly as the library does, but the worker also opens a
-WebSocket to the server and routes the engine's real IO over it. Two seams carry
-that IO: server-backed **filesystem** syscalls (made async via JSPI, scoped to a
-mount prefix so MEMFS stays fast and local) and a **process/PTY** proxy backend in
-`proc_spawn` whose children's stdio rides virtual pollable fds — the same fd
-mechanism that already backs the engine's own stdin/stdout. Because most language
-servers are spawned as stdio jobs, **LSP falls out of the process proxy** with no
-extra work. The server runs on the machine you care about and executes the real
-filesystem ops, child processes, PTYs, and (eventually) sockets.
+### Quickstart
 
-> **Security.** The server runs real commands on its host (`:!`, `:terminal`,
-> `jobstart()`), so it binds **`127.0.0.1` only** by default and jails the
-> filesystem proxy to a configured root. It is the single-user "edit my own box"
-> tool the description above implies — not a multi-tenant sandbox. Exposing it
-> beyond loopback is an explicit, documented opt-in.
+Build the wasm engine first (`wasm/build-deps.sh && wasm/build-nvim.sh` — see
+**Build** below), then install the server's npm deps (`ws`, and `node-pty` for
+`:terminal`) and start the server pointed at the project you want to edit:
+
+```sh
+( cd wasm/web && npm install )                 # ws + node-pty (+ msgpack)
+node wasm/server/server.js --root /path/to/project --port 8001
+```
+
+Then open **`http://localhost:8001/`** in a JSPI-capable browser (Chrome ≥ 137).
+You land in `/path/to/project` (mounted in-editor at `/host`) with a full editor:
+
+- **Files** — `:e /host/...`, `:w`, `:Explore /host`, globbing — all hit the
+  server's real disk, jailed to `--root`. (Paths outside the mount prefix stay in
+  the browser's fast local MEMFS — runtime, `/tmp`, scratch.)
+- **Commands / jobs** — `:!make`, `:r !ls`, `system(...)`, `jobstart(...)` run as
+  real child processes on the server (cwd jailed to `--root`).
+- **`:terminal`** — a real PTY on the server (via `node-pty`); resize propagates.
+- **LSP** — a language server configured as a stdio job is spawned on the server
+  and "just works" (so does `vim.system` / `vim.lsp`).
+
+`--root` defaults to the server's cwd; `--port` defaults to `8001`. The server
+binds `127.0.0.1` only.
+
+> **You must rebuild?** No. The standalone app is the *same* `nvim.wasm` as the
+> library — the proxy is opt-in JS glue (`create({ proxy })`) plus the server.
+> Build the engine once; the server and demo wiring need no wasm rebuild.
+
+### How "visit the server" wires up (the opt-in)
+
+The proxy is **additive and opt-in**: nothing connects to a server unless a
+`proxy` config is present. Two layers provide it:
+
+- **For the demo page:** when `index.html` is served *by* `server.js`, the server
+  serves a generated `/proxy-config.js` that sets
+  `window.__NVIM_PROXY = { url, mount: '/host', root }`. The `url` is derived from
+  the request's `Host` header (`ws://<same-host>/proxy`), so it works whether you
+  reach the page via `localhost`, `127.0.0.1`, or a forwarded port. `app.js` reads
+  that global, passes it as `create({ ..., proxy })`, and chdir/opens the mount so
+  you land in the server's files. **When the page is served by the plain static
+  dev server (`serve.js`), `/proxy-config.js` 404s, the global stays undefined,
+  and `app.js` behaves exactly as the no-proxy demo** — so the static demo and the
+  embeddable widget are completely unaffected.
+- **For embedders:** pass the proxy config to `create()` directly:
+
+  ```js
+  const nvim = create({
+    args: ['-n'],
+    proxy: {
+      url: 'ws://my-server:8001/proxy', // the server's /proxy WebSocket
+      mount: '/host',                    // in-editor prefix that maps to --root
+      root: '/path/to/project',          // advisory; the server's --root is authoritative
+    },
+  });
+  ```
+
+  The engine worker opens the WebSocket, runs the proxy client, and routes IO for
+  paths under `mount` (and all spawn/PTY) to the server. With **no `proxy`**, the
+  library is byte-for-byte the self-contained MEMFS build it has always been.
+
+### Security model — read before exposing it
+
+The server is a **remote-code-execution surface by design**: `:!rm -rf`,
+`:terminal`, and any `jobstart()` run real commands on the host with the server
+process's privileges. The defaults reflect that:
+
+- **Binds `127.0.0.1` only** (loopback). Exposing it to a network (e.g. via an SSH
+  port-forward, the intended remote-edit path, or an explicit bind change) is an
+  opt-in you take deliberately.
+- **No auth token** — it is the single-user "edit my own box" tool, *not* a
+  multi-tenant sandbox. Anyone who can reach the port can run commands as you. A
+  shared-token handshake is a straightforward later addition; the loopback default
+  is the load-bearing protection.
+- **FS proxy + child-process cwd are jailed to `--root`** — a stray
+  `/host/../../etc/passwd` open or a relative `cd` can't escape the project you
+  pointed the server at.
+
+### Known gaps
+
+- **TCP sockets are not proxied.** `socket.c` / raw `vim.uv.tcp` connections still
+  get wasm's no-network behavior and do **not** reach the server. Most things
+  route through stdio (jobs, LSP, PTY, `vim.system`), which **is** proxied, so this
+  is narrow in practice — it only affects **TCP-only** language servers/tools and
+  code opening raw sockets. (Proxying `socket.c` over the same transport is a
+  planned later addition; see `stage4.md`.)
+- **`:terminal` input is byte-streamed** to the server PTY; multi-byte UTF-8 typed
+  across separate input events is forwarded as-is and reassembled by the PTY, so
+  pathological partial-codepoint splits rely on the terminal's own buffering.
+- **Browser-only proxy.** The proxy WebSocket path is exercised in the browser
+  demo and the Node e2e suites; the `serve.js` static demo intentionally has no
+  proxy.
 
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
@@ -546,8 +623,8 @@ What works today (`node nvim.js -- <args>`):
 | Engine in a worker + JS client over `postMessage` | ✅ |
 | **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `stage3.md`, `wasm/web/`) |
 | Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
-| `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone library (no spawn in wasm) |
-| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | 🚧 in progress (stage 4 — see `stage4.md`; mechanisms de-risked) |
+| `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone *library* (no spawn in wasm) · ✅ under the **standalone server** (proxied to the host — stage 4) |
+| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (stage 4 — see `stage4.md`; `wasm/server/server.js`) |
 
 ## Prerequisites
 
@@ -642,8 +719,15 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `extern-pre.js` | Emscripten `--extern-pre-js` (runs before everything): under Node, points `locateFile` at nvim.js's dir so a data package resolves from any cwd. |
 | `pre.js` | Emscripten `--pre-js`: argv, the postMessage-channel global, `$VIMRUNTIME`, and the environment. Node path mounts the host FS via NODEFS and points `$VIMRUNTIME` at the on-disk `runtime/` tree (no data package needed); browser path uses the runtime unpacked into MEMFS by the variant's `file_packager` loader. |
 | `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll` and the postMessage-backed channel stream ops for the engine's fd 0/1. |
+| `nvim_fs_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the async filesystem-syscall overrides scoped to the proxy mount prefix (`open`/`read`/`write`/`stat`/`getdents`/`close` → server). No proxy ⇒ every path falls through to MEMFS synchronously. |
+| `nvim_proc_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the `proc_spawn` / `pty_proc_spawn` proxy backend — virtual pollable fds for child stdio, the `--wrap=uv_spawn` path for `vim.system`, and the PTY resize control. Active only when a proxy is configured. |
+| `proxy-client.js` | Stage 4 proxy **client** + frame codec, shared by the engine worker (browser/Node) and the server. Defines the framed protocol (`hello`/`req`/`res`/`push` + binary trailer) and `createProxyClient(transport)`. The worker `importScripts` it next to `nvim.js` when `create({ proxy })` is used. |
+| `server/server.js` | Stage 4 **standalone server**: serves the static bundle over HTTP, accepts the proxy WebSocket at `/proxy`, and (when it serves the page) emits `/proxy-config.js` so visiting the server == the standalone app. Binds `127.0.0.1`, `--port`/`--root`, jails FS + child-process cwd to `--root`. |
+| `server/fs-handlers.js` | Server filesystem proxy handlers (`fs.open`/`read`/`write`/`stat`/`getdents`/`close`), jailed to `--root`. |
+| `server/proc-handlers.js` | Server process-spawn handlers (`proc.spawn`/`stdin`/`kill`; stdout/stderr/exit pushes), cwd jailed to `--root`; children killed on disconnect. |
+| `server/pty-handlers.js` | Server PTY handlers (`pty.spawn`/`write`/`resize`/`kill`; `pty.data`/`exit` pushes) backed by `node-pty`. Loaded lazily so the server still starts for FS/proc work if `node-pty` is missing. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
-| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless end-to-end test over a Node worker engine). Uses `@msgpack/msgpack` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless end-to-end test over a Node worker engine), and the stage-4 proxy suites `proxy.test.js` / `fs-proxy.test.js` / `proc-proxy.test.js` / `lsp-proxy.test.js` / `pty-proxy.test.js` (the engine driven against an in-process `server/server.js`). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `server.js`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` (npm). |
 | `stage1.md` / `stage2.md` / `stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
@@ -762,7 +846,12 @@ run-dependency, so the engine's `main()` waits for the unpack.
 
 ## Known limitations
 
-- No process spawning: `:terminal`, `:!`, and `jobstart()` are unavailable;
-  the relevant libuv/`uv_spawn` calls fail with `ENOSYS`.
+- No process spawning **in the standalone library** (no proxy): `:terminal`,
+  `:!`, and `jobstart()` are unavailable; the relevant libuv/`uv_spawn` calls fail
+  with `ENOSYS`. **Under the standalone server** (stage 4 — see "As a standalone
+  application") these are proxied to the host and work for real.
+- TCP sockets are not proxied even under the standalone server: raw `vim.uv.tcp`
+  and TCP-only LSP/tools don't reach the server (stdio jobs/LSP/PTY do). See the
+  stage-4 **Known gaps**.
 - File watching (`uv_fs_event_*`) reports `ENOSYS` (degrades gracefully).
 - System info (`uv_cpu_info`, memory, load average) returns benign constants.

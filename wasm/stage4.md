@@ -1,5 +1,12 @@
 # Stage 4 — The standalone application (server-proxied IO)
 
+> **Status: shipped.** Phases 0–6 are complete. Visiting the server
+> (`node wasm/server/server.js --root <dir> --port <p>`, then
+> `http://localhost:<p>/`) gives a full in-browser editor whose filesystem, `:!`,
+> `jobstart()`, `:terminal`, and LSP all run **on the server**, jailed to `--root`.
+> See **What shipped** below for the summary and the one known gap (TCP sockets).
+> The quickstart lives in `README.md` → "As a standalone application".
+
 Stages 1–3 produced a Neovim engine cross-compiled to wasm that runs **entirely
 in the browser** (engine in a Web Worker, pure-JS UI on the page, postMessage
 transport, `poll()` suspending via JSPI). It is self-contained: no backend, no
@@ -141,21 +148,68 @@ process's privileges. The defaults reflect that:
 (A shared-token handshake is a straightforward later addition for the
 expose-to-LAN case; the loopback default is the load-bearing protection.)
 
-## Plan of record (phases)
+## Plan of record (phases) — all shipped
 
-Each phase is built by a focused agent, verified with the Node e2e test **and** a
-real-browser smoke test, and committed before the next begins — the same cadence
-as the library work in stage 3.
+Each phase was built by a focused agent, verified with a Node e2e test **and** a
+real-browser smoke test, and committed before the next began — the same cadence
+as the library work in stage 3. **All seven phases (0–6) are done.**
 
-| Phase | Deliverable | Test |
-|---|---|---|
-| **0** | This doc + an honest README "Standalone application" section + a status row. | — |
-| **1** | Proxy transport + `wasm/server/server.js` skeleton: framed protocol, worker WebSocket (in-process transport under Node), a C-visible js-library to send-and-await over the proxy (JSPI), the generalized proxy-fd table, a handler registry (stubs). | protocol ping/echo round-trip |
-| **2** | Filesystem proxy (seam 1): async syscall overrides scoped to the mount prefix; server FS handlers jailed to a root. | open/edit/`:w` a file that lives only on the server's disk; `:e <dir>` |
-| **3** | Process spawn + stdio (seam 2): wasm `proc_spawn` proxy path; server `child_process` handler. | `system('echo hi')`, `jobstart` + `on_stdout`, non-zero exit, stdin pipe |
-| **4** | LSP smoke (mostly falls out of phase 3): a fixture language server + an `initialize` round-trip test. | LSP `initialize` completes over a proxied stdio job |
-| **5** | PTY / `:terminal` (seam 2 + resize): wasm `pty_proc_spawn` proxy path; server `node-pty` handler. | `:terminal` echoes; resize propagates |
-| **6** | Hardening + docs; optionally proxy `socket.c` TCP. | full browser run against a real server |
+| Phase | Deliverable | Test | Status |
+|---|---|---|---|
+| **0** | This doc + an honest README "Standalone application" section + a status row. | — | ✅ |
+| **1** | Proxy transport + `wasm/server/server.js` skeleton: framed protocol, worker WebSocket (postMessage/in-process transport under Node), a C-visible js-library to send-and-await over the proxy (JSPI), the generalized proxy-fd table, a handler registry (stubs). | protocol ping/echo round-trip (`proxy.test.js`) | ✅ |
+| **2** | Filesystem proxy (seam 1): async syscall overrides scoped to the mount prefix; server FS handlers jailed to a root. | open/edit/`:w` a file that lives only on the server's disk; `:e <dir>` (`fs-proxy.test.js`) | ✅ |
+| **3** | Process spawn + stdio (seam 2): wasm `proc_spawn` proxy path; server `child_process` handler. | `system('echo hi')`, `jobstart` + `on_stdout`, non-zero exit, stdin pipe (`proc-proxy.test.js`) | ✅ |
+| **4** | LSP smoke (mostly falls out of phase 3): a fixture language server + an `initialize` round-trip test. | LSP `initialize` completes over a proxied stdio job (`lsp-proxy.test.js`) | ✅ |
+| **5** | PTY / `:terminal` (seam 2 + resize): wasm `pty_proc_spawn` proxy path; server `node-pty` handler. | `:terminal` echoes; resize propagates (`pty-proxy.test.js`) | ✅ |
+| **6** | Demo wiring (visiting the server = the standalone app) + docs. TCP socket proxying left as a documented known gap. | full browser run against a real server | ✅ |
+
+## What shipped
+
+The standalone app is **five IO seams proxied to a server**, plus the server and
+the demo wiring that makes "visit the page the server hosts" Just Work:
+
+1. **Transport** (`wasm/proxy-client.js`, `wasm/nvim_io.js`): the engine worker
+   opens its own WebSocket to the server and speaks a small framed protocol
+   (`hello`/`req`/`res`/`push` + a binary trailer). Under Node the same client runs
+   over an in-process transport (the tests). A C-visible js-library lets wasm
+   `send-and-await` over the proxy with the calling frame JSPI-suspended.
+2. **Filesystem** (seam 1): `__syscall_openat` / `fd_read` / `fd_write` /
+   `fstat` / `getdents64` / `close` are `__async`-overridden and, for paths under
+   the mount prefix (`/host`), round-trip the server's real disk; every other path
+   stays synchronous MEMFS. Server FS handlers are **jailed to `--root`**.
+3. **Processes + stdio** (seam 2): an `if(EMSCRIPTEN)` proxy backend in
+   `proc_spawn` hands the child's stdio to virtual pollable fds; the server runs
+   the real `child_process` and streams bytes back. `:!`, `system()`, `jobstart()`
+   all work, cwd jailed to `--root`; children are killed when the connection drops.
+4. **LSP**: falls out of (3) — nvim spawns the language server as a stdio job, so a
+   server-side LSP "just works" with no LSP-specific code. (`vim.system` /
+   `uv_spawn` also rides this via a wasm-only `--wrap=uv_spawn`.)
+5. **PTY / `:terminal`** (seam 2 + resize): a `pty_proc_spawn` proxy path backed by
+   the server's `node-pty`; `pty.data`/`pty.exit` pushes + a `pty.resize` control
+   message. ptys are killed when the connection drops.
+
+**The server** (`wasm/server/server.js`) serves the static bundle over HTTP AND
+accepts the proxy WebSocket at `/proxy`. It binds `127.0.0.1` only, takes
+`--port`/`--root`, and jails both the FS proxy and child-process cwd to `--root`.
+
+**The demo wiring** (phase 6): when served *by* `server.js`, the page loads a
+generated `/proxy-config.js` that sets `window.__NVIM_PROXY = { url, mount, root }`
+(the `url` derived from the request Host header, so it tracks localhost /
+127.0.0.1 / a forwarded port). `app.js` opts into `create({ proxy })` when that
+global is present and chdir/opens the mount so the user lands in the server's
+files; when it's absent (the plain `serve.js` static demo, or the library used
+without `proxy`) the no-proxy path is byte-for-byte unchanged.
+
+### Known gap: TCP sockets
+
+`socket.c` / raw `vim.uv.tcp` connections are **not proxied** — they still get
+wasm's no-network behavior, and do not reach the server. Most things route
+through stdio (jobs, LSP, PTY, `vim.system`), which **is** proxied, so this is
+narrow in practice: it only affects TCP-only language servers / tools and code
+that opens raw sockets. Proxying `socket.c` over the same transport is a
+straightforward later addition (a `net.*` handler family + a virtual-fd backend
+like seam 2); it was deliberately deferred rather than rushed.
 
 ## De-risking spikes (done)
 
