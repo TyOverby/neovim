@@ -53,8 +53,17 @@ go run ./cmd/conformance             # same suite, summary output
   rename` with the realpath-prefix jail (`resolveJailed`). `GoTarget` caps now
   include `fs`; the 4 fs scenarios (incl. the jail-escape rejection) pass, plus a
   dedicated jail containment unit test (`..`, absolute, and symlink escapes).
-- Later phases: proc/PTY/sockets (each grows the Go server's conformance caps),
-  `cancel` + reconnect, SSH-stdio remote, FS routing, auth/TLS.
+- **Phase 4 (done):** process + PTY proxy (`server/proc.go`, `server/pty.go`,
+  shared `server/procutil.go`) — the Go port of `proc-handlers.js` + `pty-handlers.js`
+  (PTY via `creack/pty`): `proc.spawn/stdin/stdin_close/kill` with stdout/stderr/
+  exit pushes, `pty.spawn/write/resize/kill` with data/exit pushes, the
+  mount-aware `resolveCwd` + PATH-backfilling `childEnv`, and per-connection
+  child/pty tables killed on disconnect. A `Response.After` hook (runs after the
+  response frame) guarantees the `{id}` reaches the client before any push
+  referencing it. `GoTarget` caps now `{base, fs, proc, pty}`; all proc/pty
+  scenarios pass (clean under `-race`, stable across repeated runs).
+- Later phases: sockets, `cancel` + reconnect, SSH-stdio remote, FS routing,
+  auth/TLS.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
 …}` in `conformance/gotarget.go`; each handler phase adds its cap there and the

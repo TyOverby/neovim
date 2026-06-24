@@ -25,9 +25,16 @@ import (
 
 // Response is what a handler returns: a JSON-able result plus an optional binary
 // payload trailer. Mirrors the Node handler's `result | {result, payload}`.
+//
+// After, if set, runs AFTER the response frame is written — the ordering
+// primitive that lets a spawn/connect handler return its {id} first and only
+// then start emitting pushes (proc.exit, sock.connect_ok, …), so the client
+// always learns the id before any push referencing it. Mirrors how the Node
+// handlers return synchronously and fire events on a later tick.
 type Response struct {
 	Result  any
 	Payload []byte
+	After   func()
 }
 
 // HandlerFunc handles one request. Returning an error becomes an ok:false
@@ -45,7 +52,9 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{handlers: map[string]HandlerFunc{}}
 	registerBase(r)
-	RegisterFS(r) // seam 1: filesystem proxy
+	RegisterFS(r)   // seam 1: filesystem proxy
+	RegisterProc(r) // seam 2: process spawn proxy
+	RegisterPTY(r)  // seam 2: PTY proxy
 	return r
 }
 
@@ -293,6 +302,11 @@ func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 				resultJSON = b
 			}
 			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: resultJSON}, resp.Payload)
+			// Ordering primitive: pushes referencing the just-returned id (exit,
+			// connect_ok, …) run only after the response is on the wire.
+			if resp.After != nil {
+				resp.After()
+			}
 		}(h.ID, h.Method, h.Params, payload)
 
 	case proxy.TCancel:
