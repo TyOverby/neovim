@@ -359,6 +359,10 @@
       // Runtime bundle variant. engine-worker.js loads nvim-<plugins>.data.js
       // before nvim.js. Default 'full'.
       plugins: config.plugins,
+      // Optional Stage 4 IO-proxy config ({ url, root, mount }). When present,
+      // engine-worker.js opens a WebSocket to the server and wires the proxy
+      // client; when absent it opens no connection (additive/opt-in).
+      proxy: config.proxy,
     };
     var worker = new Worker(engineUrl);
     var t = {
@@ -446,6 +450,28 @@
   //   minimal - strictly the boot/edit essentials (no syntax/ftplugin/doc).
   var PLUGIN_VARIANTS = { full: 1, core: 1, minimal: 1 };
 
+  // Validate the optional Stage 4 `proxy` config (the standalone-app IO proxy --
+  // see wasm/stage4.md). It is ADDITIVE and OPT-IN: absent => behave exactly as
+  // today (no server connection). Shape: { url:<string>, root?:<string>,
+  // mount?:<string> }. Throw a clear error on a bad shape, mirroring the
+  // `plugins` validation. Returns the (possibly normalized) proxy config or null.
+  function validateProxy(proxy) {
+    if (proxy == null) { return null; }
+    if (typeof proxy !== 'object') {
+      throw new Error('Neovim.create: proxy must be an object { url, root?, mount? }');
+    }
+    if (typeof proxy.url !== 'string' || !proxy.url) {
+      throw new Error("Neovim.create: proxy.url (the server WebSocket URL) is required and must be a string");
+    }
+    if (proxy.root != null && typeof proxy.root !== 'string') {
+      throw new Error('Neovim.create: proxy.root must be a string (the server-side jail root)');
+    }
+    if (proxy.mount != null && typeof proxy.mount !== 'string') {
+      throw new Error('Neovim.create: proxy.mount must be a string (the in-engine mount prefix)');
+    }
+    return { url: proxy.url, root: proxy.root, mount: proxy.mount };
+  }
+
   function create(opts) {
     opts = opts || {};
     // Validate `plugins` up front so a typo fails loudly here, not after the
@@ -454,6 +480,8 @@
       throw new Error("Neovim.create: unknown plugins variant '" + opts.plugins +
         "' (expected 'full', 'core', or 'minimal')");
     }
+    // Validate the optional Stage 4 proxy config (opt-in; absent => unchanged).
+    var proxy = validateProxy(opts.proxy);
     var transport = opts.transport ||
       browserEngineTransport(resolveEngineUrl(opts), {
         args: opts.args || [],
@@ -461,6 +489,9 @@
         cwd: opts.cwd,
         filesystem: opts.filesystem,
         plugins: opts.plugins,
+        // Threaded into the engine-worker init message as init.proxy. When absent
+        // engine-worker.js opens NO server connection (current behavior).
+        proxy: proxy,
       });
     var instance = createNvim({ transport: transport, MessagePack: opts.MessagePack });
 

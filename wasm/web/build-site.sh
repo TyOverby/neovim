@@ -31,6 +31,10 @@ mkdir -p "${OUT}"
 cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" \
    "${WEB}/neovim-utils.js" "${WEB}/neovim-utils.mjs" "${WEB}/app.js" \
    "${WEB}/engine-worker.js" "${OUT}/"
+# Stage 4 IO-proxy client (one dir up, in wasm/): the engine worker
+# importScripts('proxy-client.js') at runtime when a `proxy` config is passed, so
+# it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.
+cp "${ROOT}/wasm/proxy-client.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
 # wasm artifacts: the shared engine + every runtime variant present (so the demo

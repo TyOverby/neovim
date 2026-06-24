@@ -49,6 +49,20 @@ onmessage = function (e) {
     if (init.filesystem) { self.__nvimFiles = init.filesystem; }
     if (typeof init.cwd === 'string') { self.__nvimCwd = init.cwd; }
 
+    // Stage 4 (additive/opt-in): if the page passed a `proxy` config, open the
+    // engine's OWN WebSocket to the IO-proxy server, wrap it as a transport, run
+    // the shared proxy client over it, send the hello handshake, and stash the
+    // client at globalThis.__nvimProxy so later phases' js-library can find it.
+    // When init.proxy is ABSENT we do NOTHING here -- no connection, current
+    // behavior. A connection failure must NOT crash the worker: post a status and
+    // continue (Phase 1 has no IO depending on it yet).
+    if (init.proxy && init.proxy.url) {
+      try { setupProxy(init.proxy); }
+      catch (err) {
+        try { postMessage({ kind: 'stderr', text: 'proxy setup failed: ' + (err && err.message || err) }); } catch (_e) {}
+      }
+    }
+
     // Surface engine stdout/stderr + exit back to the page.
     self.Module = self.Module || {};
     self.Module.print = function (s) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
@@ -93,3 +107,42 @@ onmessage = function (e) {
   ch.inQueue.push({ buf: new Uint8Array(e.data), off: 0 });
   if (ch.notify) { ch.notify(); }
 };
+
+// Stage 4: open the IO-proxy WebSocket and wire the shared proxy client. The
+// client lives in wasm/proxy-client.js, importScripted into this worker (it sets
+// self.ProxyClient). build-site.sh / build-lib.sh copy it next to nvim.js so it
+// resolves at the bundle root, exactly like nvim.js. Connection failures are
+// surfaced as a stderr status (the engine keeps running; no IO depends on it in
+// Phase 1).
+function setupProxy(proxy) {
+  importScripts('proxy-client.js');   // sets self.ProxyClient
+  var ws = new WebSocket(proxy.url);
+  ws.binaryType = 'arraybuffer';
+
+  // Wrap the WebSocket as the proxy-client transport. The client decodes inbound
+  // frames via transport.onFrame (set by createProxyClient).
+  var transport = {
+    send: function (data) { ws.send(data); },
+    close: function () { try { ws.close(); } catch (_e) {} },
+  };
+  var client = self.ProxyClient.createProxyClient(transport);
+  // Future phases' js-library (FS / proc_spawn) finds the proxy here.
+  self.__nvimProxy = client;
+
+  ws.onmessage = function (ev) { if (transport.onFrame) { transport.onFrame(ev.data); } };
+  ws.onopen = function () {
+    // Handshake: carry the mount prefix + jail root to the server (Phase 1 acks).
+    client.hello({ mount: proxy.mount, root: proxy.root }).then(function () {
+      try { postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url }); } catch (_e) {}
+    }, function (err) {
+      try { postMessage({ kind: 'stderr', text: 'proxy hello failed: ' + (err && err.message || err) }); } catch (_e) {}
+    });
+  };
+  ws.onerror = function () {
+    try { postMessage({ kind: 'stderr', text: 'proxy: WebSocket error connecting to ' + proxy.url }); } catch (_e) {}
+  };
+  ws.onclose = function () {
+    if (client.onTransportClosed) { client.onTransportClosed(); }
+    try { postMessage({ kind: 'stderr', text: 'proxy: connection closed' }); } catch (_e) {}
+  };
+}

@@ -52,6 +52,35 @@ if (workerData.env) { globalThis.__nvimEnv = workerData.env; }
 if (workerData.filesystem) { globalThis.__nvimFiles = workerData.filesystem; }
 if (typeof workerData.cwd === 'string') { globalThis.__nvimCwd = workerData.cwd; }
 
+// Stage 4 (additive/opt-in): if a proxy URL was supplied, open the IO-proxy
+// WebSocket and wire the shared proxy client, the Node analogue of
+// engine-worker.js's setupProxy. This is the minimal symmetric seam -- the goal
+// is just that globalThis.__nvimProxy exists for later phases' js-library to
+// find. Absent => do nothing (current behavior; the e2e test never sets it). A
+// connection failure must not crash the worker.
+if (workerData.proxy && workerData.proxy.url) {
+  try {
+    const { createProxyClient } = require(path.join(__dirname, 'proxy-client.js'));
+    const WebSocket = require('ws');
+    const ws = new WebSocket(workerData.proxy.url);
+    const transport = {
+      send: function (data) { ws.send(data); },
+      close: function () { try { ws.close(); } catch (_e) {} },
+    };
+    const client = createProxyClient(transport);
+    globalThis.__nvimProxy = client;
+    ws.on('message', function (d) { if (transport.onFrame) { transport.onFrame(d); } });
+    ws.on('open', function () {
+      client.hello({ mount: workerData.proxy.mount, root: workerData.proxy.root })
+        .catch(function () { /* ignore; engine keeps running */ });
+    });
+    ws.on('close', function () { if (client.onTransportClosed) { client.onTransportClosed(); } });
+    ws.on('error', function () { /* ignore; no IO depends on it in Phase 1 */ });
+  } catch (_e) {
+    // proxy-client.js or ws missing -> skip the seam; the engine still boots.
+  }
+}
+
 // Booting the (non-MODULARIZE) Emscripten module starts the engine. When it
 // exits (e.g. :q) the worker thread exits, which the parent observes as the
 // worker's 'exit' event and treats as channel EOF.
