@@ -4,11 +4,11 @@
 //
 // THE WIRE FRAME (identical to wasm/proxy-client.js, byte-for-byte):
 //
-//	uint32LE headerLen | headerJSON (utf8) | payloadBytes?
+//		uint32LE headerLen | headerJSON (utf8) | payloadBytes?
 //
-//   - headerLen    little-endian uint32: byte length of the header JSON.
-//   - headerJSON   a UTF-8 JSON control object (see Header).
-//   - payloadBytes OPTIONAL raw binary trailer (file bytes, stdio, pty output).
+//	  - headerLen    little-endian uint32: byte length of the header JSON.
+//	  - headerJSON   a UTF-8 JSON control object (see Header).
+//	  - payloadBytes OPTIONAL raw binary trailer (file bytes, stdio, pty output).
 //
 // Over a MESSAGE transport (WebSocket) the message boundary delimits the frame,
 // so the payload is "everything after the header" — Encode/Decode handle that.

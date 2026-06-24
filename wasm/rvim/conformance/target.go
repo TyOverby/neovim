@@ -16,13 +16,18 @@ type Target interface {
 	// Start launches the server jailed to root and returns its /proxy WS URL.
 	Start(root string) (url string, stop func(), err error)
 	Name() string
+	// Caps lists the capabilities the target implements ("base"/"fs"/"proc"/
+	// "sock"/"pty"); nil means "all" (the reference oracle). The Go server, built
+	// up phase by phase, advertises a growing subset.
+	Caps() []string
 }
 
 // NodeTarget runs the stage-4 Node reference server (the conformance oracle) via
 // node-target.js on an ephemeral loopback port.
 type NodeTarget struct{}
 
-func (NodeTarget) Name() string { return "node-reference" }
+func (NodeTarget) Name() string   { return "node-reference" }
+func (NodeTarget) Caps() []string { return nil } // the oracle implements everything
 
 func (NodeTarget) Start(root string) (string, func(), error) {
 	// Locate node-target.js relative to this source file so the harness works

@@ -42,5 +42,16 @@ go run ./cmd/conformance             # same suite, summary output
 
 - **Phase 1 (done):** frame codec in Go + conformance harness; all scenarios green
   against the Node reference.
-- Later phases: the Go `rvim` binary, the io-proxy handlers (FS/proc/PTY/sockets),
-  `cancel` + reconnect, SSH-stdio remote, FS routing, auth/TLS.
+- **Phase 2 (done):** the Go `rvim` server skeleton — `server/` (HTTP + `/proxy`
+  WebSocket, handler registry, per-connection ctx with Push/State/cleanup,
+  hello+version, base ping/echo handlers, 127.0.0.1 bind, `--assets-dir` static
+  serving, gated `/proxy-config.js`) and `cmd/rvim`. A `GoTarget` runs the
+  in-process Go server through the conformance suite; the `base` scenarios pass
+  against it. Layout below gains `server/` and `cmd/rvim/`.
+- Later phases: the io-proxy handlers (FS/proc/PTY/sockets — each grows the Go
+  server's conformance caps), `cancel` + reconnect, SSH-stdio remote, FS routing,
+  auth/TLS.
+
+The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
+…}` in `conformance/gotarget.go`; each handler phase adds its cap there and the
+matching scenarios must pass.

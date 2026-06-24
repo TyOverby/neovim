@@ -1,0 +1,355 @@
+// Package server is the Go IO-proxy server (stage 5): it serves the static
+// browser bundle over HTTP and speaks the framed proxy protocol over a /proxy
+// WebSocket, dispatching to a handler registry. Phase 2 is the skeleton —
+// transport + registry + hello/version + base handlers (ping/echo); the FS,
+// process, PTY, and socket handler families register onto the same registry in
+// later phases. It is the Go counterpart of wasm/server/server.js, verified
+// against the same conformance suite.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"sync"
+
+	"github.com/coder/websocket"
+
+	"rvim/proxy"
+)
+
+// ---- handler registry -------------------------------------------------------
+
+// Response is what a handler returns: a JSON-able result plus an optional binary
+// payload trailer. Mirrors the Node handler's `result | {result, payload}`.
+type Response struct {
+	Result  any
+	Payload []byte
+}
+
+// HandlerFunc handles one request. Returning an error becomes an ok:false
+// response carrying err.Error() (mirrors a Node handler throw).
+type HandlerFunc func(c *Ctx, params json.RawMessage, payload []byte) (Response, error)
+
+// Registry maps method -> handler. Built once, shared across connections.
+type Registry struct {
+	handlers map[string]HandlerFunc
+}
+
+// NewRegistry returns a registry preloaded with the base handlers (ping/echo).
+func NewRegistry() *Registry {
+	r := &Registry{handlers: map[string]HandlerFunc{}}
+	registerBase(r)
+	return r
+}
+
+// Register adds (or replaces) a handler.
+func (r *Registry) Register(method string, fn HandlerFunc) { r.handlers[method] = fn }
+
+// ---- per-connection context -------------------------------------------------
+
+// ConnConfig is the per-connection config established at hello.
+type ConnConfig struct {
+	Root  string `json:"root"`
+	Mount string `json:"mount"`
+}
+
+// Ctx is the per-connection context handed to every handler. It carries the
+// connection config, a Push for unsolicited server->client frames, lazily
+// created per-connection state bags (handle/child/socket tables), and cleanup
+// hooks run when the connection drops.
+type Ctx struct {
+	Config ConnConfig
+
+	conn *conn
+
+	mu       sync.Mutex
+	state    map[string]any
+	cleanups []func()
+}
+
+// Push sends an unsolicited push frame (stdout chunks, exit, socket data, …).
+func (c *Ctx) Push(method string, params any, payload []byte) {
+	pb, err := json.Marshal(params)
+	if err != nil {
+		return
+	}
+	_ = c.conn.writeFrame(proxy.Header{T: proxy.TPush, Method: method, Params: pb}, payload)
+}
+
+// State returns the per-connection state value for key, creating it with init on
+// first use. Handlers use this for their handle/child/socket tables. The init
+// runs under the ctx lock, so each table is created once per connection.
+func (c *Ctx) State(key string, init func() any) any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if v, ok := c.state[key]; ok {
+		return v
+	}
+	v := init()
+	c.state[key] = v
+	return v
+}
+
+// OnCleanup registers a function to run when the connection drops (kill child
+// processes, destroy sockets, close listeners — so a closed tab leaves nothing).
+func (c *Ctx) OnCleanup(fn func()) {
+	c.mu.Lock()
+	c.cleanups = append(c.cleanups, fn)
+	c.mu.Unlock()
+}
+
+func (c *Ctx) runCleanups() {
+	c.mu.Lock()
+	fns := c.cleanups
+	c.cleanups = nil
+	c.mu.Unlock()
+	for _, fn := range fns {
+		func() {
+			defer func() { _ = recover() }()
+			fn()
+		}()
+	}
+}
+
+// ---- the websocket connection wrapper --------------------------------------
+
+// conn serializes writes to a websocket (coder/websocket requires one writer at
+// a time; responses and async pushes both write).
+type conn struct {
+	ws      *websocket.Conn
+	writeMu sync.Mutex
+}
+
+func (cn *conn) writeFrame(h proxy.Header, payload []byte) error {
+	frame, err := proxy.Encode(h, payload)
+	if err != nil {
+		return err
+	}
+	cn.writeMu.Lock()
+	defer cn.writeMu.Unlock()
+	return cn.ws.Write(context.Background(), websocket.MessageBinary, frame)
+}
+
+// ---- the server ------------------------------------------------------------
+
+// Config configures a Server.
+type Config struct {
+	Bind        string       // listen address (default 127.0.0.1)
+	Port        int          // listen port (0 = ephemeral)
+	Root        string       // FS jail root (authoritative; a client hello cannot widen it)
+	Mount       string       // in-editor mount prefix (default /host)
+	Assets      *AssetServer // static bundle server (may be nil: no static serving)
+	ProxyConfig bool         // generate /proxy-config.js so visiting == the standalone app
+}
+
+// Server serves HTTP + the /proxy WebSocket.
+type Server struct {
+	cfg Config
+	reg *Registry
+	ln  net.Listener
+	srv *http.Server
+}
+
+// New builds a Server. The registry is shared across connections.
+func New(cfg Config, reg *Registry) *Server {
+	if cfg.Bind == "" {
+		cfg.Bind = "127.0.0.1"
+	}
+	if cfg.Mount == "" {
+		cfg.Mount = "/host"
+	}
+	s := &Server{cfg: cfg, reg: reg}
+	s.srv = &http.Server{Handler: s.handler()}
+	return s
+}
+
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// The /proxy WebSocket endpoint.
+		if r.URL.Path == "/proxy" {
+			s.handleProxy(w, r)
+			return
+		}
+		// /proxy-config.js: generate the standalone-app hook when proxying is on,
+		// else a no-op 200 (the no-proxy demo) — mirrors serve.js/server.js.
+		if r.URL.Path == "/proxy-config.js" {
+			s.handleProxyConfig(w, r)
+			return
+		}
+		if s.cfg.Assets != nil {
+			s.cfg.Assets.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	return mux
+}
+
+func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	if !s.cfg.ProxyConfig {
+		_, _ = w.Write([]byte("// no proxy: this Go server is serving the no-proxy demo.\n"))
+		return
+	}
+	host := r.Host
+	if host == "" {
+		host = fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
+	}
+	cfg := map[string]any{"url": "ws://" + host + "/proxy", "mount": s.cfg.Mount, "root": s.cfg.Root}
+	cfgJSON, _ := json.Marshal(cfg)
+	fmt.Fprintf(w, "// Generated by rvim: visiting this server == the standalone neovim.js app.\n"+
+		"window.__NVIM_PROXY = %s;\n", cfgJSON)
+}
+
+func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"*"}, // loopback single-user model; auth gate is Phase 9
+	})
+	if err != nil {
+		return
+	}
+	ws.SetReadLimit(1 << 24) // large file reads / pty bursts exceed the 32KiB default
+	s.serveConn(ws)
+}
+
+func (s *Server) serveConn(ws *websocket.Conn) {
+	cn := &conn{ws: ws}
+	ctx := &Ctx{
+		Config: ConnConfig{Root: s.cfg.Root, Mount: s.cfg.Mount},
+		conn:   cn,
+		state:  map[string]any{},
+	}
+	defer ctx.runCleanups()
+	defer ws.Close(websocket.StatusNormalClosure, "")
+
+	for {
+		_, data, err := ws.Read(context.Background())
+		if err != nil {
+			return // connection dropped: cleanups run via defer
+		}
+		h, payload, derr := proxy.Decode(data)
+		if derr != nil {
+			continue // ignore undecodable noise
+		}
+		s.dispatch(cn, ctx, h, payload)
+	}
+}
+
+func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
+	switch h.T {
+	case proxy.THello:
+		// Merge the client's hello params (mount), then FORCE the server's root
+		// back — a client-supplied root must never widen/relocate the jail.
+		var cfg ConnConfig
+		if len(h.Params) > 0 {
+			_ = json.Unmarshal(h.Params, &cfg)
+		}
+		if cfg.Mount != "" {
+			ctx.Config.Mount = cfg.Mount
+		}
+		ctx.Config.Root = s.cfg.Root // authoritative
+		if h.Version != 0 && h.Version != proxy.ProtocolVersion {
+			log.Printf("rvim: proxy protocol version mismatch: client=%d server=%d", h.Version, proxy.ProtocolVersion)
+		}
+		ack, _ := json.Marshal(map[string]any{
+			"hello":         true,
+			"config":        ctx.Config,
+			"serverVersion": proxy.ProtocolVersion,
+		})
+		_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(true), Result: ack}, nil)
+
+	case proxy.TReq:
+		fn := s.reg.handlers[h.Method]
+		if fn == nil {
+			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(false),
+				Error: fmt.Sprintf("unknown method '%s'", h.Method)}, nil)
+			return
+		}
+		// Each request runs in its own goroutine so the read loop stays responsive
+		// (a long handler must not block stdin / cancel frames). Writes are
+		// serialized by conn.writeMu, so out-of-order completion is fine.
+		go func(id int, method string, params json.RawMessage, pl []byte) {
+			resp, err := callHandler(fn, ctx, params, pl)
+			if err != nil {
+				_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(false), Error: err.Error()}, nil)
+				return
+			}
+			var resultJSON json.RawMessage
+			if resp.Result != nil {
+				b, mErr := json.Marshal(resp.Result)
+				if mErr != nil {
+					_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(false), Error: mErr.Error()}, nil)
+					return
+				}
+				resultJSON = b
+			}
+			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: resultJSON}, resp.Payload)
+		}(h.ID, h.Method, h.Params, payload)
+
+	case proxy.TCancel:
+		// Phase 6 wires real cancellation; for now there is nothing long-lived to
+		// abort (handlers complete quickly or stream via pushes).
+	}
+}
+
+// callHandler isolates a handler panic into an error response.
+func callHandler(fn HandlerFunc, ctx *Ctx, params json.RawMessage, payload []byte) (resp Response, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("handler panic: %v", r)
+		}
+	}()
+	return fn(ctx, params, payload)
+}
+
+func boolp(b bool) *bool { return &b }
+
+// ---- lifecycle --------------------------------------------------------------
+
+// Listen binds the configured address (storing the listener so Addr works for
+// ephemeral ports) without serving yet.
+func (s *Server) Listen() error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port))
+	if err != nil {
+		return err
+	}
+	s.ln = ln
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		s.cfg.Port = tcp.Port
+	}
+	return nil
+}
+
+// Serve serves until the server is closed (blocking). Listen must be called first.
+func (s *Server) Serve() error {
+	if s.ln == nil {
+		if err := s.Listen(); err != nil {
+			return err
+		}
+	}
+	err := s.srv.Serve(s.ln)
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
+}
+
+// Addr returns the bound address (valid after Listen).
+func (s *Server) Addr() string {
+	if s.ln == nil {
+		return ""
+	}
+	return s.ln.Addr().String()
+}
+
+// Port returns the bound port (valid after Listen).
+func (s *Server) Port() int { return s.cfg.Port }
+
+// Close shuts the server down.
+func (s *Server) Close(ctx context.Context) error { return s.srv.Shutdown(ctx) }

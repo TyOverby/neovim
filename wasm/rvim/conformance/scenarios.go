@@ -12,9 +12,33 @@ import (
 // Scenario is one conformance check. Run executes against a client that has
 // already completed the hello handshake, jailed to `root` (a fresh temp dir).
 // Return an error to fail. The SAME set runs against every Target.
+//
+// Cap tags the capability the scenario exercises ("base"/"fs"/"proc"/"sock"/
+// "pty"). A Target advertises which caps it implements, so the Go server (built
+// up phase by phase) runs exactly the scenarios it can satisfy while the Node
+// reference runs them all.
 type Scenario struct {
 	Name string
+	Cap  string
 	Run  func(ctx context.Context, c *Client, root string) error
+}
+
+// FilterByCaps returns the scenarios whose Cap is in caps (nil caps = all).
+func FilterByCaps(all []Scenario, caps []string) []Scenario {
+	if caps == nil {
+		return all
+	}
+	set := map[string]bool{}
+	for _, c := range caps {
+		set[c] = true
+	}
+	var out []Scenario
+	for _, sc := range all {
+		if set[sc.Cap] {
+			out = append(out, sc)
+		}
+	}
+	return out
 }
 
 // open(2) flag bits used by the scenarios (musl/Linux values).
@@ -45,13 +69,13 @@ func req(ctx context.Context, c *Client, method string, params any, payload []by
 func Scenarios() []Scenario {
 	return []Scenario{
 		// ---- Phase 1 base methods ----
-		{"ping", func(ctx context.Context, c *Client, root string) error {
+		{"ping", "base", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "ping", map[string]any{}, nil)
 			if err != nil {
 				return err
 			}
 			var out struct {
-				Pong bool `json:"pong"`
+				Pong bool  `json:"pong"`
 				Now  int64 `json:"now"`
 			}
 			if err := r.Into(&out); err != nil {
@@ -62,7 +86,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"echo round-trips params + binary payload", func(ctx context.Context, c *Client, root string) error {
+		{"echo round-trips params + binary payload", "base", func(ctx context.Context, c *Client, root string) error {
 			payload := []byte{0, 1, 2, 250, 255, 0, 7}
 			r, err := req(ctx, c, "echo", map[string]any{"x": 42, "s": "hi"}, payload)
 			if err != nil {
@@ -83,7 +107,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"hello acks with mount + server-forced root + version", func(ctx context.Context, c *Client, root string) error {
+		{"hello acks with mount + server-forced root + version", "base", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Hello(ctx, map[string]any{"mount": "/host", "root": "/tmp/attacker-controlled"})
 			if err != nil {
 				return err
@@ -111,7 +135,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"unknown method -> ok:false", func(ctx context.Context, c *Client, root string) error {
+		{"unknown method -> ok:false", "base", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Request(ctx, "no.such.method", map[string]any{}, nil)
 			if err != nil {
 				return err
@@ -123,7 +147,7 @@ func Scenarios() []Scenario {
 		}},
 
 		// ---- filesystem ----
-		{"fs: open/write/close/stat/read round-trip", func(ctx context.Context, c *Client, root string) error {
+		{"fs: open/write/close/stat/read round-trip", "fs", func(ctx context.Context, c *Client, root string) error {
 			content := []byte("hello world\nsecond line\n")
 			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/a.txt", "flags": oCREAT | oWRONLY | oTRUNC, "mode": 0o644}, nil)
 			if err != nil {
@@ -188,7 +212,7 @@ func Scenarios() []Scenario {
 			_, err = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
 			return err
 		}},
-		{"fs: stat missing -> exists:false (not error)", func(ctx context.Context, c *Client, root string) error {
+		{"fs: stat missing -> exists:false (not error)", "fs", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "fs.stat", map[string]any{"path": "/nope.txt"}, nil)
 			if err != nil {
 				return err
@@ -202,7 +226,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"fs: mkdir + readdir + rename + unlink", func(ctx context.Context, c *Client, root string) error {
+		{"fs: mkdir + readdir + rename + unlink", "fs", func(ctx context.Context, c *Client, root string) error {
 			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": "/sub", "mode": 0o755}, nil); err != nil {
 				return err
 			}
@@ -243,7 +267,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"fs: jail rejects ../ escape", func(ctx context.Context, c *Client, root string) error {
+		{"fs: jail rejects ../ escape", "fs", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Request(ctx, "fs.open", map[string]any{"path": "/../../../../etc/passwd", "flags": oRDONLY}, nil)
 			if err != nil {
 				return err
@@ -255,7 +279,7 @@ func Scenarios() []Scenario {
 		}},
 
 		// ---- processes ----
-		{"proc: spawn echo streams stdout + exit 0", func(ctx context.Context, c *Client, root string) error {
+		{"proc: spawn echo streams stdout + exit 0", "proc", func(ctx context.Context, c *Client, root string) error {
 			id, err := spawnProc(ctx, c, []string{"echo", "conformance"}, map[string]any{"wantOut": true})
 			if err != nil {
 				return err
@@ -269,7 +293,7 @@ func Scenarios() []Scenario {
 			}
 			return waitExit(ctx, c, "proc.exit", id, 0, -1)
 		}},
-		{"proc: cat echoes stdin then exits on stdin_close", func(ctx context.Context, c *Client, root string) error {
+		{"proc: cat echoes stdin then exits on stdin_close", "proc", func(ctx context.Context, c *Client, root string) error {
 			id, err := spawnProc(ctx, c, []string{"cat"}, map[string]any{"wantIn": true, "wantOut": true})
 			if err != nil {
 				return err
@@ -289,14 +313,14 @@ func Scenarios() []Scenario {
 			}
 			return waitExit(ctx, c, "proc.exit", id, 0, -1)
 		}},
-		{"proc: missing binary -> exit 127", func(ctx context.Context, c *Client, root string) error {
+		{"proc: missing binary -> exit 127", "proc", func(ctx context.Context, c *Client, root string) error {
 			id, err := spawnProc(ctx, c, []string{"definitely-not-a-real-binary-zzz"}, map[string]any{"wantOut": true})
 			if err != nil {
 				return err
 			}
 			return waitExit(ctx, c, "proc.exit", id, 127, -1)
 		}},
-		{"proc: kill delivers the signal", func(ctx context.Context, c *Client, root string) error {
+		{"proc: kill delivers the signal", "proc", func(ctx context.Context, c *Client, root string) error {
 			id, err := spawnProc(ctx, c, []string{"sleep", "30"}, map[string]any{})
 			if err != nil {
 				return err
@@ -308,7 +332,7 @@ func Scenarios() []Scenario {
 		}},
 
 		// ---- sockets ----
-		{"sock: getaddrinfo resolves localhost", func(ctx context.Context, c *Client, root string) error {
+		{"sock: getaddrinfo resolves localhost", "sock", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "sock.getaddrinfo", map[string]any{"host": "localhost", "service": "80"}, nil)
 			if err != nil {
 				return err
@@ -326,7 +350,7 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"sock: outbound connect/write/data/close against a TCP echo", func(ctx context.Context, c *Client, root string) error {
+		{"sock: outbound connect/write/data/close against a TCP echo", "sock", func(ctx context.Context, c *Client, root string) error {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				return err
@@ -359,7 +383,7 @@ func Scenarios() []Scenario {
 			_, err = req(ctx, c, "sock.close", map[string]any{"id": s.ID}, nil)
 			return err
 		}},
-		{"sock: inbound listen/incoming/accept/data", func(ctx context.Context, c *Client, root string) error {
+		{"sock: inbound listen/incoming/accept/data", "sock", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "sock.listen", map[string]any{"host": "127.0.0.1", "port": 0}, nil)
 			if err != nil {
 				return err
@@ -418,7 +442,7 @@ func Scenarios() []Scenario {
 		}},
 
 		// ---- pty ----
-		{"pty: spawn cat, write, see data, kill, exit", func(ctx context.Context, c *Client, root string) error {
+		{"pty: spawn cat, write, see data, kill, exit", "pty", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "pty.spawn", map[string]any{"argv": []string{"cat"}, "cols": 80, "rows": 24}, nil)
 			if err != nil {
 				return err

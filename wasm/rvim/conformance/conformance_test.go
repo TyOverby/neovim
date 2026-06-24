@@ -16,8 +16,19 @@ func TestNodeReference(t *testing.T) {
 	runAgainst(t, NodeTarget{})
 }
 
+// TestGoServer runs the scenarios the Go server implements so far against the
+// in-process Go server. The implemented-caps set grows each phase until it
+// matches the Node oracle.
+func TestGoServer(t *testing.T) {
+	runAgainst(t, GoTarget{Implemented: []string{"base"}})
+}
+
 func runAgainst(t *testing.T, target Target) {
-	for _, sc := range Scenarios() {
+	scenarios := FilterByCaps(Scenarios(), target.Caps())
+	if len(scenarios) == 0 {
+		t.Fatalf("[%s] no scenarios match the target's caps %v", target.Name(), target.Caps())
+	}
+	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.Name, func(t *testing.T) {
 			if err := RunScenario(context.Background(), target, sc); err != nil {
