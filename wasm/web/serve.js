@@ -51,6 +51,9 @@ function resolveStaticPath(urlPath) {
   // engine worker importScripts('proxy-client.js') relative to its own URL, so
   // it must resolve at the bundle root.
   if (urlPath === '/proxy-client.js') { return path.join(WASM, 'proxy-client.js'); }
+  // The stage-5 ReconnectingProxy, importScripted by the engine worker right
+  // after proxy-client.js; same bundle-root resolution.
+  if (urlPath === '/proxy-reconnect.js') { return path.join(WASM, 'proxy-reconnect.js'); }
   // Everything else from wasm/web, but never escape it.
   const p = path.normalize(path.join(WEB, urlPath));
   return p.startsWith(WEB) ? p : null;

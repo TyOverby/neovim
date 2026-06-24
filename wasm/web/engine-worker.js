@@ -115,38 +115,38 @@ onmessage = function (e) {
 // surfaced as a stderr status (the engine keeps running; no IO depends on it in
 // Phase 1).
 function setupProxy(proxy) {
-  importScripts('proxy-client.js');   // sets self.ProxyClient
-  var ws = new WebSocket(proxy.url);
-  ws.binaryType = 'arraybuffer';
+  importScripts('proxy-client.js');     // sets self.ProxyClient
+  importScripts('proxy-reconnect.js');  // sets self.ProxyReconnect (stage 5)
 
-  // Wrap the WebSocket as the proxy-client transport. The client decodes inbound
-  // frames via transport.onFrame (set by createProxyClient).
-  var transport = {
-    send: function (data) { ws.send(data); },
-    close: function () { try { ws.close(); } catch (_e) {} },
-  };
-  var client = self.ProxyClient.createProxyClient(transport);
-  // Future phases' js-library (FS / proc_spawn) finds the proxy here.
-  self.__nvimProxy = client;
   // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
   // '/host' when a proxy is configured but no mount was given (documented).
   self.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
     ? proxy.mount : '/host';
 
-  ws.onmessage = function (ev) { if (transport.onFrame) { transport.onFrame(ev.data); } };
-  ws.onopen = function () {
-    // Handshake: carry the mount prefix + jail root to the server (Phase 1 acks).
-    client.hello({ mount: self.__nvimProxyMount, root: proxy.root }).then(function () {
-      try { postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url }); } catch (_e) {}
-    }, function (err) {
-      try { postMessage({ kind: 'stderr', text: 'proxy hello failed: ' + (err && err.message || err) }); } catch (_e) {}
-    });
-  };
-  ws.onerror = function () {
-    try { postMessage({ kind: 'stderr', text: 'proxy: WebSocket error connecting to ' + proxy.url }); } catch (_e) {}
-  };
-  ws.onclose = function () {
-    if (client.onTransportClosed) { client.onTransportClosed(); }
-    try { postMessage({ kind: 'stderr', text: 'proxy: connection closed' }); } catch (_e) {}
-  };
+  // Stage 5: a RECONNECTING facade (wasm/proxy-reconnect.js) — a stable object the
+  // js-libraries find at self.__nvimProxy. It delegates `request` to the current
+  // live client (fast-rejecting during an outage so suspended syscalls return
+  // -EIO instead of hanging), preserves the push router across reconnects, and
+  // re-dials with backoff after a drop. The engine itself never restarts — only
+  // the wire reconnects, so buffers/undo survive a blip (see stage5.md §6).
+  self.__nvimProxy = self.ProxyReconnect.createReconnectingProxy({
+    ProxyClient: self.ProxyClient,
+    dial: function () {
+      var ws = new WebSocket(proxy.url);
+      ws.binaryType = 'arraybuffer';
+      return ws;
+    },
+    helloParams: { mount: self.__nvimProxyMount, root: proxy.root },
+    onStatus: function (ev) {
+      try {
+        if (ev.kind === 'connected') {
+          postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url });
+        } else if (ev.kind === 'disconnected') {
+          postMessage({ kind: 'stderr', text: 'proxy: connection lost — in-flight IO failed; reconnecting…' });
+        } else if (ev.kind === 'reconnecting') {
+          postMessage({ kind: 'stderr', text: 'proxy: reconnecting in ' + ev.delay + 'ms' });
+        }
+      } catch (_e) {}
+    },
+  });
 }

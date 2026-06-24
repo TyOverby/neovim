@@ -70,8 +70,18 @@ go run ./cmd/conformance             # same suite, summary output
   reaches FULL parity with the Node oracle — all 16 conformance scenarios pass
   against the Go server** (clean under `-race`, stable across 10× runs). The Go
   server now implements every IO seam the stage-4 Node server does.
-- Later phases: `cancel` + reconnect (ReconnectingProxy, the fault-injection
-  phase), SSH-stdio remote (`--remote`/`--serve-stdio`), FS routing
+- **Phase 6 (reconnect done; cancel pending):** the ReconnectingProxy
+  (`../proxy-reconnect.js`) — a stable facade at `self.__nvimProxy` that delegates
+  `request` to the live client (fast-rejecting during an outage so suspended
+  syscalls return `-EIO`, never hang), `close()`s the dead client on drop (the
+  Spike B fix), preserves the push router across reconnects, and re-dials with
+  backoff. Wired into `web/engine-worker.js`; the FS handlers' path fallback makes
+  reads/writes survive the fresh-connection state after a reconnect. Verified by
+  `web/reconnect.test.js` (real facade + real server + injected mid-flight drop:
+  fail-fast, during-outage fail-fast, auto-reconnect, pushes survive). The
+  `cancel` frame (abort a long in-flight op without a disconnect) is reserved in
+  the protocol but not yet sent/honored — the remaining Phase 6 sub-item.
+- Later phases: SSH-stdio remote (`--remote`/`--serve-stdio`), FS routing
   (`--site`/`--rc`), auth/TLS.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:

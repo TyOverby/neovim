@@ -74,7 +74,7 @@ echo "==> Installing the Node engine host next to nvim.js"
 cp "${ROOT}/wasm/worker.js" "${BUILD}/bin/"
 # Stage 4: worker.js requires proxy-client.js (the IO-proxy transport client) when
 # a proxy is configured; ship it next to worker.js so it resolves under Node.
-cp "${ROOT}/wasm/proxy-client.js" "${BUILD}/bin/"
+cp "${ROOT}/wasm/proxy-client.js" "${ROOT}/wasm/proxy-reconnect.js" "${BUILD}/bin/"
 
 # -----------------------------------------------------------------------------
 # Runtime data packages (file_packager): the shared nvim.wasm is RUNTIME-AGNOSTIC
