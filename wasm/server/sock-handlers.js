@@ -7,6 +7,11 @@
 // ============================================================================
 //   sock.connect     {host, port} | {path}   -> {id}        (server connection id;
 //                                                            {path} = unix socket)
+//   sock.listen      {host, port} | {path}   -> {listenerId, port}  (real bound port)
+//   sock.accept      {connId}                -> {ok}        (resume an inbound conn)
+//   sock.listen_close {listenerId}           -> {ok}
+//   server push:
+//     sock.incoming  {listenerId, connId}    (a new inbound connection, paused)
 //   sock.write       {id} + payload<bytes>   -> {ok}        (write to the socket)
 //   sock.close       {id}                    -> {ok}        (end/destroy the socket)
 //   sock.getaddrinfo {host, service}         -> {addrs:[{family,address,port}]}
@@ -37,6 +42,27 @@ function sockTable(ctx) {
     ctx.__sockConns = { next: 1, byId: Object.create(null) };
   }
   return ctx.__sockConns;
+}
+
+// Per-connection LISTENER table (inbound net.Server's). Separate id space from
+// the socket table, but accepted connections live in the SAME socket table (so
+// sock.write/sock.close reuse the connected-socket handlers).
+function listenTable(ctx) {
+  if (!ctx.__sockListeners) {
+    ctx.__sockListeners = { next: 1, byId: Object.create(null) };
+  }
+  return ctx.__sockListeners;
+}
+
+// Attach the connected-socket event handlers to an accepted socket + resume it.
+// Mirrors the outbound connect path's wiring (data -> sock.data, end/close ->
+// sock.closed), keyed by the accepted connection's id (connId).
+function wireAcceptedSocket(ctx, rec) {
+  const id = rec.id;
+  rec.socket.on('data', function (buf) { ctx.push('sock.data', { id: id }, buf); });
+  rec.socket.on('end', function () { if (!rec.closed) { ctx.push('sock.closed', { id: id }); } });
+  rec.socket.on('error', function () { if (!rec.closed) { rec.closed = true; ctx.push('sock.closed', { id: id }); } });
+  rec.socket.on('close', function () { if (!rec.closed) { rec.closed = true; ctx.push('sock.closed', { id: id }); } });
 }
 
 // A small service-name -> port map for the common cases nvim/luv use. Most
@@ -184,11 +210,118 @@ function registerSockHandlers(registry) {
       });
     });
   });
+
+  // sock.listen {host,port}|{path}: create a real net.Server + listen. Resolves
+  // with {listenerId, port} (the REAL bound port, for serverstart('host:0')).
+  // On each incoming connection: allocate a connId, PAUSE the socket (so no bytes
+  // are lost before accept), store it in the socket table, and push sock.incoming.
+  registry.register('sock.listen', function (params, payload, ctx) {
+    const isUnix = (typeof params.path === 'string' && params.path.length > 0);
+    const lt = listenTable(ctx);
+    const st = sockTable(ctx);
+    const listenerId = lt.next++;
+
+    return new Promise(function (resolve, reject) {
+      const lrec = { id: listenerId, server: null, isUnix: isUnix, pending: Object.create(null) };
+      lt.byId[listenerId] = lrec;
+      const server = net.createServer(function (socket) {
+        // A new inbound connection. Allocate a connId in the SHARED socket table,
+        // pause it (don't attach data handlers yet), and announce it.
+        const connId = st.next++;
+        const rec = { id: connId, socket: socket, connected: true, closed: false, accepted: false };
+        st.byId[connId] = rec;
+        try { socket.pause(); } catch (e) { /* ignore */ }
+        // Track the unaccepted socket on the listener so disconnect can reap it.
+        lrec.pending[connId] = rec;
+        socket.on('error', function () {
+          if (!rec.accepted && !rec.closed) { rec.closed = true; delete lrec.pending[connId]; }
+        });
+        socket.on('close', function () {
+          if (!rec.accepted && !rec.closed) { rec.closed = true; delete lrec.pending[connId]; ctx.push('sock.closed', { id: connId }); }
+        });
+        ctx.push('sock.incoming', { listenerId: listenerId, connId: connId });
+      });
+      lrec.server = server;
+
+      server.on('error', function (err) {
+        delete lt.byId[listenerId];
+        reject(Object.assign(new Error((err && err.code) || 'listen failed'), { code: err && err.code }));
+      });
+      function onListening() {
+        const addr = server.address();
+        const port = (addr && typeof addr === 'object' && addr.port) ? addr.port : 0;
+        resolve({ result: { listenerId: listenerId, port: port } });
+      }
+      try {
+        if (isUnix) { server.listen(params.path, onListening); }
+        else {
+          const host = (typeof params.host === 'string' && params.host) ? params.host : '127.0.0.1';
+          server.listen({ host: host, port: params.port | 0 }, onListening);
+        }
+      } catch (e) {
+        delete lt.byId[listenerId];
+        reject(Object.assign(new Error((e && e.code) || String(e)), { code: e && e.code }));
+      }
+    });
+  });
+
+  // sock.accept {connId}: the wasm side accepted this pending connection. Attach
+  // the connected-socket handlers + resume it (it now streams sock.data). The
+  // connId already lives in the socket table, so sock.write/sock.close reuse the
+  // existing handlers.
+  registry.register('sock.accept', function (params, payload, ctx) {
+    const st = sockTable(ctx);
+    const rec = st.byId[params.connId];
+    if (rec && rec.socket && !rec.accepted) {
+      rec.accepted = true;
+      // Drop it from any listener's pending set.
+      if (ctx.__sockListeners) {
+        const lbyId = ctx.__sockListeners.byId;
+        for (const lid of Object.keys(lbyId)) {
+          if (lbyId[lid].pending && lbyId[lid].pending[params.connId]) { delete lbyId[lid].pending[params.connId]; }
+        }
+      }
+      wireAcceptedSocket(ctx, rec);
+      try { rec.socket.resume(); } catch (e) { /* ignore */ }
+    }
+    return { result: { ok: true } };
+  });
+
+  // sock.listen_close {listenerId}: close the net.Server + destroy any pending
+  // (unaccepted) sockets. Accepted sockets are independent (closed via sock.close).
+  registry.register('sock.listen_close', function (params, payload, ctx) {
+    if (!ctx.__sockListeners) { return { result: { ok: true } }; }
+    const lrec = ctx.__sockListeners.byId[params.listenerId];
+    if (lrec) {
+      try { lrec.server.close(); } catch (e) { /* ignore */ }
+      for (const cid of Object.keys(lrec.pending)) {
+        const r = lrec.pending[cid];
+        try { r.socket.destroy(); } catch (e) { /* ignore */ }
+        if (ctx.__sockConns) { delete ctx.__sockConns.byId[cid]; }
+      }
+      delete ctx.__sockListeners.byId[params.listenerId];
+    }
+    return { result: { ok: true } };
+  });
 }
 
-// Destroy every still-open socket of a connection (called when the ws drops, so
-// a closed tab/worker leaves no dangling sockets). Best-effort.
+// Destroy every still-open socket + close every listener of a connection (called
+// when the ws drops, so a closed tab/worker leaves no dangling sockets or
+// servers). Best-effort.
 function cleanupSockets(ctx) {
+  if (ctx.__sockListeners) {
+    const lbyId = ctx.__sockListeners.byId;
+    for (const lid of Object.keys(lbyId)) {
+      const lrec = lbyId[lid];
+      try { lrec.server.close(); } catch (e) { /* ignore */ }
+      if (lrec.pending) {
+        for (const cid of Object.keys(lrec.pending)) {
+          try { lrec.pending[cid].socket.destroy(); } catch (e) { /* ignore */ }
+        }
+      }
+    }
+    ctx.__sockListeners = null;
+  }
   if (!ctx.__sockConns) { return; }
   const byId = ctx.__sockConns.byId;
   for (const id of Object.keys(byId)) {

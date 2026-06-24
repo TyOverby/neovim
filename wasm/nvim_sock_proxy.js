@@ -69,6 +69,12 @@ addToLibrary({
     pushWired: false,
     syncPort: 0,             // result of the last SYNC getaddrinfo
     syncStatus: 0,           // status of the last SYNC getaddrinfo (0 = ok)
+    listenPort: 0,           // real bound port of the last SYNC listen
+    listenStatus: 0,         // category of the last SYNC listen (0 ok, <0 err)
+    // Inbound listeners: handlePtr -> { listenerId, pending:[connId,...] }, plus
+    // a reverse map from server listenerId -> handlePtr for routing sock.incoming.
+    listeners: {},           // handlePtr -> { listenerId, pending:[connId,...] }
+    byListenerId: {},        // server listenerId -> handlePtr
 
     dbg: function (m) {
       try {
@@ -243,6 +249,24 @@ addToLibrary({
           if (e4 && e4.fd >= 0) { SockProxy.eofFd(e4.fd); }
           return;
         }
+        if (method === 'sock.incoming') {
+          // A new inbound connection on one of our listeners. Queue the connId on
+          // the listener + enqueue a connection event into the C ring (the drain
+          // fires the listener's connection_cb, which calls uv_accept -> us).
+          var lid = params && params.listenerId;
+          var hp = (lid != null) ? SockProxy.byListenerId[lid] : null;
+          var lst = hp != null ? SockProxy.listeners[hp] : null;
+          if (lst && params && params.connId != null) {
+            lst.pending.push(params.connId);
+            try {
+              Module.ccall('nvim_sock_on_connection', null, ['number'], [hp | 0]);
+            } catch (e) {
+              SockProxy.dbg('nvim_sock_on_connection enqueue failed: ' + (e && e.message || e));
+            }
+            SockProxy.wake();
+          }
+          return;
+        }
         if (prev) { try { prev(method, params, payload); } catch (e) { /* ignore */ } }
       };
       px.__nvimPushChain = handler;
@@ -251,6 +275,15 @@ addToLibrary({
 
     UV_ECONNREFUSED: -4078,  // libuv's UV_ECONNREFUSED (errno mapped to a uv code)
     UV_EAI_FAIL: -3003,      // libuv's UV_EAI_FAIL (getaddrinfo failure)
+    // For listen failures we DON'T hardcode the uv errno (the exact value is
+    // emscripten-errno-derived and the pipe stale-socket retry in socket.c matches
+    // on UV_EACCES/UV_EADDRINUSE). Instead syncStatus carries a small CATEGORY the
+    // C wrap translates to the correct compile-time UV_* constant: 0=ok,
+    // -1=EADDRINUSE, -2=EACCES, -3=other/refused. (Negative so the existing
+    // "status != 0 => error" checks still see a failure.)
+    LISTEN_ERR_ADDRINUSE: -1,
+    LISTEN_ERR_EACCES: -2,
+    LISTEN_ERR_OTHER: -3,
 
     // Deliver a connect result into C. CRITICAL: the connect cb we ultimately
     // fire (socket.c's connect_cb / luv's) re-enters the event loop and can hit
@@ -386,6 +419,110 @@ addToLibrary({
   nvim_sock_close_fd__deps: ['$SockProxy'],
   nvim_sock_close_fd: function (fd) {
     SockProxy.freeFd(fd);
+  },
+
+  // --------------------------------------------------------------------------
+  // nvim_sock_listen_sync(handle, hostPtr, port, pathPtr, isUnix) [__async]:
+  // round-trip `sock.listen` and SUSPEND via JSPI. Register the listener under
+  // `handle` (so sock.incoming pushes route to it), then stash status + the REAL
+  // bound port for the C wrap to read back (via the shared sync slots).
+  // --------------------------------------------------------------------------
+  nvim_sock_listen_sync__deps: ['$SockProxy'],
+  nvim_sock_listen_sync__async: true,
+  nvim_sock_listen_sync: function (handle, hostPtr, port, pathPtr, isUnix) {
+    var px = SockProxy.proxy();
+    var hp = handle | 0;
+    SockProxy.wirePush();
+    SockProxy.listenStatus = 0;
+    SockProxy.listenPort = (port | 0);
+
+    if (!px) { SockProxy.listenStatus = SockProxy.LISTEN_ERR_OTHER; return Promise.resolve(); }
+
+    var req = isUnix
+      ? { path: (pathPtr ? UTF8ToString(pathPtr) : '') }
+      : { host: (hostPtr ? UTF8ToString(hostPtr) : '127.0.0.1'), port: (port | 0) };
+
+    return px.request('sock.listen', req).then(function (resp) {
+      var r = (resp && resp.result) || {};
+      if (r.listenerId == null) { SockProxy.listenStatus = SockProxy.LISTEN_ERR_OTHER; return; }
+      // Register the listener so sock.incoming routes here + accept can pop.
+      var entry = SockProxy.listeners[hp] || (SockProxy.listeners[hp] = { listenerId: null, pending: [] });
+      entry.listenerId = r.listenerId;
+      SockProxy.byListenerId[r.listenerId] = hp;
+      if (!isUnix && typeof r.port === 'number' && r.port) { SockProxy.listenPort = r.port; }
+      SockProxy.listenStatus = 0;
+    }, function (e) {
+      SockProxy.dbg('sock.listen failed: ' + (e && e.message || e));
+      // The C wrap translates this CATEGORY to the right compile-time UV_* errno.
+      var code = (e && e.message) || '';
+      SockProxy.listenStatus = (code.indexOf('EADDRINUSE') >= 0) ? SockProxy.LISTEN_ERR_ADDRINUSE
+                             : (code.indexOf('EACCES') >= 0) ? SockProxy.LISTEN_ERR_EACCES
+                             : SockProxy.LISTEN_ERR_OTHER;
+    });
+  },
+
+  // nvim_sock_take_listen_status() / nvim_sock_take_listen_port(): read back the
+  // result of the last SYNC listen. Status is a CATEGORY (0 ok, -1 addrinuse,
+  // -2 eacces, -3 other) the C wrap maps to a real UV_* errno; port is the real
+  // bound port.
+  nvim_sock_take_listen_status__deps: ['$SockProxy'],
+  nvim_sock_take_listen_status: function () { return SockProxy.listenStatus | 0; },
+  nvim_sock_take_listen_port__deps: ['$SockProxy'],
+  nvim_sock_take_listen_port: function () { return SockProxy.listenPort | 0; },
+
+  // --------------------------------------------------------------------------
+  // nvim_sock_accept_next(handle, fd): pop the next pending connId for this
+  // listener onto `fd` (make it a connected socket entry, reusing the whole
+  // sock.data/write/close routing) and tell the server to start streaming it.
+  // Returns 1 if a connection was popped, 0 if none pending.
+  // --------------------------------------------------------------------------
+  nvim_sock_accept_next__deps: ['$SockProxy'],
+  nvim_sock_accept_next: function (handle, fd) {
+    var hp = handle | 0;
+    var lst = SockProxy.listeners[hp];
+    if (!lst || !lst.pending.length) { return 0; }
+    var connId = lst.pending.shift();
+    var px = SockProxy.proxy();
+
+    // Make the popped connId an ordinary connected-socket entry: same fd table,
+    // same byId routing, same write/close wiring as an outbound connect.
+    var slot = SockProxy.fds[fd];
+    var entry = {
+      req: 0, handle: handle, fd: (fd | 0), serverId: connId,
+      settled: true, accepted: true,
+    };
+    SockProxy.byId[connId] = entry;
+    if (slot) {
+      slot.ch.onWrite = function (bytes) {
+        px.request('sock.write', { id: connId }, bytes).catch(function () {});
+      };
+      slot.ch.onClose = function () {
+        if (!entry.closeSent) {
+          entry.closeSent = true;
+          px.request('sock.close', { id: connId }).catch(function () {});
+        }
+      };
+    }
+    // Tell the server to attach data handlers + resume() this paused socket.
+    if (px) { px.request('sock.accept', { connId: connId }).catch(function () {}); }
+    return 1;
+  },
+
+  // --------------------------------------------------------------------------
+  // nvim_sock_listen_close(handle): close the server-side listener + drop our
+  // bookkeeping (called from __wrap_uv_close on a listener handle).
+  // --------------------------------------------------------------------------
+  nvim_sock_listen_close__deps: ['$SockProxy'],
+  nvim_sock_listen_close: function (handle) {
+    var hp = handle | 0;
+    var lst = SockProxy.listeners[hp];
+    if (!lst) { return; }
+    var px = SockProxy.proxy();
+    if (px && lst.listenerId != null) {
+      px.request('sock.listen_close', { listenerId: lst.listenerId }).catch(function () {});
+    }
+    if (lst.listenerId != null) { delete SockProxy.byListenerId[lst.listenerId]; }
+    delete SockProxy.listeners[hp];
   },
 
   // --------------------------------------------------------------------------

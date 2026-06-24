@@ -245,11 +245,51 @@ host:port (no getaddrinfo, and no nodelay trap since `uv_pipe_open` on a virtual
 fd only `fcntl`s). The server's connect handler `net.connect(path)`s a real unix
 socket when the request carries `{path}`, else the existing `{host,port}` TCP path.
 
-**Still not done (follow-ups):** listen/accept (inbound TCP/pipe servers —
-`sockopen`/`serverstart` over a socket), and IPv6 is carried but the synthesized
-sync `addrinfo` is IPv4-shaped (the proxy routes by host:port, so the literal IP
-is advisory — the server resolves the real address). Async vs sync getaddrinfo
-are both handled.
+**Inbound listen/accept too (the seventh seam).** `serverstart('127.0.0.1:0')` /
+`serverstart('/path.sock')` and luv `s:bind(); s:listen(backlog, cb); s:accept(c)`
+go through libuv's `uv_tcp_bind`/`uv_pipe_bind` → `uv_listen` → (`connection_cb`)
+→ `uv_accept`, with `uv_tcp_getsockname` to learn the real bound port. We don't
+bind/listen for real in wasm; instead:
+
+- `--wrap=uv_tcp_bind`/`uv_pipe_bind` STORE the addr/path in a per-handle listener
+  table (return 0; the real bind happens at listen).
+- `--wrap=uv_listen` round-trips the server (JSPI-suspends, like the sync
+  getaddrinfo) to `net.createServer().listen(...)`, records the `connection_cb` +
+  the listenerId + the **real bound port** the server reports (critical for the
+  `:0` random-bind case), `uv__handle_start`s the stream so the loop stays alive,
+  and returns 0 / a negative uv errno (EADDRINUSE/EACCES translated from a JS
+  category in C, so the value is the right compile-time `UV_*`).
+- Each incoming connection: the server `socket.pause()`s it (so no bytes are lost
+  before accept) and pushes `sock.incoming{listenerId, connId}`; JS queues the
+  connId on the listener and enqueues a connection event into the SAME `uv_check`
+  ring the connect path uses; the drain fires `connection_cb(stream, 0)` INSIDE
+  `uv_run`.
+- `--wrap=uv_accept` (synchronous) pops the next pending connId onto a fresh
+  virtual fd, `uv_tcp_open`/`uv_pipe_open`s the client handle (clearing
+  `TCP_NODELAY`/`KEEPALIVE` first — the same non-socket setsockopt trap), maps
+  fd↔connId, and tells the server `sock.accept{connId}` to attach data handlers +
+  `resume()`. From there the accepted socket reuses the WHOLE connected-socket
+  path (`sock.data`/`write`/`close`).
+- `--wrap=uv_tcp_getsockname` fills the sockaddr from the stored bound host:port
+  for our listeners, so `v:servername` / luv `getsockname` report the real port.
+- `--wrap=uv_close` is a transparent pass-through for every handle EXCEPT our
+  listeners, which it closes server-side (`sock.listen_close`) first. Listeners +
+  their accepted sockets are also reaped when the ws disconnects.
+
+**Still not done / caveats (follow-ups):**
+
+- **IPv6** is carried but the synthesized sync `addrinfo` is IPv4-shaped (the
+  proxy routes by host:port, so the literal IP is advisory — the server resolves
+  the real address). Async vs sync getaddrinfo are both handled.
+- **nvim's default startup `serverstart`** (its `$NVIM` pipe at
+  `$XDG_RUNTIME_DIR/nvim.<pid>.0`) now routes to the proxy and typically fails
+  cleanly (e.g. `EROFS`/`EACCES` on the server's FS) — exactly as it failed before
+  (ENOSYS, no server) and harmlessly, since the wasm engine is driven over its
+  embed channel (fd 0/1), not this socket. An explicit `serverstart('host:port')`
+  / `serverstart('/writable.sock')` works.
+- **Abstract-namespace** unix sockets aren't a thing the Node server connects;
+  paths are NUL-terminated. listen/accept beyond stream sockets (datagram) is out
+  of scope.
 
 ## De-risking spikes (done)
 

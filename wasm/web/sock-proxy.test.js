@@ -330,15 +330,135 @@ async function main() {
   }
 
   // ==========================================================================
-  // 6. clean teardown with a LIVE socket + a LIVE pipe: open both and DON'T
-  //    close them, then dispose. The worker terminate + ws close must not hang;
-  //    the server destroys the orphans.
+  // 6. INBOUND TCP listen/accept (luv): nvim binds 127.0.0.1:0, listens, accepts,
+  //    and echoes. The TEST process connects to the REAL bound port and asserts
+  //    bytes flow. Exercises --wrap=uv_tcp_bind/uv_listen/uv_accept/getsockname.
+  // ==========================================================================
+  await lua(nvim, [
+    '_G.__lt = { port = nil, err = nil }',
+    'local s = vim.uv.new_tcp()',
+    '_G.__lt.s = s',
+    's:bind("127.0.0.1", 0)',
+    's:listen(128, function(err)',
+    '  if err then _G.__lt.err = tostring(err); return end',
+    '  local c = vim.uv.new_tcp()',
+    '  s:accept(c)',
+    '  c:read_start(function(rerr, chunk)',
+    '    if rerr then return end',
+    '    if chunk then c:write(chunk) end',   // echo
+    '  end)',
+    'end)',
+    'local sn = s:getsockname()',
+    '_G.__lt.port = sn and sn.port',
+    'return _G.__lt.port',
+  ].join('\n'));
+
+  const ltPort = await lua(nvim, 'return _G.__lt.port');
+  const ltErr = await lua(nvim, 'return _G.__lt.err');
+  ok(typeof ltPort === 'number' && ltPort > 0,
+     'inbound TCP: luv bind(:0)+listen+getsockname reports the REAL bound port (' + ltPort + ')' + (ltErr ? (' err=' + ltErr) : ''));
+
+  if (typeof ltPort === 'number' && ltPort > 0) {
+    const got = await new Promise(function (resolve) {
+      let buf = '';
+      const c = net.connect(ltPort, '127.0.0.1', function () { c.write('inbound-tcp\n'); });
+      c.on('data', function (d) { buf += d.toString(); if (buf.indexOf('inbound-tcp') >= 0) { c.end(); resolve(buf); } });
+      c.on('error', function (e) { resolve('ERR:' + e.message); });
+      setTimeout(function () { resolve('TIMEOUT:' + buf); }, 8000);
+    });
+    ok(got.indexOf('inbound-tcp') >= 0,
+       'inbound TCP: a test client connected to nvim\'s listener and got the echo back (' + JSON.stringify(got) + ')');
+  } else {
+    ok(false, 'inbound TCP: echo skipped (listen failed)');
+  }
+
+  // ==========================================================================
+  // 7. INBOUND UNIX listen/accept (luv): nvim binds a unix path, listens, accepts,
+  //    echoes; the test process net.connect(path)s it. Exercises
+  //    --wrap=uv_pipe_bind/uv_listen/uv_accept.
+  // ==========================================================================
+  const inUnixPath = path.join(sockDir, 'nvim-listen.sock');
+  await lua(nvim, [
+    '_G.__lp = { ok = nil, err = nil }',
+    'local s = vim.uv.new_pipe(false)',
+    '_G.__lp.s = s',
+    'local bok, berr = pcall(function() s:bind(' + JSON.stringify(inUnixPath) + ') end)',
+    'if not bok then _G.__lp.err = "bind:" .. tostring(berr); return false end',
+    's:listen(128, function(err)',
+    '  if err then _G.__lp.err = tostring(err); return end',
+    '  local c = vim.uv.new_pipe(false)',
+    '  s:accept(c)',
+    '  c:read_start(function(rerr, chunk)',
+    '    if rerr then return end',
+    '    if chunk then c:write(chunk) end',   // echo
+    '  end)',
+    'end)',
+    '_G.__lp.ok = true',
+    'return true',
+  ].join('\n'));
+
+  const lpOk = await lua(nvim, 'return _G.__lp.ok');
+  const lpErr = await lua(nvim, 'return _G.__lp.err');
+  ok(lpOk === true, 'inbound UNIX: luv new_pipe():bind(path)+listen succeeded' + (lpErr ? (' err=' + lpErr) : ''));
+
+  if (lpOk === true) {
+    // Wait for the server-side unix socket file to exist before connecting.
+    await waitFor(async function () { try { return fs.existsSync(inUnixPath); } catch (e) { return false; } }, 8000);
+    const gotU = await new Promise(function (resolve) {
+      let buf = '';
+      const c = net.connect(inUnixPath, function () { c.write('inbound-unix\n'); });
+      c.on('data', function (d) { buf += d.toString(); if (buf.indexOf('inbound-unix') >= 0) { c.end(); resolve(buf); } });
+      c.on('error', function (e) { resolve('ERR:' + e.message); });
+      setTimeout(function () { resolve('TIMEOUT:' + buf); }, 8000);
+    });
+    ok(gotU.indexOf('inbound-unix') >= 0,
+       'inbound UNIX: a test client connected to nvim\'s unix listener and got the echo back (' + JSON.stringify(gotU) + ')');
+  } else {
+    ok(false, 'inbound UNIX: echo skipped (listen failed)');
+  }
+
+  // ==========================================================================
+  // 8. serverstart('127.0.0.1:0') -> v:servername reports the REAL assigned port.
+  //    Exercises socket.c's TCP listen path + uv_tcp_getsockname (random bind).
+  // ==========================================================================
+  const srvName = await lua(nvim, [
+    '_G.__ss = { name = nil, err = nil }',
+    'local ok, res = pcall(vim.fn.serverstart, "127.0.0.1:0")',
+    'if not ok then _G.__ss.err = tostring(res); return "" end',
+    '_G.__ss.name = res',
+    'return res',
+  ].join('\n'));
+  const ssErr = await lua(nvim, 'return _G.__ss.err');
+  const ssMatch = (typeof srvName === 'string') ? srvName.match(/:(\d+)$/) : null;
+  ok(ssMatch && parseInt(ssMatch[1], 10) > 0,
+     'serverstart("127.0.0.1:0"): v:servername has the REAL assigned port (' + srvName + ')' + (ssErr ? (' err=' + ssErr) : ''));
+  if (ssMatch) {
+    // Connect to the server-started listener and confirm it accepts (TCP open).
+    const ssPort = parseInt(ssMatch[1], 10);
+    const ssConnected = await new Promise(function (resolve) {
+      const c = net.connect(ssPort, '127.0.0.1', function () { c.end(); resolve(true); });
+      c.on('error', function () { resolve(false); });
+      setTimeout(function () { resolve(false); }, 5000);
+    });
+    ok(ssConnected, 'serverstart: a test client can connect to the server-started TCP listener');
+    await lua(nvim, 'pcall(vim.fn.serverstop, _G.__ss.name); return true');
+  } else {
+    ok(false, 'serverstart: connect skipped (no port)');
+  }
+
+  // ==========================================================================
+  // 9. clean teardown with a LIVE socket + a LIVE pipe + a LIVE listener: open
+  //    all and DON'T close them, then dispose. The worker terminate + ws close
+  //    must not hang; the server destroys the orphans + closes the listeners.
   // ==========================================================================
   await lua(nvim, [
     '_G.__live = vim.uv.new_tcp()',
     '_G.__live:connect("127.0.0.1", ' + echoPort + ', function(err) end)',
     '_G.__livep = vim.uv.new_pipe(false)',
     '_G.__livep:connect(' + JSON.stringify(unixPath) + ', function(err) end)',
+    '_G.__livelisten = vim.uv.new_tcp()',
+    '_G.__livelisten:bind("127.0.0.1", 0)',
+    '_G.__livelisten:listen(128, function(err) end)',
     'return true',
   ].join('\n'));
   await sleep(200);

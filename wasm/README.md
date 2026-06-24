@@ -576,14 +576,17 @@ process's privileges. The defaults reflect that:
 
 ### Known gaps
 
-- **Outbound TCP + DNS + unix-domain sockets are proxied** (the sixth seam):
-  `socket.c` (`sockconnect('tcp'|'pipe', …)`), raw `vim.uv.tcp`, and
-  `vim.uv.new_pipe():connect` run on the server via wasm-only `--wrap`s of
-  `uv_tcp_connect` / `uv_getaddrinfo` / `uv_pipe_connect` / `uv_pipe_connect2`
-  (the same virtual-fd backing the spawn-stdio proxy uses) + a `net`/`dns` handler
-  family. What is **still not proxied**: **listen/accept** (inbound TCP/pipe
-  servers); IPv6 is carried but the proxy routes by host:port so the literal
-  address is advisory. See `stage4.md` → "TCP sockets".
+- **Sockets are fully proxied — outbound *and* inbound** (the sixth + seventh
+  seams): `socket.c` (`sockconnect('tcp'|'pipe', …)`, `serverstart(…)`), raw
+  `vim.uv.tcp` / `vim.uv.new_pipe` connect AND `bind`/`listen`/`accept`, plus DNS,
+  run on the server via wasm-only `--wrap`s of `uv_tcp_connect` / `uv_getaddrinfo`
+  / `uv_pipe_connect` / `uv_pipe_connect2` / `uv_tcp_bind` / `uv_pipe_bind` /
+  `uv_listen` / `uv_accept` / `uv_tcp_getsockname` (+ a narrow `uv_close` hook for
+  listener teardown) — all over the same virtual-fd data path + a `net`/`dns`
+  handler family. Caveats: IPv6 is carried but the proxy routes by host:port so
+  the literal address is advisory; nvim's default startup `serverstart` (its
+  `$NVIM` pipe) routes to the proxy and fails cleanly on the server's FS, as it did
+  before. See `stage4.md` → "TCP sockets".
 - **`:terminal` input is byte-streamed** to the server PTY; multi-byte UTF-8 typed
   across separate input events is forwarded as-is and reassembled by the PTY, so
   pathological partial-codepoint splits rely on the terminal's own buffering.
@@ -723,12 +726,12 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `nvim_io.js` | Emscripten `--js-library`: async (JSPI) `__syscall_poll` and the postMessage-backed channel stream ops for the engine's fd 0/1. |
 | `nvim_fs_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the async filesystem-syscall overrides scoped to the proxy mount prefix (`open`/`read`/`write`/`stat`/`getdents`/`close` → server). No proxy ⇒ every path falls through to MEMFS synchronously. |
 | `nvim_proc_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the `proc_spawn` / `pty_proc_spawn` proxy backend — virtual pollable fds for child stdio, the `--wrap=uv_spawn` path for `vim.system`, and the PTY resize control. Active only when a proxy is configured. |
-| `nvim_sock_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the TCP + unix-domain socket + DNS proxy backend — a virtual bidirectional pollable fd backing each `uv_tcp_t`/`uv_pipe_t` (the `--wrap=uv_tcp_connect` / `--wrap=uv_pipe_connect` paths), the `sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo` routing, and the server pushes. Pairs with the socket wraps in `uv_stubs.c`. Active only when a proxy is configured. |
+| `nvim_sock_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the full socket + DNS proxy backend — outbound connect (a virtual bidirectional pollable fd backing each `uv_tcp_t`/`uv_pipe_t`; the `--wrap=uv_tcp_connect`/`uv_pipe_connect` paths) AND inbound listen/accept (the listener table + `sock.listen`/`accept`/`incoming` routing; the `--wrap=uv_listen`/`uv_accept` paths), plus `sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo` and the server pushes. Pairs with the socket wraps in `uv_stubs.c`. Active only when a proxy is configured. |
 | `proxy-client.js` | Stage 4 proxy **client** + frame codec, shared by the engine worker (browser/Node) and the server. Defines the framed protocol (`hello`/`req`/`res`/`push` + binary trailer) and `createProxyClient(transport)`. The worker `importScripts` it next to `nvim.js` when `create({ proxy })` is used. |
 | `server/server.js` | Stage 4 **standalone server**: serves the static bundle over HTTP, accepts the proxy WebSocket at `/proxy`, and (when it serves the page) emits `/proxy-config.js` so visiting the server == the standalone app. Binds `127.0.0.1`, `--port`/`--root`, jails FS + child-process cwd to `--root`. |
 | `server/fs-handlers.js` | Server filesystem proxy handlers (`fs.open`/`read`/`write`/`stat`/`getdents`/`close`), jailed to `--root`. |
 | `server/proc-handlers.js` | Server process-spawn handlers (`proc.spawn`/`stdin`/`kill`; stdout/stderr/exit pushes), cwd jailed to `--root`; children killed on disconnect. |
-| `server/sock-handlers.js` | Server socket + DNS handlers (`sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo`; `sock.connect_ok`/`connect_err`/`data`/`closed` pushes) via Node `net`/`dns` — TCP for `{host,port}`, a unix socket for `{path}`; sockets destroyed on disconnect. Outbound network is the seam's purpose, so the destination is not jailed (the loopback bind is the protection). |
+| `server/sock-handlers.js` | Server socket + DNS handlers via Node `net`/`dns`: outbound (`sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo`; `connect_ok`/`connect_err`/`data`/`closed` pushes — TCP or unix) AND inbound (`sock.listen{host,port}|{path}` → `net.createServer`, `sock.accept`/`listen_close`; `sock.incoming` push, accepted conns reuse the outbound socket table). Sockets + listeners destroyed on disconnect. Outbound network is the seam's purpose, so the destination is not jailed (the loopback bind is the protection). |
 | `server/pty-handlers.js` | Server PTY handlers (`pty.spawn`/`write`/`resize`/`kill`; `pty.data`/`exit` pushes) backed by `node-pty`. Loaded lazily so the server still starts for FS/proc work if `node-pty` is missing. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
 | `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless end-to-end test over a Node worker engine), and the stage-4 proxy suites `proxy.test.js` / `fs-proxy.test.js` / `proc-proxy.test.js` / `lsp-proxy.test.js` / `pty-proxy.test.js` / `sock-proxy.test.js` (the engine driven against an in-process `server/server.js`). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `server.js`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` (npm). |
@@ -854,10 +857,10 @@ run-dependency, so the engine's `main()` waits for the unpack.
   `:!`, and `jobstart()` are unavailable; the relevant libuv/`uv_spawn` calls fail
   with `ENOSYS`. **Under the standalone server** (stage 4 — see "As a standalone
   application") these are proxied to the host and work for real.
-- Outbound TCP + DNS + unix-domain sockets are proxied under the standalone
-  server (raw `vim.uv.tcp` / `vim.uv.new_pipe`, `sockconnect('tcp'|'pipe', …)`,
-  TCP-only tools) via wasm-only `--wrap`s of `uv_tcp_connect`/`uv_getaddrinfo`/
-  `uv_pipe_connect`. Inbound **listen/accept** is not proxied yet. See the stage-4
-  **Known gaps**.
+- Sockets are fully proxied under the standalone server — outbound (raw
+  `vim.uv.tcp`/`new_pipe` connect, `sockconnect('tcp'|'pipe', …)`, DNS) AND inbound
+  (`serverstart(…)`, luv `bind`/`listen`/`accept`) — via wasm-only `--wrap`s of the
+  libuv connect/bind/listen/accept/getsockname calls. See the stage-4 **Known
+  gaps** for the remaining caveats (IPv6 shape, the default startup serverstart).
 - File watching (`uv_fs_event_*`) reports `ENOSYS` (degrades gracefully).
 - System info (`uv_cpu_info`, memory, load average) returns benign constants.

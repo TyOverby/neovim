@@ -807,6 +807,18 @@ if(EMSCRIPTEN)
     # SAME virtual-fd backing + connect-result drain as the TCP wraps above.
     -Wl,--wrap=uv_pipe_connect
     -Wl,--wrap=uv_pipe_connect2
+    # Inbound listen/accept: serverstart() / luv s:bind()+s:listen()+s:accept().
+    # bind stores the addr, listen round-trips the server (net.createServer),
+    # accept pops a server-side connection onto a virtual fd, getsockname reports
+    # the real bound port, and uv_close tears down our listener. Same virtual-fd
+    # data path + connect-cb drain as the connect wraps. (uv_close is a transparent
+    # pass-through for every non-listener handle.)
+    -Wl,--wrap=uv_tcp_bind
+    -Wl,--wrap=uv_pipe_bind
+    -Wl,--wrap=uv_listen
+    -Wl,--wrap=uv_accept
+    -Wl,--wrap=uv_tcp_getsockname
+    -Wl,--wrap=uv_close
     # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
     # suspend on async JS promises via WebAssembly stack-switching.
     -sJSPI

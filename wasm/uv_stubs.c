@@ -430,6 +430,18 @@ void __real_uv_pipe_connect(uv_connect_t *req, uv_pipe_t *handle,
 int __real_uv_pipe_connect2(uv_connect_t *req, uv_pipe_t *handle,
                             const char *name, size_t namelen,
                             unsigned int flags, uv_connect_cb cb);
+// Inbound listen/accept: bind/listen/accept/getsockname. We don't bind for real;
+// the bind wraps STORE the addr, listen round-trips the server to net.createServer,
+// accept pops a server-side connection onto a virtual fd. getsockname reports the
+// REAL bound port (for serverstart('host:0') random binds + v:servername).
+int __real_uv_tcp_bind(uv_tcp_t *handle, const struct sockaddr *addr,
+                       unsigned int flags);
+int __real_uv_pipe_bind(uv_pipe_t *handle, const char *name);
+int __real_uv_listen(uv_stream_t *stream, int backlog, uv_connection_cb cb);
+int __real_uv_accept(uv_stream_t *server, uv_stream_t *client);
+int __real_uv_tcp_getsockname(const uv_tcp_t *handle, struct sockaddr *name,
+                              int *namelen);
+void __real_uv_close(uv_handle_t *handle, uv_close_cb close_cb);
 
 // JS bridge for proxied sockets / DNS (wasm/nvim_sock_proxy.js).
 //   nvim_sock_alloc_fd()      : a bidirectional virtual pollable fd (read = server
@@ -461,6 +473,23 @@ extern void nvim_sock_register_async(void *req, const char *host,
 extern void nvim_sock_resolve_sync(const char *host, const char *service);
 extern int nvim_sock_take_sync_port(void);
 extern int nvim_sock_take_sync_status(void);
+// Inbound listen/accept JS bridge (wasm/nvim_sock_proxy.js).
+//   nvim_sock_listen_sync(handle, host, port, path, isUnix) [__async]:
+//       round-trip sock.listen and SUSPEND via JSPI. Registers the listener under
+//       `handle` so sock.incoming pushes find it + the connection_cb. The result
+//       (status + real bound port) is read back via nvim_sock_take_sync_status /
+//       _port (reused from getaddrinfo).
+//   nvim_sock_accept_next(handle, fd) -> 1 if a pending connection was popped
+//       onto `fd` (server told to start streaming), 0 if none pending.
+//   nvim_sock_set_conn_cb(handle): record that `handle` now has a connection_cb
+//       (set in __wrap_uv_listen) so the drain knows where to route sock.incoming.
+//   nvim_sock_listen_close(handle): close the server-side listener + drop it.
+extern void nvim_sock_listen_sync(void *handle, const char *host, int port,
+                                  const char *path, int isUnix);
+extern int nvim_sock_take_listen_status(void);  // category: 0 ok, <0 error
+extern int nvim_sock_take_listen_port(void);
+extern int nvim_sock_accept_next(void *handle, int fd);
+extern void nvim_sock_listen_close(void *handle);
 
 // We tag our synthesized addrinfo so __wrap_uv_freeaddrinfo knows it is ours (a
 // real getaddrinfo result would NOT carry this sentinel in ai_canonname). Same
@@ -515,8 +544,8 @@ static struct addrinfo *sock_synth_addrinfo(const char *service)
 // callback runs INSIDE uv_run, i.e. inside the engine's suspendable main frame
 // -- then drains the queue and fires the cbs. Cbs may suspend freely there.
 typedef struct {
-  int kind;   // 0 = connect, 1 = addrinfo
-  void *req;
+  int kind;   // 0 = connect, 1 = addrinfo, 2 = incoming connection
+  void *req;  // connect/getaddrinfo req, OR the listener's uv_stream_t* (kind 2)
   int status;
   int port;
 } sock_pending_t;
@@ -527,6 +556,49 @@ static int g_sock_pending_head = 0;
 static int g_sock_pending_tail = 0;
 static uv_check_t g_sock_check;
 static int g_sock_check_started = 0;
+
+// --- inbound listener table (per uv_stream_t* handle) ----------------------
+// A SocketWatcher's bind stores its addr here; listen records the connection_cb
+// and the real bound port; getsockname reads the bound host/port back. Keyed by
+// the listener handle pointer (the uv_tcp_t/uv_pipe_t == the uv_stream_t).
+typedef struct {
+  void *handle;                 // the uv_stream_t* (NULL == free slot)
+  uv_connection_cb conn_cb;     // set in __wrap_uv_listen
+  int is_unix;                  // 0 = tcp, 1 = pipe
+  char host[INET6_ADDRSTRLEN];  // tcp: the bound host (from uv_tcp_bind's addr)
+  int port;                     // tcp: the REAL bound port (server-reported)
+  int family;                   // AF_INET / AF_INET6 (tcp)
+  char path[256];               // pipe: the bound path
+} sock_listener_t;
+
+# define SOCK_LISTENER_CAP 32
+static sock_listener_t g_sock_listeners[SOCK_LISTENER_CAP];
+
+static sock_listener_t *sock_listener_find(void *handle)
+{
+  for (int i = 0; i < SOCK_LISTENER_CAP; i++) {
+    if (g_sock_listeners[i].handle == handle) {
+      return &g_sock_listeners[i];
+    }
+  }
+  return NULL;
+}
+
+static sock_listener_t *sock_listener_alloc(void *handle)
+{
+  sock_listener_t *e = sock_listener_find(handle);
+  if (e != NULL) {
+    return e;  // re-bind on the same handle: reuse the slot
+  }
+  for (int i = 0; i < SOCK_LISTENER_CAP; i++) {
+    if (g_sock_listeners[i].handle == NULL) {
+      memset(&g_sock_listeners[i], 0, sizeof(g_sock_listeners[i]));
+      g_sock_listeners[i].handle = handle;
+      return &g_sock_listeners[i];
+    }
+  }
+  return NULL;  // table full
+}
 
 static void sock_drain_check(uv_check_t *check);
 
@@ -600,6 +672,21 @@ static void sock_fire_addrinfo(uv_getaddrinfo_t *req, int status, int port)
   }
 }
 
+// Fire one queued incoming-connection event: call the listener's connection_cb
+// on the main frame (it runs socket_watcher_accept -> uv_accept). Runs inside
+// uv_run, so the cb may suspend (it reads the new client).
+static void sock_fire_connection(uv_stream_t *server)
+{
+  if (server == NULL) {
+    return;
+  }
+  sock_listener_t *l = sock_listener_find(server);
+  if (l == NULL || l->conn_cb == NULL) {
+    return;
+  }
+  l->conn_cb(server, 0);
+}
+
 // The uv_check callback: drain the pending queue, firing each cb on the main
 // (suspendable) frame. A cb may itself enqueue more (rare), but each drains on
 // the next loop iteration; we snapshot the tail so this pass is bounded.
@@ -612,8 +699,10 @@ static void sock_drain_check(uv_check_t *check)
     g_sock_pending_head = (g_sock_pending_head + 1) % SOCK_PENDING_CAP;
     if (p.kind == 0) {
       sock_fire_connect((uv_connect_t *)p.req, p.status);
-    } else {
+    } else if (p.kind == 1) {
       sock_fire_addrinfo((uv_getaddrinfo_t *)p.req, p.status, p.port);
+    } else if (p.kind == 2) {
+      sock_fire_connection((uv_stream_t *)p.req);
     }
   }
 }
@@ -639,6 +728,19 @@ void nvim_sock_on_addrinfo_queued(uv_getaddrinfo_t *req, int status, int port)
     return;
   }
   sock_enqueue(1, req, status, port);
+}
+
+// EMSCRIPTEN_KEEPALIVE: the JS half calls this (per pending incoming connection)
+// when the server pushes sock.incoming for one of our listeners. `handle` is the
+// listener's uv_stream_t*. It only ENQUEUES; the drain fires the connection_cb on
+// the main frame. JS must signalWake() so the suspended poll resumes.
+EMSCRIPTEN_KEEPALIVE
+void nvim_sock_on_connection(void *handle)
+{
+  if (handle == NULL) {
+    return;
+  }
+  sock_enqueue(2, handle, 0, 0);
 }
 
 
@@ -760,6 +862,192 @@ void __wrap_uv_freeaddrinfo(struct addrinfo *ai)
     return;
   }
   __real_uv_freeaddrinfo(ai);
+}
+
+// --- inbound listen/accept wraps -------------------------------------------
+// nvim's serverstart() / luv s:bind()+s:listen()+s:accept() go through
+// uv_tcp_bind/uv_pipe_bind -> uv_listen -> (connection_cb) -> uv_accept, with
+// uv_tcp_getsockname to learn the real bound port. We don't bind/listen for real
+// in wasm; instead we STORE the addr at bind, round-trip the server at listen
+// (net.createServer), drive the connection_cb from the server's sock.incoming
+// push (via the same uv_check drain), and pop accepted sockets onto virtual fds.
+
+// __wrap_uv_tcp_bind: store the bound host:port (don't bind for real); return 0.
+int __wrap_uv_tcp_bind(uv_tcp_t *handle, const struct sockaddr *addr,
+                       unsigned int flags)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_tcp_bind(handle, addr, flags);
+  }
+  sock_listener_t *l = sock_listener_alloc(handle);
+  if (l == NULL) {
+    return UV_ENOMEM;
+  }
+  l->is_unix = 0;
+  l->host[0] = '\0';
+  l->port = 0;
+  l->family = addr ? addr->sa_family : AF_INET;
+  if (addr != NULL && addr->sa_family == AF_INET) {
+    const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+    uv_ip4_name(in, l->host, sizeof(l->host));
+    l->port = ntohs(in->sin_port);
+  } else if (addr != NULL && addr->sa_family == AF_INET6) {
+    const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)addr;
+    uv_ip6_name(in6, l->host, sizeof(l->host));
+    l->port = ntohs(in6->sin6_port);
+  }
+  if (l->host[0] == '\0') {
+    strcpy(l->host, "127.0.0.1");
+  }
+  return 0;
+}
+
+// __wrap_uv_pipe_bind: store the bound path (don't bind for real); return 0.
+int __wrap_uv_pipe_bind(uv_pipe_t *handle, const char *name)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_pipe_bind(handle, name);
+  }
+  sock_listener_t *l = sock_listener_alloc(handle);
+  if (l == NULL) {
+    return UV_ENOMEM;
+  }
+  l->is_unix = 1;
+  if (name != NULL) {
+    strncpy(l->path, name, sizeof(l->path) - 1);
+    l->path[sizeof(l->path) - 1] = '\0';
+  } else {
+    l->path[0] = '\0';
+  }
+  return 0;
+}
+
+// __wrap_uv_listen: round-trip the server (SUSPEND via JSPI) to create the real
+// listener. On success record the connection_cb + start the handle (so the loop
+// stays alive while listening) + store the real bound port. On failure return a
+// negative uv errno (nvim's socket_watcher_start handles it).
+int __wrap_uv_listen(uv_stream_t *stream, int backlog, uv_connection_cb cb)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_listen(stream, backlog, cb);
+  }
+  sock_listener_t *l = sock_listener_find(stream);
+  if (l == NULL) {
+    // listen without a recognized bind: not one of ours -> real (will fail in
+    // wasm, matching no-proxy behavior).
+    return __real_uv_listen(stream, backlog, cb);
+  }
+  sock_ensure_check(stream->loop);
+
+  // SUSPEND for the server round-trip. nvim_sock_listen_sync registers the
+  // listener under `stream` and resolves with a status CATEGORY + the REAL bound
+  // port, read back via the listen-specific slots.
+  nvim_sock_listen_sync(stream, l->host, l->port, l->path, l->is_unix);
+  int cat = nvim_sock_take_listen_status();
+  if (cat != 0) {
+    // Translate the JS category to the right compile-time UV_* errno (the exact
+    // value is emscripten-errno-derived; socket.c's pipe stale-socket retry
+    // matches on UV_EADDRINUSE / UV_EACCES, so the mapping must be exact).
+    if (cat == -1) { return UV_EADDRINUSE; }
+    if (cat == -2) { return UV_EACCES; }
+    return UV_ECONNREFUSED;  // generic "couldn't listen"
+  }
+  if (!l->is_unix) {
+    l->port = nvim_sock_take_listen_port();  // the real assigned port (random binds)
+  }
+  l->conn_cb = cb;
+  // Keep the loop alive while listening (real uv_listen marks the handle active).
+  uv__handle_start(stream);
+  return 0;
+}
+
+// __wrap_uv_accept: pop the next pending incoming connection (already known from
+// a sock.incoming push) onto a virtual fd, and uv_tcp_open/uv_pipe_open the
+// client handle onto it. Synchronous (real uv_accept is). Returns 0 / -errno.
+int __wrap_uv_accept(uv_stream_t *server, uv_stream_t *client)
+{
+  if (!nvim_proxy_active()) {
+    return __real_uv_accept(server, client);
+  }
+  sock_listener_t *l = sock_listener_find(server);
+  if (l == NULL) {
+    return __real_uv_accept(server, client);
+  }
+  int fd = nvim_sock_alloc_fd();
+  if (fd < 0) {
+    return UV_ENOMEM;
+  }
+  // Pop the next pending connId onto this fd + tell the server to stream it.
+  if (!nvim_sock_accept_next(server, fd)) {
+    nvim_sock_close_fd(fd);
+    return UV_EAGAIN;  // no pending connection (shouldn't happen post-incoming)
+  }
+  if (l->is_unix) {
+    uv_pipe_open((uv_pipe_t *)client, fd);
+  } else {
+    // Clear TCP_NODELAY/KEEPALIVE before open: socket_watcher_accept sets nodelay
+    // on the client first, and setsockopt on our non-socket fd would fail the open
+    // (the same trap as the connect path).
+    client->flags &= ~(unsigned int)(UV_HANDLE_TCP_NODELAY | UV_HANDLE_TCP_KEEPALIVE);
+    uv_tcp_open((uv_tcp_t *)client, fd);
+  }
+  return 0;
+}
+
+// __wrap_uv_tcp_getsockname: for our listeners, fill the sockaddr from the stored
+// bound host:port (so v:servername / luv getsockname report the REAL port, incl.
+// the random-port case). Else delegate.
+int __wrap_uv_tcp_getsockname(const uv_tcp_t *handle, struct sockaddr *name,
+                              int *namelen)
+{
+  if (nvim_proxy_active()) {
+    sock_listener_t *l = sock_listener_find((void *)handle);
+    if (l != NULL && !l->is_unix && name != NULL && namelen != NULL) {
+      if (l->family == AF_INET6) {
+        struct sockaddr_in6 sa6;
+        memset(&sa6, 0, sizeof(sa6));
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_port = htons((uint16_t)l->port);
+        uv_inet_pton(AF_INET6, l->host, &sa6.sin6_addr);
+        int n = (int)sizeof(sa6);
+        if (*namelen < n) { n = *namelen; }
+        memcpy(name, &sa6, (size_t)n);
+        *namelen = (int)sizeof(sa6);
+      } else {
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons((uint16_t)l->port);
+        uv_inet_pton(AF_INET, l->host, &sa.sin_addr);
+        int n = (int)sizeof(sa);
+        if (*namelen < n) { n = *namelen; }
+        memcpy(name, &sa, (size_t)n);
+        *namelen = (int)sizeof(sa);
+      }
+      return 0;
+    }
+  }
+  return __real_uv_tcp_getsockname(handle, name, namelen);
+}
+
+// __wrap_uv_close: if the handle is one of our inbound LISTENERS, tell the server
+// to close the real net.Server + drop our slot, then delegate. For EVERY other
+// handle (the overwhelming majority -- streams, timers, the spawn/connect
+// handles) this is a transparent pass-through to __real_uv_close, so behavior is
+// byte-identical except for our listeners. (Connected client sockets close via
+// their fd's ch.onClose -> sock.close, not here.)
+void __wrap_uv_close(uv_handle_t *handle, uv_close_cb close_cb)
+{
+  if (nvim_proxy_active() && handle != NULL) {
+    sock_listener_t *l = sock_listener_find(handle);
+    if (l != NULL) {
+      nvim_sock_listen_close(handle);
+      l->handle = NULL;  // free the slot
+      // The handle was uv__handle_start'd in __wrap_uv_listen; __real_uv_close
+      // does the matching uv__handle_stop + the close-cb dance.
+    }
+  }
+  __real_uv_close(handle, close_cb);
 }
 
 // --- unix-domain (pipe) connect wraps --------------------------------------
