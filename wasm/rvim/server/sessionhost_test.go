@@ -292,6 +292,69 @@ func TestSessionAdoptOnSpawnRepaint(t *testing.T) {
 	dispatchReq(sess, 10, "pty.kill", map[string]any{"id": int(r8["id"].(float64)), "signal": 9})
 }
 
+// TestSessionCrossSessionAdopt: a PTY spawned in session A, after A detaches (its
+// tab closed), is adopted by a restore-spawn in a DIFFERENT session B (a reopened
+// tab with a fresh per-tab id) by (cwd,argv) match — re-homed into B, same id,
+// repainted. This is what makes cold restore work now that each tab has its own
+// session id.
+func TestSessionCrossSessionAdopt(t *testing.T) {
+	host := NewSessionHost()
+	defer host.Close()
+	cwd := t.TempDir()
+	argv := []string{"/bin/sh", "-c", `printf 'XSESS\r\n'; sleep 30`}
+
+	sinkA := &memSink{}
+	sessA := host.attach("A", "", sinkA)
+	spawnPTYIn(t, sessA, cwd, argv)
+	idA := spawnReqID(t, sinkA)
+	waitFor(t, func() bool { return strings.Contains(string(sinkA.data(idA)), "XSESS") })
+	sessA.detach(sinkA) // tab A closed; pty orphaned but alive
+
+	sinkB := &memSink{}
+	sessB := host.attach("B", "", sinkB)
+	adoptSpawn(sessB, 7, cwd, argv)
+	r := sinkB.resResult(7)
+	if r == nil || r["adopted"] != true {
+		t.Fatalf("cross-session adopt failed: %v", r)
+	}
+	if int(r["id"].(float64)) != idA {
+		t.Fatalf("adopted id %v, want A's orphaned %d", r["id"], idA)
+	}
+	waitFor(t, func() bool { return strings.Contains(string(sinkB.data(idA)), "XSESS") })
+
+	dispatchReq(sessB, 9, "pty.kill", map[string]any{"id": idA, "signal": 9})
+}
+
+// TestSessionMultiTabIndependent: two concurrently-attached sessions (two tabs) are
+// fully isolated — neither's terminal output leaks to the other (the regression the
+// shared-session-id bug caused).
+func TestSessionMultiTabIndependent(t *testing.T) {
+	host := NewSessionHost()
+	defer host.Close()
+
+	sinkA := &memSink{}
+	sessA := host.attach("A", "", sinkA)
+	sinkB := &memSink{}
+	sessB := host.attach("B", "", sinkB)
+
+	spawnPTYIn(t, sessA, t.TempDir(), []string{"/bin/sh", "-c", `printf 'AAA\r\n'; sleep 30`})
+	idA := spawnReqID(t, sinkA)
+	spawnPTYIn(t, sessB, t.TempDir(), []string{"/bin/sh", "-c", `printf 'BBB\r\n'; sleep 30`})
+	idB := spawnReqID(t, sinkB)
+
+	waitFor(t, func() bool { return strings.Contains(string(sinkA.data(idA)), "AAA") })
+	waitFor(t, func() bool { return strings.Contains(string(sinkB.data(idB)), "BBB") })
+	if strings.Contains(string(sinkB.data(idA)), "AAA") {
+		t.Fatalf("session A's terminal output leaked to session B")
+	}
+	if strings.Contains(string(sinkA.data(idB)), "BBB") {
+		t.Fatalf("session B's terminal output leaked to session A")
+	}
+
+	dispatchReq(sessA, 8, "pty.kill", map[string]any{"id": idA, "signal": 9})
+	dispatchReq(sessB, 9, "pty.kill", map[string]any{"id": idB, "signal": 9})
+}
+
 func dispatchReq(s *ptySession, reqID int, method string, params map[string]any) {
 	s.dispatch(proxy.Header{T: proxy.TReq, ID: reqID, Method: method, Params: mustJSON(params)}, nil)
 }

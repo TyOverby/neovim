@@ -25,27 +25,7 @@ func TestBrowserDurableTerminalRehydrate(t *testing.T) {
 		t.Skip("no Chrome/Chromium on PATH")
 	}
 
-	root := t.TempDir()
-	sock := filepath.Join(t.TempDir(), "host.sock")
-	host := server.NewSessionHost()
-	go func() { _ = host.Serve(sock) }()
-	t.Cleanup(host.Close)
-	waitForFile(t, sock)
-
-	// App-server in LOCAL proxy mode, pointed at the in-process session-host daemon.
-	srv := server.New(server.Config{
-		Root:        root,
-		Port:        0,
-		Assets:      server.NewAssetServer(os.DirFS(bundle)),
-		ProxyConfig: true,
-		DaemonSock:  sock,
-	}, server.NewRegistry())
-	if err := srv.Listen(); err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve() }()
-	defer srv.Close(context.Background())
-	url := "http://" + srv.Addr() + "/"
+	root, host, url := newProxyServer(t, bundle)
 
 	ctx, cancel := newChrome(t)
 	defer cancel()
@@ -97,6 +77,83 @@ func TestBrowserDurableTerminalRehydrate(t *testing.T) {
 func readSessionID(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	return evalRPC(t, ctx, `Promise.resolve(localStorage.getItem('rvim:session:'+location.origin+location.pathname))`)
+}
+
+// newProxyServer brings up an app-server in LOCAL proxy mode wired to an in-process
+// session-host daemon, and returns its root, the daemon, and the page URL.
+func newProxyServer(t *testing.T, bundle string) (string, *server.SessionHost, string) {
+	t.Helper()
+	root := t.TempDir()
+	sock := filepath.Join(t.TempDir(), "host.sock")
+	host := server.NewSessionHost()
+	go func() { _ = host.Serve(sock) }()
+	t.Cleanup(host.Close)
+	waitForFile(t, sock)
+
+	srv := server.New(server.Config{
+		Root:        root,
+		Port:        0,
+		Assets:      server.NewAssetServer(os.DirFS(bundle)),
+		ProxyConfig: true,
+		DaemonSock:  sock,
+	}, server.NewRegistry())
+	if err := srv.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+	return root, host, "http://" + srv.Addr() + "/"
+}
+
+// TestBrowserMultiTabTerminals reproduces the reported bug: two tabs open to the
+// SAME rvim host must each run an independent :terminal — neither tab's shell
+// output may leak into the other. (A shared session id made them clobber the
+// daemon's single client; each tab now mints its own session id.)
+func TestBrowserMultiTabTerminals(t *testing.T) {
+	bundle := bundleDir(t)
+	if _, err := chromeFound(); err != nil {
+		t.Skip("no Chrome/Chromium on PATH")
+	}
+	_, _, url := newProxyServer(t, bundle)
+
+	// Two tabs in the SAME browser (shared origin/localStorage) → distinct sessions.
+	ctxA, cancelA := newChrome(t)
+	defer cancelA()
+	ctxB, cancelB := chromedp.NewContext(ctxA)
+	defer cancelB()
+
+	connectPage(t, ctxA, url)
+	connectPage(t, ctxB, url)
+
+	openTermWithMarker(t, ctxA, "MARK-AAA")
+	openTermWithMarker(t, ctxB, "MARK-BBB")
+
+	// Each tab shows ITS OWN marker...
+	waitGridContains(t, ctxA, "MARK-AAA", "tab A terminal did not work")
+	waitGridContains(t, ctxB, "MARK-BBB", "tab B terminal did not work (cross-tab interference?)")
+	// ...and NOT the other tab's (no leakage / no clobbering).
+	time.Sleep(500 * time.Millisecond)
+	assertGridLacks(t, ctxA, "MARK-BBB")
+	assertGridLacks(t, ctxB, "MARK-AAA")
+}
+
+func openTermWithMarker(t *testing.T, ctx context.Context, marker string) {
+	t.Helper()
+	evalRPC(t, ctx, `window.nvim.request('nvim_command', ['terminal'])`)
+	waitTrue(t, ctx, `(window.nvim.request('nvim_eval',['exists("b:terminal_job_id")']).then(r=>r===1))`)
+	evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['chansend(b:terminal_job_id, "echo `+marker+`\n")'])`)
+}
+
+func assertGridLacks(t *testing.T, ctx context.Context, substr string) {
+	t.Helper()
+	var has bool
+	expr := `(window.nvim.gridText && window.nvim.gridText().indexOf(` + jsString(substr) + `) >= 0)`
+	if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &has)); err != nil {
+		t.Fatalf("grid check: %v", err)
+	}
+	if has {
+		t.Fatalf("grid unexpectedly contains %q (cross-tab terminal leakage)", substr)
+	}
 }
 
 // connectPage navigates (if needed) and waits for the engine to attach and the

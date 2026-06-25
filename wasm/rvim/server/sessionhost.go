@@ -278,6 +278,72 @@ func (s *ptySession) dispatch(h proxy.Header, payload []byte) {
 	}
 }
 
+// adoptForRestore reattaches a session-restore spawn to a still-running PTY whose
+// (cwd, argv) match — preferring the requesting session, else any ORPHANED
+// (detached) session, re-homing the PTY into the requester. Returns true if it
+// adopted (and answered reqID); false if nothing matched (caller spawns fresh).
+// Holds host.mu, so it serializes with attach/detach/GC — no client can attach or
+// a session disappear mid-adopt.
+func (h *SessionHost) adoptForRestore(req *ptySession, reqID int, cwd string, argv []string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	req.mu.Lock()
+	pt := req.matchAdoptable(cwd, argv)
+	req.mu.Unlock()
+	owner := req
+	if pt == nil {
+		for _, s := range h.sessions {
+			if s == req {
+				continue
+			}
+			s.mu.Lock()
+			if s.client == nil { // only steal from orphaned sessions, never a live tab
+				pt = s.matchAdoptable(cwd, argv)
+			}
+			s.mu.Unlock()
+			if pt != nil {
+				owner = s
+				break
+			}
+		}
+	}
+	if pt == nil {
+		return false
+	}
+	return h.rehomeAndAdopt(pt, owner, req, reqID)
+}
+
+// rehomeAndAdopt moves pt from `owner` into `req` (if different), answers the
+// restore spawn, and repaints from the full ring. Re-validates liveness under the
+// lock (the PTY may have exited between the search and here). Only one re-home runs
+// at a time (host.mu) and PTY delivery takes a single session lock, so there is no
+// lock-order cycle.
+func (h *SessionHost) rehomeAndAdopt(pt *daemonPty, owner, req *ptySession, reqID int) bool {
+	owner.mu.Lock()
+	if owner != req {
+		req.mu.Lock()
+		defer req.mu.Unlock()
+	}
+	defer owner.mu.Unlock()
+
+	if pt.exited.Load() {
+		return false // raced an exit; caller spawns fresh
+	}
+	if owner != req {
+		delete(owner.ptys, pt.id)
+		req.ptys[pt.id] = pt
+		pt.sess = req // delivery/reap re-check picks up the new session
+	}
+	pt.claimed = true
+	req.respondLocked(reqID, map[string]any{"id": pt.id, "pid": pt.pid, "adopted": true})
+	if req.client != nil {
+		pt.replayFrom(req.client, pt.ringBase())
+		pt.delivered = pt.produced
+	}
+	return true
+}
+
 // matchAdoptable finds a live, unclaimed PTY in the session that was spawned with
 // the same cwd and argv — the candidate a session-restore spawn should reattach to
 // rather than spawning anew. Caller holds sess.mu.
@@ -327,24 +393,14 @@ func (s *ptySession) spawn(h proxy.Header, _ []byte) {
 		return
 	}
 
-	// Session restore: reattach to a still-running PTY matching (cwd, argv) instead
-	// of spawning. Respond first (client creates its buffer), then repaint from the
-	// full ring and resume live delivery. The PTY's run goroutine never stopped, so
-	// future output flows to the now-bound client automatically.
+	// Session restore: reattach to a still-running PTY matching (cwd, argv) — in this
+	// session or an orphaned one (a closed tab) — instead of spawning. Repaints from
+	// the full ring and resumes live delivery; the PTY's run goroutine never stopped.
 	if p.Adopt {
-		s.mu.Lock()
-		if pt := s.matchAdoptable(p.Cwd, p.Argv); pt != nil {
-			pt.claimed = true
-			s.respondLocked(h.ID, map[string]any{"id": pt.id, "pid": pt.pid, "adopted": true})
-			if s.client != nil {
-				pt.replayFrom(s.client, pt.ringBase())
-				pt.delivered = pt.produced
-			}
-			s.mu.Unlock()
+		if s.host.adoptForRestore(s, h.ID, p.Cwd, p.Argv) {
 			return
 		}
-		s.mu.Unlock()
-		// No match (TTL-reaped / never existed / exited): fall through to spawn.
+		// No match anywhere (TTL-reaped / exited / never existed): spawn fresh.
 	}
 
 	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
@@ -405,17 +461,28 @@ func (pt *daemonPty) run() {
 // delivered offset advances. When detached it just accrues in the ring/produced,
 // so a warm reattach replays exactly [delivered, produced) — no loss, no dup.
 func (pt *daemonPty) deliver(b []byte) {
-	s := pt.sess
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pt.ring = append(pt.ring, b...)
-	if len(pt.ring) > s.host.ringCap {
-		pt.ring = pt.ring[len(pt.ring)-s.host.ringCap:]
-	}
-	pt.produced += int64(len(b))
-	if s.client != nil {
-		_ = s.client.send(dataHeader(pt.id), b)
-		pt.delivered = pt.produced
+	// A PTY can be re-homed to another session (cold-restore adopt), so its ring is
+	// always touched under its CURRENT session's lock: capture pt.sess, lock, and
+	// retry if it changed under us (the re-home updates pt.sess while holding the
+	// old lock, so a stale holder sees the change and retries).
+	for {
+		s := pt.sess
+		s.mu.Lock()
+		if pt.sess != s {
+			s.mu.Unlock()
+			continue
+		}
+		pt.ring = append(pt.ring, b...)
+		if len(pt.ring) > s.host.ringCap {
+			pt.ring = pt.ring[len(pt.ring)-s.host.ringCap:]
+		}
+		pt.produced += int64(len(b))
+		if s.client != nil {
+			_ = s.client.send(dataHeader(pt.id), b)
+			pt.delivered = pt.produced
+		}
+		s.mu.Unlock()
+		return
 	}
 }
 
@@ -429,18 +496,25 @@ func (pt *daemonPty) reap() {
 		return
 	}
 	code, sig := exitStatus(pt.cmd.ProcessState)
-	s := pt.sess
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.client != nil {
-		// Flush any undelivered tail, then the exit, then drop the PTY.
-		pt.replayFrom(s.client, pt.delivered)
-		pt.delivered = pt.produced
-		_ = s.client.send(exitHeader(pt.id, code, sig), nil)
-		delete(s.ptys, pt.id)
+	for {
+		s := pt.sess
+		s.mu.Lock()
+		if pt.sess != s { // re-homed under us; retry with the current session
+			s.mu.Unlock()
+			continue
+		}
+		if s.client != nil {
+			// Flush any undelivered tail, then the exit, then drop the PTY.
+			pt.replayFrom(s.client, pt.delivered)
+			pt.delivered = pt.produced
+			_ = s.client.send(exitHeader(pt.id, code, sig), nil)
+			delete(s.ptys, pt.id)
+		} else {
+			pt.exitPending = &ptyExit{code: code, signal: sig}
+		}
+		s.mu.Unlock()
 		return
 	}
-	pt.exitPending = &ptyExit{code: code, signal: sig}
 }
 
 // killAll SIGKILLs every PTY in the session (session reap / daemon shutdown).

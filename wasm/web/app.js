@@ -23,25 +23,13 @@
   var proxy = (typeof window.__NVIM_PROXY === 'object' && window.__NVIM_PROXY) || null;
   var mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
 
-  // Durable-PTY session id: a STABLE id, persisted in localStorage keyed by this
-  // project's URL, so reopening the page reconnects to the SAME session-host
-  // session — whose :terminal shells are still alive — and can rehydrate them (vs.
-  // the worker's ephemeral per-load id, which only survives reconnects). The main
-  // thread mints it because a Web Worker can't reach localStorage. Falls back to
-  // the worker's ephemeral id if localStorage is blocked (private mode).
-  if (proxy && !proxy.session) {
-    try {
-      var sKey = 'rvim:session:' + window.location.origin + window.location.pathname;
-      var sid = window.localStorage.getItem(sKey);
-      if (!sid) {
-        sid = (window.crypto && window.crypto.randomUUID)
-          ? window.crypto.randomUUID()
-          : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
-        window.localStorage.setItem(sKey, sid);
-      }
-      proxy.session = sid;
-    } catch (_e) { /* localStorage blocked: worker mints an ephemeral id */ }
-  }
+  // Durable-PTY session id: left to the engine worker, which mints a UNIQUE id per
+  // tab/load (so two tabs to the same host get independent terminal sessions — a
+  // shared/stable id would make them clobber each other's single daemon client).
+  // Cold restore (reopen + :source) does NOT need a stable id: the session-host
+  // daemon adopts an orphaned tab's still-running shells by matching (cwd, argv),
+  // re-homing them into the reopened tab's fresh session. (A persisted per-project
+  // id was tried for cold restore but broke concurrent tabs.)
 
   // 1. Core: boot `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
   //    clipboard: 'browser' wires the +/* registers (and, via unnamedplus, plain
