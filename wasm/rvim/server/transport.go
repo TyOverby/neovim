@@ -76,6 +76,18 @@ func (t *stdioFrameRW) closeNow() {}
 
 // ---- the SSH-stdio relay (--remote) -----------------------------------------
 
+// remoteArgv builds the per-connection relay argv: the base RemoteCommand plus
+// this browser tab's durable-PTY session id (so the remote io-proxy attaches to
+// the remote session-host daemon). It copies rather than mutating the shared base
+// slice, and omits --session when empty (non-durable PTYs / no session sent).
+func remoteArgv(base []string, session string) []string {
+	argv := append([]string(nil), base...)
+	if session != "" {
+		argv = append(argv, "--session", session)
+	}
+	return argv
+}
+
 // pumpFrames copies whole frames src -> dst until either side errors. Each
 // direction has a dedicated writer, so no per-transport write lock is needed.
 func pumpFrames(src, dst frameRW) {
@@ -98,8 +110,9 @@ func pumpFrames(src, dst frameRW) {
 // disconnects (stdin EOF -> remote exits -> remote cleanup). A remote death (ssh
 // drop) closes the WebSocket, and the client's ReconnectingProxy dials again —
 // spawning a fresh remote.
-func (s *Server) relayToRemote(ws *websocket.Conn) {
-	cmd := exec.Command(s.cfg.RemoteCommand[0], s.cfg.RemoteCommand[1:]...)
+func (s *Server) relayToRemote(ws *websocket.Conn, session string) {
+	argv := remoteArgv(s.cfg.RemoteCommand, session)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		_ = ws.Close(websocket.StatusInternalError, "remote stdin")

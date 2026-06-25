@@ -355,10 +355,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(1 << 24) // large file reads / pty bursts exceed the 32KiB default
+	// Durable-PTY session id: the browser mints a stable per-tab id and carries it
+	// in ?session=. It routes this connection's :terminal shells to the session-host
+	// daemon (on the IO host) so they survive a transport drop. Empty -> non-durable
+	// PTYs (the base behaviour), e.g. a client that doesn't send one.
+	session := r.URL.Query().Get("session")
+
 	// RELAY mode (--remote): forward this connection to the remote io-proxy over
-	// SSH stdio instead of handling IO locally.
+	// SSH stdio instead of handling IO locally — passing the session id through so
+	// the REMOTE io-proxy attaches to the remote daemon.
 	if len(s.cfg.RemoteCommand) > 0 {
-		s.relayToRemote(ws)
+		s.relayToRemote(ws, session)
 		return
 	}
 	cn := &conn{rw: &wsFrameRW{ws: ws}}
@@ -370,12 +377,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		delete(s.conns, cn)
 		s.connMu.Unlock()
 	}()
-	s.serveConn(cn)
+	s.serveConn(cn, session)
 }
 
 // serveConn runs the dispatch loop over a transport-agnostic conn. Used for the
-// browser WebSocket and for the SSH-stdio remote (ServeStdio).
-func (s *Server) serveConn(cn *conn) {
+// browser WebSocket and for the SSH-stdio remote (ServeStdio). session, when set,
+// delegates this connection's pty.* to the session-host daemon (durable PTYs).
+func (s *Server) serveConn(cn *conn, session string) {
 	ctx := &Ctx{
 		Config: ConnConfig{Root: s.cfg.Root, Mount: s.cfg.Mount},
 		conn:   cn,
@@ -384,16 +392,20 @@ func (s *Server) serveConn(cn *conn) {
 	defer ctx.runCleanups()
 	defer cn.rw.close()
 
-	// Durable PTYs: when a session key is configured, attach to the session-host
-	// daemon and route pty.* through it. A setup failure falls back to local PTY
-	// handling (non-durable) so terminals still work. The daemon link is closed
-	// when this connection ends — the daemon KEEPS the session's shells running.
-	if s.cfg.Session != "" {
+	// Durable PTYs: when a session key is present, attach to the session-host daemon
+	// and route pty.* through it. A setup failure falls back to local PTY handling
+	// (non-durable) so terminals still work. The daemon link is closed when this
+	// connection ends — the daemon KEEPS the session's shells running.
+	if session != "" {
 		sock := s.cfg.DaemonSock
 		if sock == "" {
 			sock = DefaultDaemonSock()
 		}
-		if d, err := connectDaemon(sock, s.cfg.SelfExe, s.cfg.Session, s.cfg.Root); err != nil {
+		selfExe := s.cfg.SelfExe
+		if selfExe == "" {
+			selfExe, _ = os.Executable()
+		}
+		if d, err := connectDaemon(sock, selfExe, session, s.cfg.Root); err != nil {
 			log.Printf("rvim: session-host attach failed (%v); PTYs are non-durable this session", err)
 		} else {
 			ctx.daemon = d
@@ -413,10 +425,11 @@ func (s *Server) serveConn(cn *conn) {
 
 // ServeStdio runs the io-proxy over a stdin/stdout pipe (the `--serve-stdio`
 // remote endpoint of the three-tier --remote architecture). One connection;
-// returns when stdin closes (the SSH pipe dropped).
+// returns when stdin closes (the SSH pipe dropped). The session key comes from the
+// --session flag (relayed by the app-server from the browser's ?session=).
 func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	cn := &conn{rw: &stdioFrameRW{r: bufio.NewReaderSize(in, 64*1024), w: out}}
-	s.serveConn(cn)
+	s.serveConn(cn, s.cfg.Session)
 	return nil
 }
 

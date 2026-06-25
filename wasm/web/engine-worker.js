@@ -123,6 +123,17 @@ function setupProxy(proxy) {
   self.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
     ? proxy.mount : '/host';
 
+  // Stage 5 (durable PTYs): a stable per-tab session id, carried in the /proxy URL
+  // (?session=) so the server can route this tab's :terminal shells to the
+  // session-host daemon and reattach them after a transport drop. Minted once and
+  // reused across reconnects (the engine worker outlives a blip), so the SAME id
+  // returns on the reconnect and the daemon recognises the session. It is NOT
+  // persisted across a full tab reload (a fresh worker = a fresh engine with no
+  // terminal buffers — the cold case is served by running shells under tmux).
+  self.__nvimSession = (self.crypto && self.crypto.randomUUID)
+    ? self.crypto.randomUUID()
+    : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+
   // Stage 5: a RECONNECTING facade (wasm/proxy-reconnect.js) — a stable object the
   // js-libraries find at self.__nvimProxy. It delegates `request` to the current
   // live client (fast-rejecting during an outage so suspended syscalls return
@@ -132,7 +143,9 @@ function setupProxy(proxy) {
   self.__nvimProxy = self.ProxyReconnect.createReconnectingProxy({
     ProxyClient: self.ProxyClient,
     dial: function () {
-      var ws = new WebSocket(proxy.url);
+      var url = proxy.url + (proxy.url.indexOf('?') >= 0 ? '&' : '?') +
+        'session=' + encodeURIComponent(self.__nvimSession);
+      var ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
       return ws;
     },
