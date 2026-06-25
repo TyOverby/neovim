@@ -30,7 +30,8 @@ func main() {
 		mount      = flag.String("mount", "/host", "in-editor mount prefix mapped to --root")
 		assetsDir  = flag.String("assets-dir", "", "serve the browser bundle from this dir (the build-site.sh output)")
 		proxy      = flag.Bool("proxy", false, "generate /proxy-config.js so visiting the page is the standalone app")
-		remote     = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> rvim --serve-stdio` (assumes rvim on the remote PATH)")
+		remote     = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> <remote-rvim> --serve-stdio`")
+		remoteRvim = flag.String("remote-rvim", "rvim", "path to rvim ON the remote host (like rsync's --rsync-path). `ssh host cmd` does NOT source ~/.bashrc, so the remote PATH usually excludes ~/bin — pass an absolute or ~/ path (the remote shell expands ~) if rvim isn't in the default PATH")
 		serveStdio = flag.Bool("serve-stdio", false, "(internal) run the io-proxy over stdin/stdout — the remote end of --remote")
 		noOpen     = flag.Bool("no-open", false, "do not auto-open the browser (auto-open not yet wired)")
 	)
@@ -79,7 +80,7 @@ func main() {
 		// enforces the jail with its own --root.
 		cfg.RemoteCommand = []string{
 			"ssh", "-T", "-o", "BatchMode=yes", *remote,
-			"rvim", "--serve-stdio", "--root", jailRoot, "--mount", *mount,
+			*remoteRvim, "--serve-stdio", "--root", jailRoot, "--mount", *mount,
 		}
 	}
 	// Static assets: an explicit --assets-dir (dev) wins; otherwise fall back to a
@@ -103,7 +104,7 @@ func main() {
 	fmt.Printf("rvim standalone-app server on %s\n", url)
 	fmt.Printf("  proxy WebSocket : %sproxy\n", "ws://"+srv.Addr()+"/")
 	if *remote != "" {
-		fmt.Printf("  IO host        : %s  (ssh -T %s rvim --serve-stdio --root %s)\n", *remote, *remote, jailRoot)
+		fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio --root %s)\n", *remote, *remote, *remoteRvim, jailRoot)
 		fmt.Printf("  remote root    : %s  (jail enforced ON the remote; mount %s)\n", jailRoot, *mount)
 	} else {
 		fmt.Printf("  filesystem root : %s  (jail root; mount %s)\n", jailRoot, *mount)
