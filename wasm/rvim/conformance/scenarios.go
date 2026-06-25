@@ -310,6 +310,147 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
+		{"fs: by-path read/write (no handle) + jail", "fs", func(ctx context.Context, c *Client, root string) error {
+			// Write a NEW file by path (no handle): exercises the stateless branch
+			// (open O_RDWR, fall back to create) + its jail check.
+			if _, err := req(ctx, c, "fs.write", map[string]any{"path": "/byp.txt", "pos": 0}, []byte("by-path")); err != nil {
+				return err
+			}
+			if onDisk, _ := os.ReadFile(filepath.Join(root, "byp.txt")); string(onDisk) != "by-path" {
+				return fmt.Errorf("by-path write = %q on disk", string(onDisk))
+			}
+			// Read it back by path (no handle).
+			r, err := req(ctx, c, "fs.read", map[string]any{"path": "/byp.txt", "pos": 0, "len": 64}, nil)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(r.Payload, []byte("by-path")) {
+				return fmt.Errorf("by-path read = %q", r.Payload)
+			}
+			// The by-path branch must also be jailed.
+			esc, err := c.Request(ctx, "fs.write", map[string]any{"path": "/../../escape-by-path", "pos": 0}, []byte("x"))
+			if err != nil {
+				return err
+			}
+			if esc.OK {
+				return fmt.Errorf("SECURITY: by-path write escaped the jail")
+			}
+			return nil
+		}},
+		{"fs: partial read / EOF / past-end", "fs", func(ctx context.Context, c *Client, root string) error {
+			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/ten.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
+			if err != nil {
+				return err
+			}
+			var op struct {
+				Handle int `json:"handle"`
+			}
+			_ = r.Into(&op)
+			if _, err := req(ctx, c, "fs.write", map[string]any{"handle": op.Handle, "pos": 0}, []byte("0123456789")); err != nil {
+				return err
+			}
+			_, _ = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
+			r, _ = req(ctx, c, "fs.open", map[string]any{"path": "/ten.txt", "flags": oRDONLY}, nil)
+			_ = r.Into(&op)
+
+			type rd struct {
+				N   int  `json:"n"`
+				EOF bool `json:"eof"`
+			}
+			check := func(pos, length int, wantN int, wantEOF bool, wantPayload string) error {
+				r, err := req(ctx, c, "fs.read", map[string]any{"handle": op.Handle, "pos": pos, "len": length}, nil)
+				if err != nil {
+					return err
+				}
+				var got rd
+				_ = r.Into(&got)
+				if got.N != wantN || got.EOF != wantEOF || string(r.Payload) != wantPayload {
+					return fmt.Errorf("read(pos=%d,len=%d) = {n:%d eof:%v %q}, want {n:%d eof:%v %q}",
+						pos, length, got.N, got.EOF, r.Payload, wantN, wantEOF, wantPayload)
+				}
+				return nil
+			}
+			if err := check(0, 4, 4, false, "0123"); err != nil {
+				return err
+			}
+			if err := check(8, 4, 2, true, "89"); err != nil {
+				return err
+			}
+			if err := check(100, 4, 0, true, ""); err != nil {
+				return err
+			}
+			_, _ = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
+			return nil
+		}},
+		{"fs: lstat/stat/readdir resolve symlinks + mode bits", "fs", func(ctx context.Context, c *Client, root string) error {
+			// Build fixtures on disk directly (we own `root`).
+			if err := os.Mkdir(filepath.Join(root, "d"), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644); err != nil {
+				return err
+			}
+			_ = os.Symlink(filepath.Join(root, "f.txt"), filepath.Join(root, "link-f"))
+			_ = os.Symlink(filepath.Join(root, "d"), filepath.Join(root, "link-d"))
+
+			// lstat a symlink. NOTE: the security jail realpaths every path
+			// (resolveJailed) to defend against symlink escapes, so a leaf symlink
+			// to an IN-JAIL target is resolved before lstat — lstat therefore reports
+			// the TARGET (isLink:false), not the link. Known consequence of the
+			// realpath-based jail (inherited from the Node prototype); pinned here.
+			r, err := req(ctx, c, "fs.lstat", map[string]any{"path": "/link-f"}, nil)
+			if err != nil {
+				return err
+			}
+			var ls struct {
+				Exists bool `json:"exists"`
+				IsDir  bool `json:"isDir"`
+			}
+			_ = r.Into(&ls)
+			if !ls.Exists || ls.IsDir {
+				return fmt.Errorf("lstat link-f = %+v, want exists (resolved to the file target)", ls)
+			}
+			// stat follows the symlink: not a link.
+			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": "/link-f"}, nil)
+			var st struct {
+				Exists bool   `json:"exists"`
+				IsLink bool   `json:"isLink"`
+				IsDir  bool   `json:"isDir"`
+				Mode   uint32 `json:"mode"`
+			}
+			_ = r.Into(&st)
+			if !st.Exists || st.IsLink || st.IsDir {
+				return fmt.Errorf("stat link-f = %+v, want followed (not a link)", st)
+			}
+			// mode carries the type bits: S_IFREG (0x8000) for the regular file.
+			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": "/f.txt"}, nil)
+			_ = r.Into(&st)
+			if st.Mode&0x8000 == 0 {
+				return fmt.Errorf("f.txt mode 0%o missing S_IFREG", st.Mode)
+			}
+			// readdir resolves a symlink-to-dir to isDir:true.
+			r, _ = req(ctx, c, "fs.readdir", map[string]any{"path": "/"}, nil)
+			var dir struct {
+				Entries []struct {
+					Name  string `json:"name"`
+					IsDir bool   `json:"isDir"`
+				} `json:"entries"`
+			}
+			_ = r.Into(&dir)
+			foundLinkD := false
+			for _, e := range dir.Entries {
+				if e.Name == "link-d" {
+					foundLinkD = true
+					if !e.IsDir {
+						return fmt.Errorf("readdir link-d isDir=false, want true (symlink-to-dir)")
+					}
+				}
+			}
+			if !foundLinkD {
+				return fmt.Errorf("readdir did not list link-d")
+			}
+			return nil
+		}},
 		{"fs: jail rejects ../ escape", "fs", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Request(ctx, "fs.open", map[string]any{"path": "/../../../../etc/passwd", "flags": oRDONLY}, nil)
 			if err != nil {
