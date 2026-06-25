@@ -285,9 +285,10 @@ rm -rf "${STAGE_ROOT}"
 # tree by wasm/web/serve.js (which also points /nvim.js,/nvim.wasm and the
 # nvim-<variant>.data(.js) packages at this build dir), so nothing is copied. It
 # only needs the msgpack dependency.
-# Deps: @msgpack/msgpack (the UI client) and ws (the Stage 4 IO-proxy server, used
-# by wasm/server/server.js). Both are declared in wasm/web/package.json; install
-# if either is missing.
+# Deps: @msgpack/msgpack (the UI client) and ws (used by the Node reconnect-facade
+# test, wasm/web/reconnect.test.js). Both are declared in wasm/web/package.json;
+# install if either is missing. (The stage-5 IO-proxy server is the Go `rvim`
+# binary in wasm/rvim/ — no npm server deps.)
 if command -v npm >/dev/null 2>&1; then
   if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ] || [ ! -d "${ROOT}/wasm/web/node_modules/ws" ]; then
     echo "==> Installing wasm/web npm deps (@msgpack/msgpack, ws)"

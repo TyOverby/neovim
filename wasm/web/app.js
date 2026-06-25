@@ -14,7 +14,7 @@
   setStatus('starting engine worker…');
 
   // Stage 4 (standalone app, opt-in): when this page is served BY
-  // wasm/server/server.js, /proxy-config.js has set window.__NVIM_PROXY =
+  // `rvim --proxy`, /proxy-config.js has set window.__NVIM_PROXY =
   // { url, mount, root }. We pass it to create({ proxy }) so the engine's real IO
   // (filesystem under the mount prefix, :!, jobstart, :terminal, LSP) runs on the
   // server, jailed to its --root. When it's ABSENT (the plain serve.js static

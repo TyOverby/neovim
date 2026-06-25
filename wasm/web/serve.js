@@ -75,15 +75,14 @@ function serveStaticFile(file, urlPath, res) {
   });
 }
 
-// The request handler used by both servers: resolve the URL, serve the file.
+// The request handler for the plain no-proxy dev server.
 function handleStaticRequest(req, res) {
   const urlPath = decodeURIComponent(req.url.split('?')[0]);
-  // The page unconditionally loads /proxy-config.js (the stage-4 standalone-app
-  // hook): server.js GENERATES it with the real proxy config so visiting the
-  // server is the standalone app. The plain static dev server has NO proxy, so
-  // serve a no-op 200 (not a 404) — the page then runs as the ordinary no-proxy
-  // demo (window.__NVIM_PROXY stays undefined). server.js intercepts this path
-  // before delegating here, so this branch only applies to `node serve.js`.
+  // The page unconditionally loads /proxy-config.js (the standalone-app hook):
+  // the `rvim --proxy` Go server GENERATES it with the real proxy config so
+  // visiting that server is the standalone app. This plain static dev server has
+  // NO proxy, so serve a no-op 200 (not a 404) — the page then runs as the
+  // ordinary no-proxy demo (window.__NVIM_PROXY stays undefined).
   if (urlPath === '/proxy-config.js') {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', 'text/javascript; charset=utf-8');

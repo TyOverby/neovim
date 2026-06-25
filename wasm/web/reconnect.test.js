@@ -16,9 +16,44 @@
 
 const path = require('path');
 const WebSocket = require(path.join(__dirname, 'node_modules', 'ws'));
-const { createServer } = require('../server/server.js');
+const { WebSocketServer } = require(path.join(__dirname, 'node_modules', 'ws'));
 const { createReconnectingProxy } = require('../proxy-reconnect.js');
 const ProxyClient = require('../proxy-client.js');
+const { encodeFrame, decodeFrame } = ProxyClient;
+
+// A MINIMAL mock proxy server: just enough of the frame protocol to test the
+// ReconnectingProxy facade (hello ack, ping, proc.spawn + a proc.exit push). The
+// real IO proxy is the Go server (rvim) + its conformance/e2e suites; this test
+// is about the transport facade (connect / drop / reconnect / request / push),
+// which needs no real IO. Returns { url, close }.
+function startMockServer() {
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  wss.on('connection', function (ws) {
+    ws.on('message', function (data) {
+      let frame;
+      try { frame = decodeFrame(data); } catch (_e) { return; }
+      const h = frame.header;
+      if (h.t === 'hello') {
+        ws.send(encodeFrame({ t: 'res', id: h.id, ok: true, result: { hello: true, config: {} } }));
+      } else if (h.t === 'req' && h.method === 'ping') {
+        ws.send(encodeFrame({ t: 'res', id: h.id, ok: true, result: { pong: true, now: Date.now() } }));
+      } else if (h.t === 'req' && h.method === 'proc.spawn') {
+        ws.send(encodeFrame({ t: 'res', id: h.id, ok: true, result: { id: 1 } }));
+        setTimeout(function () {
+          try { ws.send(encodeFrame({ t: 'push', method: 'proc.exit', params: { id: 1, code: 0, signal: 0 } })); } catch (_e) {}
+        }, 20);
+      } else if (h.t === 'req') {
+        ws.send(encodeFrame({ t: 'res', id: h.id, ok: false, error: 'unknown method' }));
+      }
+    });
+  });
+  return new Promise(function (resolve) {
+    wss.on('listening', function () {
+      const port = wss.address().port;
+      resolve({ url: 'ws://127.0.0.1:' + port + '/', close: () => wss.close() });
+    });
+  });
+}
 
 let pass = 0, fail = 0;
 function ok(name, cond, detail) {
@@ -45,11 +80,9 @@ function wrapWS(url, registry) {
 }
 
 async function main() {
-  // A real IO-proxy server on an ephemeral loopback port.
-  const srv = createServer({ root: process.cwd(), port: 0 });
-  await new Promise((res) => srv.httpServer.listen(0, '127.0.0.1', res));
-  const port = srv.httpServer.address().port;
-  const url = 'ws://127.0.0.1:' + port + '/proxy';
+  // A minimal mock proxy server on an ephemeral loopback port.
+  const server = await startMockServer();
+  const url = server.url;
 
   const dialed = [];
   const statuses = [];
@@ -105,7 +138,7 @@ async function main() {
   ok('pushes route through the persistent facade handler after reconnect', exited);
 
   facade.close();
-  await new Promise((res) => srv.httpServer.close(res));
+  server.close();
 
   console.log('\n' + (fail === 0
     ? 'all reconnect checks passed (' + pass + ' checks)'

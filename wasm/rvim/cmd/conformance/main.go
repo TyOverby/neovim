@@ -1,10 +1,8 @@
-// Command conformance runs the IO-proxy protocol conformance suite against a
-// target server and prints a pass/fail summary. It is the non-test entry point
-// for the same scenarios `go test ./conformance` runs; later phases add a Go
-// target so the suite can differentially check the Go server against the Node
-// reference oracle.
+// Command conformance runs the IO-proxy protocol conformance suite against the
+// in-process Go server and prints a pass/fail summary. It is the non-test entry
+// point for the same scenarios `go test ./conformance` runs.
 //
-//	conformance            # run against the stage-4 Node reference (the oracle)
+//	conformance            # run the full suite against the Go server
 package main
 
 import (
@@ -16,7 +14,9 @@ import (
 )
 
 func main() {
-	target := conformance.Target(conformance.NodeTarget{})
+	target := conformance.Target(conformance.GoTarget{
+		Implemented: []string{"base", "fs", "proc", "pty", "sock"},
+	})
 	fmt.Printf("running conformance suite against: %s\n\n", target.Name())
 
 	results := conformance.RunAll(context.Background(), target)

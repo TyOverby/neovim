@@ -1,8 +1,9 @@
 // Package conformance is the language-neutral protocol conformance harness: a
 // Client that speaks the IO-proxy frame protocol over a transport, a set of
 // scenarios that exercise every method, and a runner that asserts them against
-// ANY target implementation. In stage 5 the stage-4 Node server is the reference
-// oracle (NodeTarget); the Go server (later phases) must pass the SAME scenarios.
+// ANY target implementation — currently the in-process Go server (GoTarget). The
+// scenarios are the protocol spec (originally validated against the stage-4 Node
+// reference, since removed).
 package conformance
 
 import (

@@ -1,38 +1,42 @@
 # rvim — the stage-5 Go server + conformance harness
 
 This is the Go side of stage 5 (see `../stage5.md`): the native, dependency-free
-server that productionizes the stage-4 standalone app into the three-tier `rvim`
-architecture. It is built phase by phase against a **conformance suite** so the
-Go server is verified to behave identically to the stage-4 Node reference.
+server that productionizes the standalone app into the three-tier `rvim`
+architecture. It is verified by a **conformance suite** (protocol-level, in
+process) plus a **headless-Chrome e2e** (`e2e/`, the full browser→engine→server
+loop). It was developed against a stage-4 Node reference server; that prototype
+has since been removed, and the conformance scenarios remain as the spec.
 
 ## Layout
 
 ```
-proxy/         the IO-proxy wire protocol (frame codec; handlers in later phases)
-conformance/   the language-neutral protocol conformance harness
+proxy/         the IO-proxy wire protocol (frame codec; handlers live in server/)
+conformance/   the protocol conformance harness (runs in-process vs the Go server)
   client.go      a protocol Client over a transport (WebSocket)
   scenarios.go   the scenario set — every method family (base/fs/proc/sock/pty)
-  target.go      Target abstraction; NodeTarget runs the stage-4 reference oracle
-  node-target.js Node launcher (stage-4 server on an ephemeral port)
+  target.go      the Target abstraction
+  gotarget.go    GoTarget — the in-process Go server
 cmd/conformance/  runnable suite entry point (summary output)
+e2e/           headless-Chrome integration test (separate module; see e2e/README.md)
 ```
 
 ## The conformance model
 
 The scenarios live in the harness, not in any server, and run against any
-`Target`. Today the only target is `NodeTarget` — the **stage-4 Node server is
-the reference oracle**. As the Go server is built (Phases 3–5), a `GoTarget` is
-added and must pass the *same* scenarios; the suite becomes the differential
-check that keeps the port honest.
+`Target`. The only target is `GoTarget` (the in-process Go server). The scenarios
+are the protocol spec — originally validated against the stage-4 Node reference
+(since removed), now the Go server's fast in-process contract test beneath the
+browser e2e.
 
 ## Running
 
 ```sh
-# requires `node` on PATH and the server's npm deps installed
-#   ( cd ../web && npm install )    # ws + node-pty
-go test ./...                       # frame codec unit tests + conformance vs Node
-go run ./cmd/conformance             # same suite, summary output
+go test ./...              # frame codec unit tests + conformance vs the Go server
+go run ./cmd/conformance    # same suite, summary output
 ```
+
+The conformance suite runs entirely in-process against the Go server — no Node, no
+network. The browser e2e (`e2e/`) is a separate module; see `e2e/README.md`.
 
 ## Building the binary
 

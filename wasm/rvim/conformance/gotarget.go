@@ -8,8 +8,7 @@ import (
 )
 
 // GoTarget runs the stage-5 Go server in-process on an ephemeral loopback port.
-// Its Caps grow phase by phase as handler families are ported; the conformance
-// suite is the differential check that the Go server matches the Node oracle.
+// It implements every capability; the conformance suite is its contract test.
 type GoTarget struct {
 	// Capabilities the Go server currently implements. Phase 2: base only.
 	Implemented []string

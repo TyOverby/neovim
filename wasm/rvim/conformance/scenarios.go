@@ -14,9 +14,8 @@ import (
 // Return an error to fail. The SAME set runs against every Target.
 //
 // Cap tags the capability the scenario exercises ("base"/"fs"/"proc"/"sock"/
-// "pty"). A Target advertises which caps it implements, so the Go server (built
-// up phase by phase) runs exactly the scenarios it can satisfy while the Node
-// reference runs them all.
+// "pty"). A Target advertises which caps it implements, so a partially-built
+// target runs exactly the scenarios it can satisfy.
 type Scenario struct {
 	Name string
 	Cap  string
