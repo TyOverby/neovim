@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Scenario is one conformance check. Run executes against a client that has
@@ -515,6 +516,119 @@ func Scenarios() []Scenario {
 			return waitExit(ctx, c, "proc.exit", id, -1, 15)
 		}},
 
+		{"proc: stderr stream + stdout_close/stderr_close pushes", "proc", func(ctx context.Context, c *Client, root string) error {
+			id, err := spawnProc(ctx, c, []string{"sh", "-c", "echo out; echo err 1>&2"}, map[string]any{"wantOut": true, "wantErr": true})
+			if err != nil {
+				return err
+			}
+			out, err := c.WaitPush(ctx, pushForID("proc.stdout", id))
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(out.Payload, []byte("out")) {
+				return fmt.Errorf("stdout = %q", out.Payload)
+			}
+			er, err := c.WaitPush(ctx, pushForID("proc.stderr", id))
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(er.Payload, []byte("err")) {
+				return fmt.Errorf("stderr = %q", er.Payload)
+			}
+			if _, err := c.WaitPush(ctx, pushForID("proc.stdout_close", id)); err != nil {
+				return fmt.Errorf("no proc.stdout_close: %w", err)
+			}
+			if _, err := c.WaitPush(ctx, pushForID("proc.stderr_close", id)); err != nil {
+				return fmt.Errorf("no proc.stderr_close: %w", err)
+			}
+			return waitExit(ctx, c, "proc.exit", id, 0, -1)
+		}},
+		{"proc: empty argv + jail-escaping cwd are errors", "proc", func(ctx context.Context, c *Client, root string) error {
+			r, err := c.Request(ctx, "proc.spawn", map[string]any{"argv": []string{}}, nil)
+			if err != nil {
+				return err
+			}
+			if r.OK {
+				return fmt.Errorf("empty argv was accepted")
+			}
+			// A cwd under the mount that climbs out of the jail must be rejected.
+			r, err = c.Request(ctx, "proc.spawn", map[string]any{"argv": []string{"true"}, "cwd": "/host/../../../../etc"}, nil)
+			if err != nil {
+				return err
+			}
+			if r.OK {
+				return fmt.Errorf("SECURITY: jail-escaping cwd was accepted")
+			}
+			return nil
+		}},
+		{"proc: signal mapping (SIGINT + unknown fallback to SIGTERM)", "proc", func(ctx context.Context, c *Client, root string) error {
+			id, err := spawnProc(ctx, c, []string{"sleep", "30"}, nil)
+			if err != nil {
+				return err
+			}
+			if _, err := req(ctx, c, "proc.kill", map[string]any{"id": id, "signal": 2}, nil); err != nil {
+				return err
+			}
+			if err := waitExit(ctx, c, "proc.exit", id, -1, 2); err != nil {
+				return err
+			}
+			// An unmapped signal number falls back to SIGTERM (15).
+			id2, err := spawnProc(ctx, c, []string{"sleep", "30"}, nil)
+			if err != nil {
+				return err
+			}
+			if _, err := req(ctx, c, "proc.kill", map[string]any{"id": id2, "signal": 99}, nil); err != nil {
+				return err
+			}
+			return waitExit(ctx, c, "proc.exit", id2, -1, 15)
+		}},
+		{"proc/pty: unknown id is a safe no-op (not a crash)", "proc", func(ctx context.Context, c *Client, root string) error {
+			for _, m := range []string{"proc.kill", "proc.stdin", "proc.stdin_close", "pty.write", "pty.resize", "pty.kill"} {
+				r, err := c.Request(ctx, m, map[string]any{"id": 99999}, []byte("x"))
+				if err != nil {
+					return err
+				}
+				if !r.OK {
+					return fmt.Errorf("%s on unknown id returned error: %s", m, r.Error)
+				}
+			}
+			return nil
+		}},
+		{"pty: rapid writes preserve order (no reordering)", "pty", func(ctx context.Context, c *Client, root string) error {
+			r, err := req(ctx, c, "pty.spawn", map[string]any{"argv": []string{"cat"}, "cols": 80, "rows": 24}, nil)
+			if err != nil {
+				return err
+			}
+			var s struct {
+				ID int `json:"id"`
+			}
+			_ = r.Into(&s)
+			// Three distinct rapid writes; the pty echoes the typed bytes. If the
+			// in-order dispatch regressed (per-request goroutines), these reorder.
+			for _, tok := range []string{"111", "222", "333"} {
+				if _, err := req(ctx, c, "pty.write", map[string]any{"id": s.ID}, []byte(tok)); err != nil {
+					return err
+				}
+			}
+			cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			var acc []byte
+			for {
+				p, err := c.WaitPush(cctx, pushForID("pty.data", s.ID))
+				if err != nil {
+					return fmt.Errorf("only saw digits %q before timeout", filterDigits(acc))
+				}
+				acc = append(acc, p.Payload...)
+				if d := filterDigits(acc); len(d) >= 9 {
+					if !nonDecreasing(d) {
+						return fmt.Errorf("REORDERED pty input: echoed digits = %q", d)
+					}
+					_, _ = req(ctx, c, "pty.kill", map[string]any{"id": s.ID, "signal": 9}, nil)
+					return nil
+				}
+			}
+		}},
+
 		// ---- sockets ----
 		{"sock: getaddrinfo resolves localhost", "sock", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "sock.getaddrinfo", map[string]any{"host": "localhost", "service": "80"}, nil)
@@ -709,6 +823,28 @@ func waitExit(ctx context.Context, c *Client, method string, id, wantCode, wantS
 		return fmt.Errorf("%s signal = %d, want %d", method, ev.Signal, wantSignal)
 	}
 	return nil
+}
+
+// filterDigits keeps only ASCII digits from b (used to track pty echo order).
+func filterDigits(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c >= '0' && c <= '9' {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// nonDecreasing reports whether the digit sequence never goes backwards (so
+// "111222333" passes, any reordering like "112213..." fails).
+func nonDecreasing(d []byte) bool {
+	for i := 1; i < len(d); i++ {
+		if d[i] < d[i-1] {
+			return false
+		}
+	}
+	return true
 }
 
 // echoServer accepts one connection and echoes bytes back until it closes.
