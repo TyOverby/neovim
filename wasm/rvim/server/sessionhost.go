@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -482,9 +483,12 @@ func (h *SessionHost) serveClient(c net.Conn) {
 		_ = sink.send(proxy.Header{T: proxy.TRes, ID: hh.ID, OK: boolp(false), Error: "attach: empty session"}, nil)
 		return
 	}
-	sess := h.attach(ap.Session, ap.Root, sink)
+	// Ack BEFORE binding/replaying: attach() flushes buffered pty.data through the
+	// sink, so binding first would put replay frames ahead of the ack on the wire
+	// and the client would read a pty.data where it expects the handshake reply.
 	ack, _ := json.Marshal(map[string]any{"attached": true, "session": ap.Session})
 	_ = sink.send(proxy.Header{T: proxy.TRes, ID: hh.ID, OK: boolp(true), Result: ack}, nil)
+	sess := h.attach(ap.Session, ap.Root, sink)
 	defer sess.detach(sink)
 
 	for {
@@ -507,4 +511,42 @@ func (h *SessionHost) Close() {
 	default:
 		close(h.stopGC)
 	}
+}
+
+// DefaultDaemonSock is the per-user session-host socket path. It lives under
+// $XDG_RUNTIME_DIR/rvim (the standard per-user runtime dir, tmpfs + 0700), with a
+// /tmp/rvim-<uid> fallback. The same function runs on both sides (the daemon binds
+// it, the io-proxy dials it), so they always agree.
+func DefaultDaemonSock() string {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir != "" {
+		dir = filepath.Join(dir, "rvim")
+	} else {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("rvim-%d", os.Getuid()))
+	}
+	return filepath.Join(dir, "host.sock")
+}
+
+// RunSessionHost is the `rvim --session-host` entrypoint: a SINGLETON daemon. It
+// takes an exclusive flock on a lock file beside the socket; if another daemon
+// already holds it, this one exits cleanly (so racing io-proxies that each try to
+// spawn a daemon converge on one). The held lock fd is intentionally leaked for
+// the process lifetime.
+func RunSessionHost(sockPath string) error {
+	dir := filepath.Dir(sockPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	lockPath := sockPath + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		// Another daemon owns the lock — it is (or is becoming) the live one.
+		lf.Close()
+		return nil
+	}
+	// Lock held for the process lifetime (don't close lf).
+	return NewSessionHost().Serve(sockPath)
 }

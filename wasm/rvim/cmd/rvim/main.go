@@ -24,19 +24,35 @@ import (
 
 func main() {
 	var (
-		port       = flag.Int("port", 8001, "listen port (0 = ephemeral)")
-		bind       = flag.String("bind", "127.0.0.1", "listen address (non-loopback requires a token + TLS — Phase 9)")
-		root       = flag.String("root", "", "filesystem jail root (default: cwd; with --remote, the path ON the remote host)")
-		mount      = flag.String("mount", "/host", "in-editor mount prefix mapped to --root")
-		assetsDir  = flag.String("assets-dir", "", "serve the browser bundle from this dir (the build-site.sh output)")
-		proxy      = flag.Bool("proxy", false, "generate /proxy-config.js so visiting the page is the standalone app")
-		remote     = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> <remote-rvim> --serve-stdio`")
-		remoteRvim = flag.String("remote-rvim", "rvim", "path to rvim ON the remote host (like rsync's --rsync-path). `ssh host cmd` does NOT source ~/.bashrc, so the remote PATH usually excludes ~/bin — pass an absolute or ~/ path (the remote shell expands ~) if rvim isn't in the default PATH")
-		serveStdio = flag.Bool("serve-stdio", false, "(internal) run the io-proxy over stdin/stdout — the remote end of --remote")
-		noOpen     = flag.Bool("no-open", false, "do not auto-open the browser (auto-open not yet wired)")
+		port        = flag.Int("port", 8001, "listen port (0 = ephemeral)")
+		bind        = flag.String("bind", "127.0.0.1", "listen address (non-loopback requires a token + TLS — Phase 9)")
+		root        = flag.String("root", "", "filesystem jail root (default: cwd; with --remote, the path ON the remote host)")
+		mount       = flag.String("mount", "/host", "in-editor mount prefix mapped to --root")
+		assetsDir   = flag.String("assets-dir", "", "serve the browser bundle from this dir (the build-site.sh output)")
+		proxy       = flag.Bool("proxy", false, "generate /proxy-config.js so visiting the page is the standalone app")
+		remote      = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> <remote-rvim> --serve-stdio`")
+		remoteRvim  = flag.String("remote-rvim", "rvim", "path to rvim ON the remote host (like rsync's --rsync-path). `ssh host cmd` does NOT source ~/.bashrc, so the remote PATH usually excludes ~/bin — pass an absolute or ~/ path (the remote shell expands ~) if rvim isn't in the default PATH")
+		serveStdio  = flag.Bool("serve-stdio", false, "(internal) run the io-proxy over stdin/stdout — the remote end of --remote")
+		sessionHost = flag.Bool("session-host", false, "(internal) run the persistent session-host daemon for durable PTYs")
+		session     = flag.String("session", "", "(internal) durable-PTY session key: delegate pty.* to the session-host daemon")
+		daemonSock  = flag.String("daemon-sock", "", "(internal) session-host unix socket path (default: $XDG_RUNTIME_DIR/rvim/host.sock)")
+		noOpen      = flag.Bool("no-open", false, "do not auto-open the browser (auto-open not yet wired)")
 	)
 	flag.Parse()
 	_ = noOpen // auto-open lands in a later phase; the flag is accepted now.
+
+	// --session-host: the durable-PTY daemon. Independent of any connection; owns
+	// terminal shells so they survive transport drops. Singleton (flocked).
+	if *sessionHost {
+		sock := *daemonSock
+		if sock == "" {
+			sock = server.DefaultDaemonSock()
+		}
+		if err := server.RunSessionHost(sock); err != nil {
+			log.Fatalf("rvim --session-host: %v", err)
+		}
+		return
+	}
 
 	rootGiven := *root != ""
 	jailRoot := *root
@@ -60,7 +76,11 @@ func main() {
 	// --serve-stdio: the remote endpoint. Speak the proxy protocol over stdin/
 	// stdout; NOTHING goes to stdout except frames (logs go to stderr).
 	if *serveStdio {
-		srv := server.New(server.Config{Root: jailRoot, Mount: *mount}, server.NewRegistry())
+		selfExe, _ := os.Executable()
+		srv := server.New(server.Config{
+			Root: jailRoot, Mount: *mount,
+			Session: *session, DaemonSock: *daemonSock, SelfExe: selfExe,
+		}, server.NewRegistry())
 		if err := srv.ServeStdio(os.Stdin, os.Stdout); err != nil {
 			log.Fatalf("rvim --serve-stdio: %v", err)
 		}

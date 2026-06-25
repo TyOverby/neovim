@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -100,6 +101,11 @@ type Ctx struct {
 	// a handler body (dispatch is sequential per connection); a Deferred handler
 	// captures it before spawning its async goroutine.
 	reqID int
+
+	// daemon, when set, delegates pty.* frames to the session-host daemon (durable
+	// PTYs). Established once per connection in serveConn when a session key is
+	// configured; nil means PTYs are handled locally (the base, non-durable path).
+	daemon *daemonClient
 
 	mu       sync.Mutex
 	state    map[string]any
@@ -189,6 +195,14 @@ func (cn *conn) writeFrame(h proxy.Header, payload []byte) error {
 	return cn.rw.writeRaw(raw)
 }
 
+// writeRawFrame writes an already-encoded frame (used to forward session-host
+// daemon frames to the browser verbatim), serialized with all other writers.
+func (cn *conn) writeRawFrame(raw []byte) error {
+	cn.writeMu.Lock()
+	defer cn.writeMu.Unlock()
+	return cn.rw.writeRaw(raw)
+}
+
 // readFrame returns the next decodable frame, skipping undecodable noise. It
 // returns an error ONLY on a transport read failure (which ends the conn).
 func (cn *conn) readFrame() (proxy.Header, []byte, error) {
@@ -222,6 +236,15 @@ type Config struct {
 	// `ssh -T <host> rvim --serve-stdio --root <remote-root>` (the three-tier
 	// architecture); tests use a local `rvim --serve-stdio` subprocess.
 	RemoteCommand []string
+
+	// Session, if set, delegates this io-proxy's pty.* traffic to the session-host
+	// daemon keyed by this id (durable PTYs across reconnects). DaemonSock is the
+	// daemon's unix socket; SelfExe is this rvim binary (to auto-spawn the daemon).
+	// These are set only on the --serve-stdio / local io-proxy side, never the
+	// relay/app-server side.
+	Session    string
+	DaemonSock string
+	SelfExe    string
 }
 
 // Server serves HTTP + the /proxy WebSocket.
@@ -361,6 +384,24 @@ func (s *Server) serveConn(cn *conn) {
 	defer ctx.runCleanups()
 	defer cn.rw.close()
 
+	// Durable PTYs: when a session key is configured, attach to the session-host
+	// daemon and route pty.* through it. A setup failure falls back to local PTY
+	// handling (non-durable) so terminals still work. The daemon link is closed
+	// when this connection ends — the daemon KEEPS the session's shells running.
+	if s.cfg.Session != "" {
+		sock := s.cfg.DaemonSock
+		if sock == "" {
+			sock = DefaultDaemonSock()
+		}
+		if d, err := connectDaemon(sock, s.cfg.SelfExe, s.cfg.Session, s.cfg.Root); err != nil {
+			log.Printf("rvim: session-host attach failed (%v); PTYs are non-durable this session", err)
+		} else {
+			ctx.daemon = d
+			go d.pump(cn)
+			defer d.close()
+		}
+	}
+
 	for {
 		h, payload, err := cn.readFrame()
 		if err != nil {
@@ -406,6 +447,14 @@ func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 		_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(true), Result: ack}, nil)
 
 	case proxy.TReq:
+		// Durable PTYs: when a session-host daemon is attached, pty.* requests are
+		// forwarded to it (and its responses/pushes are pumped back to the browser),
+		// instead of the local per-connection PTY handlers. Everything else (fs /
+		// proc / sock) stays local.
+		if ctx.daemon != nil && strings.HasPrefix(h.Method, "pty.") {
+			ctx.daemon.forward(ctx, h, payload)
+			return
+		}
 		fn := s.reg.handlers[h.Method]
 		if fn == nil {
 			_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(false),
