@@ -8,9 +8,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -167,23 +169,40 @@ func (c *Ctx) runCleanups() {
 	}
 }
 
-// ---- the websocket connection wrapper --------------------------------------
+// ---- the connection wrapper (transport-agnostic) ---------------------------
 
-// conn serializes writes to a websocket (coder/websocket requires one writer at
-// a time; responses and async pushes both write).
+// conn carries the proxy protocol over a frameRW transport (a WebSocket for the
+// browser, or stdin/stdout for the SSH-stdio remote — see transport.go). It
+// serializes writes (responses + async pushes both write).
 type conn struct {
-	ws      *websocket.Conn
+	rw      frameRW
 	writeMu sync.Mutex
 }
 
 func (cn *conn) writeFrame(h proxy.Header, payload []byte) error {
-	frame, err := proxy.Encode(h, payload)
+	raw, err := proxy.Encode(h, payload)
 	if err != nil {
 		return err
 	}
 	cn.writeMu.Lock()
 	defer cn.writeMu.Unlock()
-	return cn.ws.Write(context.Background(), websocket.MessageBinary, frame)
+	return cn.rw.writeRaw(raw)
+}
+
+// readFrame returns the next decodable frame, skipping undecodable noise. It
+// returns an error ONLY on a transport read failure (which ends the conn).
+func (cn *conn) readFrame() (proxy.Header, []byte, error) {
+	for {
+		raw, err := cn.rw.readRaw()
+		if err != nil {
+			return proxy.Header{}, nil, err
+		}
+		h, payload, derr := proxy.Decode(raw)
+		if derr != nil {
+			continue // ignore undecodable noise
+		}
+		return h, payload, nil
+	}
 }
 
 // ---- the server ------------------------------------------------------------
@@ -196,6 +215,13 @@ type Config struct {
 	Mount       string       // in-editor mount prefix (default /host)
 	Assets      *AssetServer // static bundle server (may be nil: no static serving)
 	ProxyConfig bool         // generate /proxy-config.js so visiting == the standalone app
+
+	// RemoteCommand, if set, puts the server in RELAY mode: it does NOT handle IO
+	// locally — each /proxy WebSocket is relayed to a fresh subprocess (this argv)
+	// that speaks the proxy protocol over its stdin/stdout. In production that's
+	// `ssh -T <host> rvim --serve-stdio --root <remote-root>` (the three-tier
+	// architecture); tests use a local `rvim --serve-stdio` subprocess.
+	RemoteCommand []string
 }
 
 // Server serves HTTP + the /proxy WebSocket.
@@ -233,7 +259,7 @@ func (s *Server) DropConnections() {
 	}
 	s.connMu.Unlock()
 	for _, cn := range cns {
-		_ = cn.ws.CloseNow()
+		cn.rw.closeNow()
 	}
 }
 
@@ -297,11 +323,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(1 << 24) // large file reads / pty bursts exceed the 32KiB default
-	s.serveConn(ws)
-}
-
-func (s *Server) serveConn(ws *websocket.Conn) {
-	cn := &conn{ws: ws}
+	// RELAY mode (--remote): forward this connection to the remote io-proxy over
+	// SSH stdio instead of handling IO locally.
+	if len(s.cfg.RemoteCommand) > 0 {
+		s.relayToRemote(ws)
+		return
+	}
+	cn := &conn{rw: &wsFrameRW{ws: ws}}
 	s.connMu.Lock()
 	s.conns[cn] = struct{}{}
 	s.connMu.Unlock()
@@ -310,25 +338,36 @@ func (s *Server) serveConn(ws *websocket.Conn) {
 		delete(s.conns, cn)
 		s.connMu.Unlock()
 	}()
+	s.serveConn(cn)
+}
+
+// serveConn runs the dispatch loop over a transport-agnostic conn. Used for the
+// browser WebSocket and for the SSH-stdio remote (ServeStdio).
+func (s *Server) serveConn(cn *conn) {
 	ctx := &Ctx{
 		Config: ConnConfig{Root: s.cfg.Root, Mount: s.cfg.Mount},
 		conn:   cn,
 		state:  map[string]any{},
 	}
 	defer ctx.runCleanups()
-	defer ws.Close(websocket.StatusNormalClosure, "")
+	defer cn.rw.close()
 
 	for {
-		_, data, err := ws.Read(context.Background())
+		h, payload, err := cn.readFrame()
 		if err != nil {
-			return // connection dropped: cleanups run via defer
-		}
-		h, payload, derr := proxy.Decode(data)
-		if derr != nil {
-			continue // ignore undecodable noise
+			return // transport dropped: cleanups run via defer
 		}
 		s.dispatch(cn, ctx, h, payload)
 	}
+}
+
+// ServeStdio runs the io-proxy over a stdin/stdout pipe (the `--serve-stdio`
+// remote endpoint of the three-tier --remote architecture). One connection;
+// returns when stdin closes (the SSH pipe dropped).
+func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
+	cn := &conn{rw: &stdioFrameRW{r: bufio.NewReaderSize(in, 64*1024), w: out}}
+	s.serveConn(cn)
+	return nil
 }
 
 func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {

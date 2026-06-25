@@ -346,7 +346,7 @@ push**.
 | 4 | Go io-proxy: proc + PTY | spawn/`creack/pty`; `childEnv`/`resolveCwd` parity; chromedp `:!`/`:terminal` | med |
 | 5 | Go io-proxy: sockets | tcp/unix/dns + inbound listen/accept; conformance | med |
 | 6 | `cancel` + ReconnectingProxy | `cancel` frame end-to-end; engine-worker reconnect wrapper (`close()`-on-drop); fault-injection tests | **high** |
-| 7 | SSH-stdio remote | `--remote`, `--serve-stdio`; pipe e2e + one real ssh-to-localhost; assume-on-PATH | med |
+| 7 | SSH-stdio remote (**done**) | `--remote`, `--serve-stdio`; relay = framing transcode; conformance + browser e2e over a subprocess stand-in; assume-on-PATH | med |
 | 8 | FS routing table | two-layer `--site`/`--rc` (bundled/local/remote); version-skew warnings | med |
 | 9 | Auth/TLS guard + polish | `--bind`/`--token`/TLS gate; `--no-open`; unsaved-buffer safety net; docs | med |
 

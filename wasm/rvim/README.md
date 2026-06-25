@@ -128,8 +128,20 @@ Two ways to serve the browser bundle:
   per-request goroutine dispatch reordered rapid `pty.write` frames and scrambled
   terminal input — now fixed by in-order dispatch (`server/server.go`; DNS stays
   async via `Response.Deferred`).
-- Later phases: SSH-stdio remote (`--remote`/`--serve-stdio`), FS routing
-  (`--site`/`--rc`), auth/TLS.
+- **Phase 7 (done):** the three-tier **SSH-stdio remote**. A transport-agnostic
+  `frameRW` (`server/transport.go`) carries the protocol over a WebSocket OR a
+  length-prefixed byte stream. `rvim --serve-stdio` runs the io-proxy over
+  stdin/stdout (the remote endpoint); `rvim --remote user@host` puts the
+  app-server in RELAY mode — it serves the page locally but forwards each `/proxy`
+  WebSocket to `ssh -T user@host rvim --serve-stdio --root <remote-root>`, a
+  per-connection subprocess that does all the IO jailed on the remote. The relay
+  is a pure framing transcode (no decode). Verified by the whole conformance suite
+  over the relay (`conformance` `RemoteTarget` — a local `--serve-stdio` subprocess
+  stands in for ssh, identical mechanics) AND a browser e2e over the relay
+  (`e2e/TestBrowserRemoteRelay`: real engine → app-server relay → subprocess →
+  remote disk). A real ssh-to-localhost run needs sshd + a key configured (not in
+  this sandbox); the subprocess stand-in exercises the same transport.
+- Later phases: FS routing (`--site`/`--rc`), auth/TLS, Phase-6 `cancel`.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
 …}` in `conformance/gotarget.go`; each handler phase adds its cap there and the

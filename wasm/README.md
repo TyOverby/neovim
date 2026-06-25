@@ -512,6 +512,15 @@ go build -tags embed_assets -o rvim ./cmd/rvim  # self-contained binary (bundle 
 (For dev, skip the embed and serve the bundle off disk: `go build -o rvim
 ./cmd/rvim` then `./rvim --assets-dir <build-site output> --root … --proxy`.)
 
+**Editing a remote host** (the three-tier mode): run `rvim` on a machine you can
+reach in a browser (e.g. your laptop) and point it at the box that holds the files
+over SSH — it serves the page locally and proxies all IO to
+`ssh -T user@host rvim --serve-stdio` (assumes `rvim` is on the remote's `PATH`):
+
+```sh
+./rvim --remote user@host --root /remote/project --proxy   # + --assets-dir or embedded bundle
+```
+
 Then open **`http://localhost:8001/`** in a JSPI-capable browser (Chrome ≥ 137).
 You land in `/path/to/project` (mounted in-editor at `/host`) with a full editor:
 
