@@ -107,7 +107,7 @@ func procSpawn(c *Ctx, params json.RawMessage, payload []byte) (Response, error)
 
 	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
 	cmd.Dir = cwd
-	cmd.Env = childEnv(p.Env)
+	cmd.Env = childEnv(p.Env, c.Config.NvimSocket)
 
 	rec := &procChild{cmd: cmd}
 	if p.WantIn {

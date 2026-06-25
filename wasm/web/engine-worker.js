@@ -136,7 +136,9 @@ function setupProxy(proxy) {
       ws.binaryType = 'arraybuffer';
       return ws;
     },
-    helloParams: { mount: self.__nvimProxyMount, root: proxy.root },
+    // nvimSocket goes in the hello so the SERVER knows nvim's RPC socket path and
+    // can export $NVIM to spawned children (app.js serverstart()s on this path).
+    helloParams: { mount: self.__nvimProxyMount, root: proxy.root, nvimSocket: proxy.nvimSocket },
     onStatus: function (ev) {
       try {
         if (ev.kind === 'connected') {

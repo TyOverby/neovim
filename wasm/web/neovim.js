@@ -469,7 +469,13 @@
     if (proxy.mount != null && typeof proxy.mount !== 'string') {
       throw new Error('Neovim.create: proxy.mount must be a string (the in-engine mount prefix)');
     }
-    return { url: proxy.url, root: proxy.root, mount: proxy.mount };
+    // nvimSocket (optional): the server-side path for nvim's RPC socket ($NVIM),
+    // forwarded to the worker so it can be sent in the hello — the server then
+    // exports $NVIM to spawned children so they can drive nvim over RPC.
+    if (proxy.nvimSocket != null && typeof proxy.nvimSocket !== 'string') {
+      throw new Error('Neovim.create: proxy.nvimSocket must be a string (the server-side RPC socket path)');
+    }
+    return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket };
   }
 
   function create(opts) {

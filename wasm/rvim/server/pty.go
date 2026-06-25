@@ -118,7 +118,7 @@ func ptySpawn(c *Ctx, params json.RawMessage, payload []byte) (Response, error) 
 
 	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
 	cmd.Dir = cwd
-	cmd.Env = ensureTERM(childEnv(p.Env))
+	cmd.Env = ensureTERM(childEnv(p.Env, c.Config.NvimSocket))
 
 	// Start the pty NOW so a spawn failure becomes an error response (matching the
 	// Node handler's throw), then stream + reap in After so pushes follow {id}.

@@ -165,7 +165,63 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		dump := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(getline(1,"$"), "\\n")'])`)
 		t.Fatalf("terminal did not create the file (termbuf %s -> %s); buffer:\n%s", termBuf, newBuf, dump)
 	})
+
+	// 7) $NVIM: a server-side child connects to nvim's RPC socket (which app.js
+	//    serverstart()s and the server exports as $NVIM) and drives nvim — the
+	//    "plugins/commands connect back to their nvim host" feature.
+	t.Run("nvim RPC via $NVIM (child drives nvim)", func(t *testing.T) {
+		if _, err := exec.LookPath("node"); err != nil {
+			t.Skip("node not on PATH (needed for the RPC-client child)")
+		}
+		// app.js starts the RPC server once the proxy connects; wait for it.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if sn := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['v:servername'])`); sn != "" {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if sn := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['v:servername'])`); sn == "" {
+			t.Fatal("nvim RPC server never started (v:servername empty)")
+		}
+		// A tiny Node msgpack-RPC client: connect to $NVIM, send the notification
+		// [2, "nvim_command", ["call writefile([...], '/host/rpc-out.txt')"]] — nvim
+		// runs it, writing through the FS proxy to the server's disk.
+		writeFile(t, filepath.Join(root, "rpc-client.js"), rpcClientJS)
+		// jobstart (async) — NOT system(): a blocking system() would deadlock, since
+		// nvim must keep servicing its event loop to accept the child's RPC.
+		evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['jobstart(["node","rpc-client.js"])'])`)
+		// nvim processes the notification asynchronously; poll for the effect.
+		d2 := time.Now().Add(10 * time.Second)
+		for time.Now().Before(d2) {
+			if b, err := os.ReadFile(filepath.Join(root, "rpc-out.txt")); err == nil && strings.Contains(string(b), "from-child-rpc") {
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		t.Fatal("child RPC did not drive nvim to write rpc-out.txt on the server")
+	})
 }
+
+// rpcClientJS is a dependency-free Node msgpack-RPC client: it connects to the
+// $NVIM unix socket and sends ONE notification — [2, "nvim_command", [cmd]] —
+// hand-encoded in msgpack (3-array, fixint 2, fixstr method, 1-array params,
+// str8 cmd). nvim executes the command, writing a file via the FS proxy.
+const rpcClientJS = `const net = require('net');
+const sock = process.env.NVIM;
+if (!sock) { console.error('no $NVIM'); process.exit(2); }
+const method = 'nvim_command';
+const cmd = "call writefile(['from-child-rpc'], '/host/rpc-out.txt')";
+const msg = Buffer.concat([
+  Buffer.from([0x93, 0x02]),
+  Buffer.from([0xa0 | method.length]), Buffer.from(method),
+  Buffer.from([0x91]),
+  Buffer.from([0xd9, cmd.length]), Buffer.from(cmd),
+]);
+const c = net.connect(sock, () => { c.write(msg); });
+c.on('error', (e) => { console.error('connect: ' + e.message); process.exit(3); });
+setTimeout(() => { try { c.end(); } catch (e) {} process.exit(0); }, 500);
+`
 
 // ---- helpers ----------------------------------------------------------------
 

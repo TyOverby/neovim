@@ -56,8 +56,13 @@ func resolveCwd(cfg ConnConfig, cwd string) (string, error) {
 // :terminal exec) — the browser engine's synthetic PATH is useless here. Take
 // the supplied env (else the server's) and APPEND the server PATH, so meaningful
 // engine PATH entries still take precedence but server binaries always resolve.
-// Mirrors fs-handlers.js childEnv.
-func childEnv(supplied map[string]string) []string {
+//
+// nvimSocket (the connection's $NVIM): the engine spawns most children with an
+// inherited env, which the proxy can't carry from the browser, so $NVIM would be
+// lost. We inject it here from the path nvim listens on (sent in the hello), so
+// plugins / commands / :terminal can connect back to nvim over RPC like a normal
+// nvim host. Mirrors fs-handlers.js childEnv (+ the $NVIM injection).
+func childEnv(supplied map[string]string, nvimSocket string) []string {
 	serverPath := os.Getenv("PATH")
 	if serverPath == "" {
 		serverPath = "/usr/bin:/bin"
@@ -78,6 +83,9 @@ func childEnv(supplied map[string]string) []string {
 		envMap["PATH"] = p + string(os.PathListSeparator) + serverPath
 	} else {
 		envMap["PATH"] = serverPath
+	}
+	if nvimSocket != "" {
+		envMap["NVIM"] = nvimSocket
 	}
 	out := make([]string, 0, len(envMap))
 	for k, v := range envMap {

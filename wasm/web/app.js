@@ -36,6 +36,29 @@
   // and {kind:'stderr', text:'proxy: ...'} on failure (see engine-worker.js).
   var proxyState = proxy ? 'connecting' : null;
 
+  // Standalone-app RPC host: once nvim is ready AND the proxy is connected, start
+  // nvim's RPC server on the SERVER-side socket the server suggested
+  // (proxy.nvimSocket) and export $NVIM, so child processes / :terminal spawned on
+  // the server inherit $NVIM and can drive this nvim over msgpack-RPC — exactly
+  // like a normal nvim host. The socket lives on the server (the proxy binds unix
+  // paths there), so the path is valid for server-side children; the connection's
+  // cleanup removes it on disconnect. Runs once. We can't do this at nvim startup:
+  // the proxy connects asynchronously after boot, so an early serverstart fails.
+  var nvimReady = false;
+  var rpcServerStarted = false;
+  function maybeStartRpcServer() {
+    if (rpcServerStarted || !nvimReady || proxyState !== 'connected') { return; }
+    if (!proxy || !proxy.nvimSocket) { return; }
+    rpcServerStarted = true;
+    nvim.request('nvim_exec_lua',
+      [ 'local a = vim.fn.serverstart(...); vim.env.NVIM = a; return a', [ proxy.nvimSocket ] ])
+      .then(function (addr) {
+        console.log('[rvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
+      }, function (err) {
+        console.warn('[rvim] serverstart failed: ' + (err && err.message || err));
+      });
+  }
+
   nvim.onStatus(function (s) {
     if (!s) { return; }
     if (s.kind === 'booting') { setStatus('engine booting (loading wasm + runtime)…'); }
@@ -44,7 +67,7 @@
       // Reflect proxy connection state in the status line (engine-worker emits
       // these proxy:* lines around the WebSocket handshake).
       if (proxy && typeof s.text === 'string' && s.text.indexOf('proxy:') === 0) {
-        if (/^proxy: connected/.test(s.text)) { proxyState = 'connected'; }
+        if (/^proxy: connected/.test(s.text)) { proxyState = 'connected'; maybeStartRpcServer(); }
         else { proxyState = 'error'; }
         refreshStatus();
       }
@@ -79,6 +102,8 @@
   nvim.ready
     .then(function () {
       readyMsg = 'attached — click the grid and type (chan ' + nvim.chan + ')';
+      nvimReady = true;
+      maybeStartRpcServer();   // proxy may have connected before nvim was ready
       // refreshStatus() composes readyMsg with the current proxyState (the
       // proxy:connected/error status may have arrived before or after ready).
       refreshStatus();
