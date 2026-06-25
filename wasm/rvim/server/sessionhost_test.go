@@ -83,9 +83,14 @@ func spawnReqID(t *testing.T, m *memSink) int {
 
 func spawnPTY(t *testing.T, s *ptySession, script string) {
 	t.Helper()
+	spawnPTYIn(t, s, t.TempDir(), []string{"/bin/sh", "-c", script})
+}
+
+func spawnPTYIn(t *testing.T, s *ptySession, cwd string, argv []string) {
+	t.Helper()
 	params, _ := json.Marshal(map[string]any{
-		"argv": []string{"/bin/sh", "-c", script},
-		"cwd":  t.TempDir(),
+		"argv": argv,
+		"cwd":  cwd,
 		"env":  map[string]string{"PATH": os.Getenv("PATH")},
 		"cols": 80, "rows": 24,
 	})
@@ -237,24 +242,25 @@ func (m *memSink) resResult(id int) map[string]any {
 	return nil
 }
 
-// TestSessionAdoptColdRepaint exercises the cold-restore path: a FRESH client
-// attaches the same session (warm auto-replay sends nothing it hasn't seen), then
-// pty.adopt repaints the terminal from the full rolling ring and reports liveness.
-// adopt of an unknown id reports not-alive (so the caller respawns); pty.list shows
-// the live PTY.
-func TestSessionAdoptColdRepaint(t *testing.T) {
+// TestSessionAdoptOnSpawnRepaint exercises the cold-restore path: after a fresh
+// client reattaches the session, a restore-spawn (adopt:true) matching a live PTY's
+// (cwd, argv) reattaches to it — repainting from the full ring and reporting
+// adopted:true — instead of spawning a new shell. A non-matching adopt spawns
+// fresh (adopted:false). Warm auto-replay must NOT resend output to the fresh
+// client.
+func TestSessionAdoptOnSpawnRepaint(t *testing.T) {
 	host := NewSessionHost()
 	defer host.Close()
 
+	cwd := t.TempDir()
 	sink1 := &memSink{}
 	sess := host.attach("s1", "", sink1)
-	spawnPTY(t, sess, `printf 'SCREEN-MARK\r\n'; sleep 30`)
+	// Original terminal: marker then a long-lived read loop (stays alive).
+	spawnPTYIn(t, sess, cwd, []string{"/bin/sh", "-c", `printf 'SCREEN-MARK\r\n'; sleep 30`})
 	id := spawnReqID(t, sink1)
 	waitFor(t, func() bool { return strings.Contains(string(sink1.data(id)), "SCREEN-MARK") })
 
-	// A fresh client (cold restore): warm auto-replay must NOT resend output the
-	// session already delivered to the prior client — the fresh screen stays blank
-	// until it explicitly adopts.
+	// Fresh client (reopened tab): warm auto-replay sends nothing it hasn't seen.
 	sess.detach(sink1)
 	sink2 := &memSink{}
 	host.attach("s1", "", sink2)
@@ -262,34 +268,40 @@ func TestSessionAdoptColdRepaint(t *testing.T) {
 		t.Fatalf("warm auto-replay re-sent already-delivered output to a fresh client")
 	}
 
-	// adopt -> alive + full-ring repaint.
-	dispatchReq(sess, 7, "pty.adopt", map[string]any{"id": id})
-	if a := sink2.resResult(7); a == nil || a["alive"] != true {
-		t.Fatalf("adopt of live pty: result=%v", a)
+	// Restore-spawn matching (cwd, argv): adopts the live PTY (same id) and repaints.
+	adoptSpawn(sess, 7, cwd, []string{"/bin/sh", "-c", `printf 'SCREEN-MARK\r\n'; sleep 30`})
+	r := sink2.resResult(7)
+	if r == nil || r["adopted"] != true {
+		t.Fatalf("restore-spawn should adopt the live pty: result=%v", r)
+	}
+	if int(r["id"].(float64)) != id {
+		t.Fatalf("adopt returned id %v, want original %d", r["id"], id)
 	}
 	if !strings.Contains(string(sink2.data(id)), "SCREEN-MARK") {
 		t.Fatalf("adopt did not repaint from the ring: %q", sink2.data(id))
 	}
 
-	// adopt of a dead/unknown id -> not alive (caller respawns).
-	dispatchReq(sess, 8, "pty.adopt", map[string]any{"id": 999999})
-	if a := sink2.resResult(8); a == nil || a["alive"] != false {
-		t.Fatalf("adopt of dead pty: result=%v", a)
+	// A restore-spawn with no matching live pty (different argv) spawns fresh.
+	adoptSpawn(sess, 8, cwd, []string{"/bin/sh", "-c", `printf 'OTHER\r\n'; sleep 30`})
+	r8 := sink2.resResult(8)
+	if r8 == nil || r8["adopted"] != false {
+		t.Fatalf("non-matching restore-spawn should spawn fresh: result=%v", r8)
 	}
 
-	// list -> the live PTY is reported.
-	dispatchReq(sess, 9, "pty.list", map[string]any{})
-	lst := sink2.resResult(9)
-	ptys, _ := lst["ptys"].([]any)
-	if len(ptys) != 1 {
-		t.Fatalf("pty.list = %v, want 1 live pty", lst)
-	}
-
-	dispatchReq(sess, 10, "pty.kill", map[string]any{"id": id, "signal": 9})
+	dispatchReq(sess, 9, "pty.kill", map[string]any{"id": id, "signal": 9})
+	dispatchReq(sess, 10, "pty.kill", map[string]any{"id": int(r8["id"].(float64)), "signal": 9})
 }
 
 func dispatchReq(s *ptySession, reqID int, method string, params map[string]any) {
 	s.dispatch(proxy.Header{T: proxy.TReq, ID: reqID, Method: method, Params: mustJSON(params)}, nil)
+}
+
+// adoptSpawn issues a session-restore pty.spawn (adopt:true) for cwd+argv.
+func adoptSpawn(s *ptySession, reqID int, cwd string, argv []string) {
+	dispatchReq(s, reqID, "pty.spawn", map[string]any{
+		"argv": argv, "cwd": cwd, "env": map[string]string{"PATH": os.Getenv("PATH")},
+		"cols": 80, "rows": 24, "adopt": true,
+	})
 }
 
 // TestSessionWriteRoundTrip: input written to a PTY reaches the child and drives

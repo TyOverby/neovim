@@ -19,6 +19,11 @@ type spawnParams struct {
 	WantErr bool              `json:"wantErr"`
 	Cols    int               `json:"cols"`
 	Rows    int               `json:"rows"`
+	// Adopt (PTY only): on a session-restore spawn, reattach to an already-running
+	// PTY in this session matching (cwd, argv) instead of spawning a fresh one — so
+	// a closed-and-reopened tab rehydrates its terminals. Set by the io-proxy from
+	// the RVIM_ADOPT env marker the restore hook adds.
+	Adopt bool `json:"adopt"`
 }
 
 // resolveCwd maps the engine's in-engine cwd to a real server path, the way the

@@ -234,3 +234,63 @@ func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+// TestServeStdioColdAdopt is the Phase-2 cold-restore integration: a terminal
+// spawned on one connection is adopted by a restore-spawn (env RVIM_ADOPT) on a
+// FRESH connection of the same session, reattaching to the SAME live shell (same
+// daemon pty id) and repainting from the ring — end-to-end through the io-proxy's
+// marker handling and the daemon's (cwd,argv) match.
+func TestServeStdioColdAdopt(t *testing.T) {
+	sock := startDaemon(t)
+	root := t.TempDir()
+
+	b1 := newStdioBrowser(t, sock, "tab-cold", root)
+	argv := []string{"/bin/sh", "-c", `printf 'MARK-XYZ\r\n'; while IFS= read -r _; do :; done`}
+	spawn := func(b *stdioBrowser, reqID int, env map[string]any) {
+		p := map[string]any{"argv": argv, "cwd": "", "cols": 80, "rows": 24}
+		if env != nil {
+			p["env"] = env
+		}
+		b.send(proxy.Header{T: proxy.TReq, ID: reqID, Method: "pty.spawn", Params: mustJSON(p)}, nil)
+	}
+	spawn(b1, 2, nil)
+	res, _ := b1.readUntil(t, func(h proxy.Header, _ []byte) bool { return h.T == proxy.TRes && h.ID == 2 })
+	var sr struct {
+		ID      int  `json:"id"`
+		Adopted bool `json:"adopted"`
+	}
+	_ = json.Unmarshal(res.Result, &sr)
+	if sr.Adopted {
+		t.Fatalf("first spawn should not adopt")
+	}
+	id := sr.ID
+	// Drain the marker so it's in the ring; then drop the connection.
+	b1.readUntil(t, func(h proxy.Header, pl []byte) bool {
+		return h.Method == "pty.data" && frameID(h) == id && strings.Contains(string(pl), "MARK-XYZ")
+	})
+	b1.drop()
+
+	// Fresh connection, same session: a restore-spawn (RVIM_ADOPT) of the same
+	// argv/cwd must adopt the SAME pty and repaint the marker from the ring.
+	b2 := newStdioBrowser(t, sock, "tab-cold", root)
+	spawn(b2, 3, map[string]any{"RVIM_ADOPT": "1"})
+	res2, _ := b2.readUntil(t, func(h proxy.Header, _ []byte) bool { return h.T == proxy.TRes && h.ID == 3 })
+	var sr2 struct {
+		ID      int  `json:"id"`
+		Adopted bool `json:"adopted"`
+	}
+	_ = json.Unmarshal(res2.Result, &sr2)
+	if !sr2.Adopted {
+		t.Fatalf("restore-spawn did not adopt: %s", res2.Result)
+	}
+	if sr2.ID != id {
+		t.Fatalf("adopted id %d, want original %d", sr2.ID, id)
+	}
+	// The ring repaint delivers the original marker to the fresh connection.
+	b2.readUntil(t, func(h proxy.Header, pl []byte) bool {
+		return h.Method == "pty.data" && frameID(h) == id && strings.Contains(string(pl), "MARK-XYZ")
+	})
+
+	b2.send(proxy.Header{T: proxy.TReq, ID: 4, Method: "pty.kill", Params: mustJSON(map[string]any{"id": id, "signal": 9})}, nil)
+	b2.drop()
+}

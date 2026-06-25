@@ -119,9 +119,19 @@ func (d *daemonClient) forwardSpawn(ctx *Ctx, h proxy.Header) {
 		_ = ctx.conn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(false), Error: err.Error()}, nil)
 		return
 	}
+	// RVIM_ADOPT marker (set by the session-restore hook): ask the daemon to
+	// reattach to a still-running PTY matching (resolved cwd, argv) rather than
+	// spawn. Strip the marker so it never reaches the child's env.
+	adopt := false
+	if p.Env != nil {
+		if _, ok := p.Env["RVIM_ADOPT"]; ok {
+			adopt = true
+			delete(p.Env, "RVIM_ADOPT")
+		}
+	}
 	env := envListToMap(childEnv(p.Env, ctx.Config.NvimSocket))
 	np, _ := json.Marshal(map[string]any{
-		"argv": p.Argv, "cwd": cwd, "env": env, "cols": p.Cols, "rows": p.Rows,
+		"argv": p.Argv, "cwd": cwd, "env": env, "cols": p.Cols, "rows": p.Rows, "adopt": adopt,
 	})
 	_ = d.sendPayload(proxy.Header{T: proxy.TReq, ID: h.ID, Method: "pty.spawn", Params: np}, nil)
 }

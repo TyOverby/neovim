@@ -132,6 +132,10 @@ func (s *ptySession) detach(sink frameSink) {
 	if s.client == sink {
 		s.client = nil
 		s.detachedAt = time.Now()
+		// Release adopt claims so the next restore (a fresh client) can re-adopt.
+		for _, p := range s.ptys {
+			p.claimed = false
+		}
 	}
 	s.mu.Unlock()
 }
@@ -199,8 +203,11 @@ type daemonPty struct {
 	produced  int64  // total bytes ever read from the PTY
 	delivered int64  // produced-offset through which the live client has been sent
 
+	cwd        string   // resolved cwd it was spawned in (for adopt matching)
+	argv       []string // argv it was spawned with (for adopt matching)
 	cols, rows int
 	pid        int
+	claimed    bool // adopted by the current client (prevents double-adopt in one restore)
 
 	exitPending *ptyExit // set if the PTY exited while detached
 	exited      atomic.Bool
@@ -268,50 +275,34 @@ func (s *ptySession) dispatch(h proxy.Header, payload []byte) {
 			_ = pt.cmd.Process.Signal(sig)
 		}
 		s.respondOK(h.ID)
-	case "pty.list":
-		s.list(h.ID)
-	case "pty.adopt":
-		var p procIDParam
-		_ = json.Unmarshal(h.Params, &p)
-		s.adopt(h.ID, p.ID)
 	}
 }
 
-// list reports the session's live PTYs (id + last-known size + pid) so a fresh
-// client can discover what is still running and adopt each.
-func (s *ptySession) list(reqID int) {
-	s.mu.Lock()
-	out := make([]map[string]any, 0, len(s.ptys))
+// matchAdoptable finds a live, unclaimed PTY in the session that was spawned with
+// the same cwd and argv — the candidate a session-restore spawn should reattach to
+// rather than spawning anew. Caller holds sess.mu.
+func (s *ptySession) matchAdoptable(cwd string, argv []string) *daemonPty {
 	for _, p := range s.ptys {
-		if p.exited.Load() {
+		if p.exited.Load() || p.claimed {
 			continue
 		}
-		out = append(out, map[string]any{"id": p.id, "cols": p.cols, "rows": p.rows, "pid": p.pid})
+		if p.cwd == cwd && sameStrv(p.argv, argv) {
+			return p
+		}
 	}
-	s.mu.Unlock()
-	s.respond(reqID, map[string]any{"ptys": out})
+	return nil
 }
 
-// adopt binds a FRESH client buffer to an existing live PTY (cold restore): it
-// responds with liveness + size, then replays the full ring so the terminal
-// repaints with the current screen, and resumes live delivery. If the PTY is gone
-// (TTL-reaped or exited), it responds alive:false so the caller can respawn.
-func (s *ptySession) adopt(reqID, id int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pt := s.ptys[id]
-	if pt == nil || pt.exited.Load() {
-		s.respondLocked(reqID, map[string]any{"alive": false})
-		return
+func sameStrv(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	// Respond first (so the client creates its buffer), then repaint from the ring.
-	// The client buffers any interleaved live data by id and discards it on adopt,
-	// so response-vs-replay ordering need not be exact.
-	s.respondLocked(reqID, map[string]any{"alive": true, "id": id, "cols": pt.cols, "rows": pt.rows, "pid": pt.pid})
-	if s.client != nil {
-		pt.replayFrom(s.client, pt.ringBase())
-		pt.delivered = pt.produced
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
 	}
+	return true
 }
 
 func (s *ptySession) get(id int) *daemonPty {
@@ -335,6 +326,27 @@ func (s *ptySession) spawn(h proxy.Header, _ []byte) {
 		s.respondErr(h.ID, "pty.spawn: bad params")
 		return
 	}
+
+	// Session restore: reattach to a still-running PTY matching (cwd, argv) instead
+	// of spawning. Respond first (client creates its buffer), then repaint from the
+	// full ring and resume live delivery. The PTY's run goroutine never stopped, so
+	// future output flows to the now-bound client automatically.
+	if p.Adopt {
+		s.mu.Lock()
+		if pt := s.matchAdoptable(p.Cwd, p.Argv); pt != nil {
+			pt.claimed = true
+			s.respondLocked(h.ID, map[string]any{"id": pt.id, "pid": pt.pid, "adopted": true})
+			if s.client != nil {
+				pt.replayFrom(s.client, pt.ringBase())
+				pt.delivered = pt.produced
+			}
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		// No match (TTL-reaped / never existed / exited): fall through to spawn.
+	}
+
 	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
@@ -351,6 +363,7 @@ func (s *ptySession) spawn(h proxy.Header, _ []byte) {
 	}
 	pt := &daemonPty{
 		id: s.host.allocPtyID(), cmd: cmd, ptmx: ptmx, sess: s,
+		cwd: p.Cwd, argv: p.Argv,
 		cols: int(winDim(p.Cols)), rows: int(winDim(p.Rows)),
 	}
 	if cmd.Process != nil {
@@ -360,7 +373,7 @@ func (s *ptySession) spawn(h proxy.Header, _ []byte) {
 	s.ptys[pt.id] = pt
 	s.mu.Unlock()
 
-	s.respond(h.ID, map[string]any{"id": pt.id, "pid": pt.pid})
+	s.respond(h.ID, map[string]any{"id": pt.id, "pid": pt.pid, "adopted": false})
 	go pt.run()
 }
 
