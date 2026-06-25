@@ -238,14 +238,38 @@ idle TTL or explicit kill.
 Because the daemon lives on the IO host, terminals survive **app-server restart**
 and **hard SSH death** while the browser tab is alive — not just a wire blip.
 
-- **What it does NOT cover (by design):** the *cold* case — the browser/nvim
-  itself gone (laptop reboot, closed tab). nvim's terminal *screen* is a libvterm
-  buffer in the browser worker; no daemon can preserve browser-side volatile
-  state, and a fresh nvim has no terminal buffers to reattach. **Run shells under
-  `tmux` for cold-reboot durability** (the daemon keeps tmux's pty alive across
-  restarts; tmux rebuilds the screen on a fresh attach). Native "adopt an orphaned
-  remote pty into a new `:terminal`" was considered and rejected — it reimplements,
-  worse, what tmux already does.
+### 6.2 Cold restore — `:mksession` rehydration (Phase 8)
+
+The *cold* case — the browser/nvim itself gone (laptop reboot, closed tab) — is
+also covered, natively, without tmux. nvim's terminal *screen* is libvterm state
+in the browser worker that no daemon can preserve, and a fresh nvim has no
+terminal buffers to reattach — but `:mksession` already records the terminals, and
+the daemon already keeps the shells alive. The bridge:
+
+- **A stable session id.** The host app mints it and persists it in `localStorage`
+  keyed by the project URL (not the worker's ephemeral per-load id), so reopening
+  the page reconnects to the same daemon session whose shells are still running.
+- **Adopt-on-spawn by match.** nvim's terminal pid is the browser-*local* (ephemeral)
+  pty id, so persisting the daemon's stable id would need a C bridge. Instead the
+  **daemon matches a restore-spawn to a still-running pty by (resolved cwd, argv)**
+  and reattaches — replaying its ring so libvterm repaints — else spawns fresh. The
+  io-proxy already mediates every `pty.spawn` and resolves cwd, so the match key is
+  consistent on both sides; no persisted id, **no C change, no browser-engine
+  change, no wasm recompile**.
+- **The restore hook.** A runtime-injected replacement for the `term://` restore
+  autocmd (only when a proxy is configured) adds `RVIM_ADOPT=1` to the env during a
+  `:mksession` restore (`g:SessionLoad`); the io-proxy turns that into `adopt:true`.
+  It jobstarts a **list** (argv), not a string — `jobstart(string)` shell-wraps
+  (`sh`→`{sh,-c,sh}`) and would never match the original `{sh}`.
+
+So: open a `:terminal`, `:mksession`, close the tab, reopen, `:source` — the
+terminal reattaches to its live shell and repaints. (This is what "adopt an
+orphaned pty" would have been; it turned out tractable in-core because the restore
+path is runtime Lua and the daemon already keeps shells + a ring.) Proven by a
+headless-Chrome e2e (`e2e/e2e_durable_term_test.go`). Limit: only as durable as the
+daemon's idle TTL and ring cap; a shell idle past the TTL is reaped and respawns
+fresh.
+
 - **The reconnect seam is no-duplication + a bounded gap, not exactly-once.**
   Output the io-proxy pulled from the daemon but couldn't push to the browser
   before a hard drop is lost (the daemon counts it delivered). For a terminal this
@@ -389,7 +413,8 @@ push**.
 | 7 | SSH-stdio remote (**done**) | `--remote`, `--serve-stdio`; relay = framing transcode; conformance + browser e2e over a subprocess stand-in; assume-on-PATH | med |
 | 8 | FS routing table | two-layer `--site`/`--rc` (bundled/local/remote); version-skew warnings | med |
 | 9 | Auth/TLS guard + polish | `--bind`/`--token`/TLS gate; `--no-open`; unsaved-buffer safety net; docs | med |
-| D | Durable `:terminal` (**done**) | `rvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death; tmux for cold reboot | med |
+| D | Durable `:terminal` (**done**) | `rvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death | med |
+| E | Cold restore (**done**) | `:mksession` rehydration (§6.2); stable localStorage session id + daemon adopt-on-spawn by (cwd,argv); close tab → reopen → `:source` reattaches live shells; no C change / no wasm recompile | med |
 
 Risk-ordered, the two things to watch are **Phase 6** (the reconnect/cancel
 machine — fault injection must prove no-hang) and the **port itself** staying
