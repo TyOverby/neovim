@@ -204,6 +204,9 @@ type Server struct {
 	reg *Registry
 	ln  net.Listener
 	srv *http.Server
+
+	connMu sync.Mutex
+	conns  map[*conn]struct{} // live /proxy connections
 }
 
 // New builds a Server. The registry is shared across connections.
@@ -214,9 +217,24 @@ func New(cfg Config, reg *Registry) *Server {
 	if cfg.Mount == "" {
 		cfg.Mount = "/host"
 	}
-	s := &Server{cfg: cfg, reg: reg}
+	s := &Server{cfg: cfg, reg: reg, conns: map[*conn]struct{}{}}
 	s.srv = &http.Server{Handler: s.handler()}
 	return s
+}
+
+// DropConnections abnormally closes every live /proxy connection (no close
+// handshake), simulating a transport blip. The HTTP server stays up, so clients
+// reconnect to it. Used to exercise the reconnect path.
+func (s *Server) DropConnections() {
+	s.connMu.Lock()
+	cns := make([]*conn, 0, len(s.conns))
+	for cn := range s.conns {
+		cns = append(cns, cn)
+	}
+	s.connMu.Unlock()
+	for _, cn := range cns {
+		_ = cn.ws.CloseNow()
+	}
 }
 
 func (s *Server) handler() http.Handler {
@@ -284,6 +302,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveConn(ws *websocket.Conn) {
 	cn := &conn{ws: ws}
+	s.connMu.Lock()
+	s.conns[cn] = struct{}{}
+	s.connMu.Unlock()
+	defer func() {
+		s.connMu.Lock()
+		delete(s.conns, cn)
+		s.connMu.Unlock()
+	}()
 	ctx := &Ctx{
 		Config: ConnConfig{Root: s.cfg.Root, Mount: s.cfg.Mount},
 		conn:   cn,

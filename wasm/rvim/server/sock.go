@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,6 +287,13 @@ func sockListen(c *Ctx, params json.RawMessage, payload []byte) (Response, error
 	var ln net.Listener
 	var err error
 	if isUnix {
+		// Remove a stale socket file from a prior (dropped) connection so re-binding
+		// the same path succeeds — Go's listener unlinks it on a clean Close, but a
+		// transport blip can leave it behind (this is how serverstart re-establishes
+		// nvim's $NVIM socket after a reconnect). Only ever removes a socket file.
+		if fi, e := os.Lstat(p.Path); e == nil && fi.Mode()&os.ModeSocket != 0 {
+			_ = os.Remove(p.Path)
+		}
 		ln, err = net.Listen("unix", p.Path)
 	} else {
 		host := p.Host

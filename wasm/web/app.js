@@ -50,13 +50,24 @@
     if (rpcServerStarted || !nvimReady || proxyState !== 'connected') { return; }
     if (!proxy || !proxy.nvimSocket) { return; }
     rpcServerStarted = true;
-    nvim.request('nvim_exec_lua',
-      [ 'local a = vim.fn.serverstart(...); vim.env.NVIM = a; return a', [ proxy.nvimSocket ] ])
-      .then(function (addr) {
-        console.log('[rvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
-      }, function (err) {
-        console.warn('[rvim] serverstart failed: ' + (err && err.message || err));
-      });
+    // On a RECONNECT the previous listener is dead (the server tore it down when the
+    // transport dropped), but nvim still holds it as v:servername — so stop it
+    // (best-effort) before starting a fresh one on the SAME path. Reusing the path
+    // keeps $NVIM stable: the server re-injects it from the unchanged hello, so
+    // children keep pointing at a live socket. rpcServerStarted is reset on each
+    // disconnect (below) so this re-runs after reconnect.
+    nvim.request('nvim_exec_lua', [
+      'local p = ...\n' +
+      'pcall(function() if vim.v.servername ~= "" then vim.fn.serverstop(vim.v.servername) end end)\n' +
+      'local a = vim.fn.serverstart(p)\n' +
+      'vim.env.NVIM = a\n' +
+      'return a',
+      [ proxy.nvimSocket ]
+    ]).then(function (addr) {
+      console.log('[rvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
+    }, function (err) {
+      console.warn('[rvim] serverstart failed: ' + (err && err.message || err));
+    });
   }
 
   nvim.onStatus(function (s) {
@@ -68,7 +79,7 @@
       // these proxy:* lines around the WebSocket handshake).
       if (proxy && typeof s.text === 'string' && s.text.indexOf('proxy:') === 0) {
         if (/^proxy: connected/.test(s.text)) { proxyState = 'connected'; maybeStartRpcServer(); }
-        else { proxyState = 'error'; }
+        else { proxyState = 'error'; rpcServerStarted = false; }  // reset so reconnect re-establishes the RPC server
         refreshStatus();
       }
     }

@@ -201,6 +201,34 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		}
 		t.Fatal("child RPC did not drive nvim to write rpc-out.txt on the server")
 	})
+
+	// 8) $NVIM survives a transport reconnect: drop the connection; after the client
+	//    reconnects, app.js re-establishes nvim's RPC server on the SAME socket
+	//    (serverstop the stale listener -> serverstart), and the server re-injects
+	//    $NVIM from the re-sent hello — so a child can drive nvim again.
+	t.Run("nvim RPC survives a reconnect", func(t *testing.T) {
+		if _, err := exec.LookPath("node"); err != nil {
+			t.Skip("node not on PATH")
+		}
+		writeFile(t, filepath.Join(root, "rpc-client.js"), rpcClientJS) // self-contained (subtest 7 may be filtered out)
+		srv.DropConnections()                                           // abruptly close the proxy ws; the client reconnects
+
+		target := "/host/rpc-after-reconnect.txt"
+		onDisk := filepath.Join(root, "rpc-after-reconnect.txt")
+		_ = os.Remove(onDisk)
+		// Keep asking a child to drive nvim until it succeeds — this naturally spans
+		// the reconnect + re-serverstart window (early attempts fail while the proxy
+		// is down; one succeeds once the RPC socket is back).
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['jobstart(["node","rpc-client.js","`+target+`"])'])`)
+			time.Sleep(700 * time.Millisecond)
+			if b, err := os.ReadFile(onDisk); err == nil && strings.Contains(string(b), "from-child-rpc") {
+				return
+			}
+		}
+		t.Fatal("after reconnect, child RPC did not drive nvim (RPC socket not re-established)")
+	})
 }
 
 // rpcClientJS is a dependency-free Node msgpack-RPC client: it connects to the
@@ -210,8 +238,9 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 const rpcClientJS = `const net = require('net');
 const sock = process.env.NVIM;
 if (!sock) { console.error('no $NVIM'); process.exit(2); }
+const out = process.argv[2] || '/host/rpc-out.txt';
 const method = 'nvim_command';
-const cmd = "call writefile(['from-child-rpc'], '/host/rpc-out.txt')";
+const cmd = "call writefile(['from-child-rpc'], '" + out + "')";
 const msg = Buffer.concat([
   Buffer.from([0x93, 0x02]),
   Buffer.from([0xa0 | method.length]), Buffer.from(method),
