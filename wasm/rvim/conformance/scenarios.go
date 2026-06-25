@@ -136,6 +136,33 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
+		{"hello: version mismatch + malformed params still ack", "base", func(ctx context.Context, c *Client, root string) error {
+			// A future/mismatched protocol version must still ack ok (the server
+			// logs a warning but does not reject — refusing would break clients).
+			r, err := c.HelloVersion(ctx, map[string]any{"mount": "/host"}, 999)
+			if err != nil {
+				return err
+			}
+			if !r.OK {
+				return fmt.Errorf("version-mismatch hello rejected: %s", r.Error)
+			}
+			var out struct {
+				ServerVersion int `json:"serverVersion"`
+			}
+			_ = r.Into(&out)
+			if out.ServerVersion == 0 {
+				return fmt.Errorf("ack missing serverVersion: %s", r.Result)
+			}
+			// Non-object (malformed) params must not break the handshake.
+			r, err = c.HelloVersion(ctx, 42, 1)
+			if err != nil {
+				return err
+			}
+			if !r.OK {
+				return fmt.Errorf("malformed-params hello rejected: %s", r.Error)
+			}
+			return nil
+		}},
 		{"unknown method -> ok:false", "base", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Request(ctx, "no.such.method", map[string]any{}, nil)
 			if err != nil {
@@ -253,6 +280,56 @@ func Scenarios() []Scenario {
 			}
 			if string(onDisk) != "ABCD" {
 				return fmt.Errorf("append result = %q, want \"ABCD\"", string(onDisk))
+			}
+			return nil
+		}},
+		{"fs: unknown + directory handle writes/reads are graceful no-ops", "fs", func(ctx context.Context, c *Client, root string) error {
+			// Write/read on an unknown handle: ok with n:0 (the documented contract —
+			// no panic, no escape). The engine should never send these, but a stale
+			// handle after a reconnect must not crash or silently misbehave.
+			r, err := req(ctx, c, "fs.write", map[string]any{"handle": 99999, "pos": 0}, []byte("x"))
+			if err != nil {
+				return err
+			}
+			var w struct {
+				N int `json:"n"`
+			}
+			_ = r.Into(&w)
+			if w.N != 0 {
+				return fmt.Errorf("unknown-handle write n=%d, want 0", w.N)
+			}
+			r, err = req(ctx, c, "fs.read", map[string]any{"handle": 99999, "pos": 0, "len": 16}, nil)
+			if err != nil {
+				return err
+			}
+			var rd struct {
+				N   int  `json:"n"`
+				EOF bool `json:"eof"`
+			}
+			_ = r.Into(&rd)
+			if rd.N != 0 || !rd.EOF || len(r.Payload) != 0 {
+				return fmt.Errorf("unknown-handle read = {n:%d eof:%v %d bytes}", rd.N, rd.EOF, len(r.Payload))
+			}
+			// A DIRECTORY handle (no underlying file fd) writes as a no-op too.
+			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": "/dh", "mode": 0o755}, nil); err != nil {
+				return err
+			}
+			r, _ = req(ctx, c, "fs.open", map[string]any{"path": "/dh", "flags": oRDONLY}, nil)
+			var op struct {
+				Handle int  `json:"handle"`
+				IsDir  bool `json:"isDir"`
+			}
+			_ = r.Into(&op)
+			if !op.IsDir {
+				return fmt.Errorf("opening a dir did not report isDir")
+			}
+			r, err = req(ctx, c, "fs.write", map[string]any{"handle": op.Handle, "pos": 0}, []byte("x"))
+			if err != nil {
+				return err
+			}
+			_ = r.Into(&w)
+			if w.N != 0 {
+				return fmt.Errorf("dir-handle write n=%d, want 0", w.N)
 			}
 			return nil
 		}},

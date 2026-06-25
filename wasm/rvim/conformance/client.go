@@ -180,6 +180,22 @@ func (c *Client) Hello(ctx context.Context, params any) (Result, error) {
 	return waitResult(ctx, ch)
 }
 
+// HelloVersion is Hello with an explicit protocol version + raw params (for
+// testing version negotiation and malformed-params handling). params is marshaled
+// as-is, so a non-object value exercises the server's tolerant param decoding.
+func (c *Client) HelloVersion(ctx context.Context, params any, version int) (Result, error) {
+	id := c.newID()
+	pb, err := json.Marshal(params)
+	if err != nil {
+		return Result{}, err
+	}
+	ch, err := c.send(ctx, proxy.Header{T: proxy.THello, ID: id, Params: pb, Version: version}, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	return waitResult(ctx, ch)
+}
+
 // Request sends a req frame and waits for its response.
 func (c *Client) Request(ctx context.Context, method string, params any, payload []byte) (Result, error) {
 	id := c.newID()

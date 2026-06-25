@@ -54,6 +54,41 @@ func TestDecodeShortFrame(t *testing.T) {
 	}
 }
 
+func TestDecodeInvalidJSONHeader(t *testing.T) {
+	// headerLen=5 but the 5 header bytes are not valid JSON.
+	data := []byte{5, 0, 0, 0, '{', 'n', 'o', 't', ' '}
+	if _, _, err := Decode(data); err == nil {
+		t.Fatal("expected error decoding an invalid-JSON header")
+	}
+}
+
+func TestDecodeOversizedHeaderLen(t *testing.T) {
+	// headerLen claims ~4GiB; must error, not panic or over-read.
+	data := []byte{0xFF, 0xFF, 0xFF, 0xFF, '{', '}'}
+	if _, _, err := Decode(data); err == nil {
+		t.Fatal("expected error on oversized headerLen")
+	}
+}
+
+func TestEncodeDecodeLargePayload(t *testing.T) {
+	// A multi-MiB payload (PTY burst / large file read) must round-trip exactly.
+	payload := make([]byte, 2<<20)
+	for i := range payload {
+		payload[i] = byte(i*131 + 7)
+	}
+	frame := MustEncode(Header{T: TRes, ID: 1}, payload)
+	h, got, err := Decode(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ID != 1 {
+		t.Fatalf("header id = %d", h.ID)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("large payload mismatch (%d vs %d bytes)", len(got), len(payload))
+	}
+}
+
 func TestStreamFrameRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	frames := []struct {
