@@ -26,7 +26,8 @@ const { encodeFrame, decodeFrame } = ProxyClient;
 // real IO proxy is the Go server (rvim) + its conformance/e2e suites; this test
 // is about the transport facade (connect / drop / reconnect / request / push),
 // which needs no real IO. Returns { url, close }.
-function startMockServer() {
+function startMockServer(opts) {
+  opts = opts || {};
   const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   wss.on('connection', function (ws) {
     ws.on('message', function (data) {
@@ -34,7 +35,13 @@ function startMockServer() {
       try { frame = decodeFrame(data); } catch (_e) { return; }
       const h = frame.header;
       if (h.t === 'hello') {
-        ws.send(encodeFrame({ t: 'res', id: h.id, ok: true, result: { hello: true, config: {} } }));
+        // failHello: accept the socket but reject the handshake (the engine-dead
+        // failure mode the reconnect contract must still recover from).
+        ws.send(encodeFrame({ t: 'res', id: h.id, ok: !opts.failHello,
+          result: opts.failHello ? undefined : { hello: true, config: {} },
+          error: opts.failHello ? 'handshake refused' : undefined }));
+      } else if (h.t === 'req' && h.method === 'noreply') {
+        // intentionally never responds (to leave requests in-flight)
       } else if (h.t === 'req' && h.method === 'ping') {
         ws.send(encodeFrame({ t: 'res', id: h.id, ok: true, result: { pong: true, now: Date.now() } }));
       } else if (h.t === 'req' && h.method === 'proc.spawn') {
@@ -140,10 +147,57 @@ async function main() {
   facade.close();
   server.close();
 
+  await testConcurrentInflightFailFast();
+  await testHelloFailureKeepsReconnecting();
+
   console.log('\n' + (fail === 0
     ? 'all reconnect checks passed (' + pass + ' checks)'
     : (fail + ' FAILED, ' + pass + ' passed')));
   process.exit(fail === 0 ? 0 : 1);
+}
+
+// B17: several in-flight requests at the moment of a drop must ALL fail fast
+// (not just one).
+async function testConcurrentInflightFailFast() {
+  const server = await startMockServer();
+  const dialed = [];
+  const facade = createReconnectingProxy({
+    ProxyClient, dial: () => wrapWS(server.url, dialed),
+    helloParams: {}, baseBackoff: 50, maxBackoff: 200,
+  });
+  for (let i = 0; i < 100 && !facade.isConnected(); i++) { await sleep(20); }
+  const inflight = Promise.all([
+    facade.request('noreply', {}, null).then(() => 'ok', () => 'rejected'),
+    facade.request('noreply', {}, null).then(() => 'ok', () => 'rejected'),
+    facade.request('noreply', {}, null).then(() => 'ok', () => 'rejected'),
+  ]);
+  dialed[dialed.length - 1].rawDrop();
+  const settled = await Promise.race([inflight, sleep(2000).then(() => ['HANG'])]);
+  ok('all 3 concurrent in-flight requests fail fast on drop',
+    Array.isArray(settled) && settled.length === 3 && settled.every((v) => v === 'rejected'),
+    JSON.stringify(settled));
+  facade.close();
+  server.close();
+}
+
+// B17: a server that accepts the socket but REJECTS the hello must not leave the
+// facade "connected"; it must keep retrying (the engine-dead failure mode).
+async function testHelloFailureKeepsReconnecting() {
+  const server = await startMockServer({ failHello: true });
+  const dialed = [];
+  const statuses = [];
+  const facade = createReconnectingProxy({
+    ProxyClient, dial: () => wrapWS(server.url, dialed),
+    helloParams: {}, onStatus: (ev) => statuses.push(ev.kind),
+    baseBackoff: 30, maxBackoff: 60,
+  });
+  // Give it time to try, fail the handshake, and retry a few times.
+  await sleep(400);
+  ok('facade never reports connected when the handshake is refused', !facade.isConnected());
+  ok('hello failure triggers reconnect attempts', dialed.length >= 2, dialed.length + ' dials');
+  ok('hello failure surfaces an error status', statuses.indexOf('error') >= 0);
+  facade.close();
+  server.close();
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

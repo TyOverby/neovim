@@ -24,6 +24,11 @@ func startTestServer(t *testing.T, proxyConfig bool) (string, *Server) {
 	must("index.html", "<!doctype html><title>rvim</title>")
 	must("app.js", "// app")
 	must("nvim.wasm", "\x00asm fake")
+	must("mod.mjs", "export const x = 1;")
+	must("pkg.data", "0123456789")
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := New(Config{
 		Root:        t.TempDir(),
@@ -74,6 +79,40 @@ func TestStaticServing(t *testing.T) {
 	}
 	if resp, _ := get(t, base+"/../server.go"); resp.StatusCode == 200 {
 		t.Fatalf("path traversal served a file outside the bundle")
+	}
+}
+
+func TestStaticMIMEAndRange(t *testing.T) {
+	base, _ := startTestServer(t, false)
+
+	// .mjs must be text/javascript (else the browser refuses the ES module).
+	resp, _ := get(t, base+"/mod.mjs")
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Fatalf(".mjs content-type = %q", ct)
+	}
+	// .data is application/octet-stream.
+	resp, _ = get(t, base+"/pkg.data")
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf(".data content-type = %q", ct)
+	}
+
+	// A Range request returns 206 + just the requested bytes (helps stream the
+	// large .data package).
+	req, _ := http.NewRequest("GET", base+"/pkg.data", nil)
+	req.Header.Set("Range", "bytes=0-3")
+	rresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(rresp.Body)
+	rresp.Body.Close()
+	if rresp.StatusCode != http.StatusPartialContent || string(body) != "0123" {
+		t.Fatalf("range request = %d %q, want 206 \"0123\"", rresp.StatusCode, body)
+	}
+
+	// A directory path is a 404 (no listing).
+	if resp, _ := get(t, base+"/sub"); resp.StatusCode != 404 {
+		t.Fatalf("GET /sub (dir) = %d, want 404", resp.StatusCode)
 	}
 }
 
