@@ -615,6 +615,24 @@ func (h *SessionHost) Close() {
 	}
 }
 
+// DebugSummary returns a human-readable snapshot of sessions and their live PTYs
+// (keys, ids, cwd, argv). For tests/diagnostics only.
+func (h *SessionHost) DebugSummary() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := ""
+	for key, s := range h.sessions {
+		s.mu.Lock()
+		out += "session " + key + ":\n"
+		for _, p := range s.ptys {
+			out += fmt.Sprintf("  pty id=%d exited=%v cwd=%q argv=%v ring=%d\n",
+				p.id, p.exited.Load(), p.cwd, p.argv, len(p.ring))
+		}
+		s.mu.Unlock()
+	}
+	return out
+}
+
 // DefaultDaemonSock is the per-user session-host socket path. It lives under
 // $XDG_RUNTIME_DIR/rvim (the standard per-user runtime dir, tmpfs + 0700), with a
 // /tmp/rvim-<uid> fallback. The same function runs on both sides (the daemon binds

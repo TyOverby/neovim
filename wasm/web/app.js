@@ -143,7 +143,11 @@
       "    local cmd = m:match('^term://.-//%d+:(.*)$') or m:match('^term://.-//(.*)$') or m",
       "    local opts = { term = true, cwd = vim.fn.expand(cwd) }",
       "    if vim.g.SessionLoad ~= nil then opts.env = { RVIM_ADOPT = '1' } end",
-      "    vim.fn.jobstart(cmd, opts)",
+      // jobstart a LIST (argv) not a string: a string is shell-wrapped
+      // (sh -> {sh,-c,sh}), which would never match the original terminal's argv
+      // ({sh}) for adopt. The term-name cmd is the original argv space-joined, so
+      // splitting it reconstructs that argv for an exact (cwd,argv) match.
+      "    vim.fn.jobstart(vim.split(cmd, ' ', { trimempty = true }), opts)",
       "  end,",
       "})",
     ].join('\n');
