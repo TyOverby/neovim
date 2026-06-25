@@ -303,7 +303,16 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 	// reach it. A server temp path is writable, off the user's project, and unique
 	// per page load. The proxy binds unix paths literally, so $NVIM is the same on
 	// both sides; the connection's cleanup removes the socket on disconnect.
-	nvimSock := filepath.Join(os.TempDir(), fmt.Sprintf("rvim-nvim-%d-%d.sock", os.Getpid(), atomic.AddInt64(&nvimSockSeq, 1)))
+	// The socket is bound where the io-proxy runs. In --remote mode that's the
+	// REMOTE host, so os.TempDir() (this app-server's tmp — e.g. macOS's
+	// /var/folders/…) would name a directory that doesn't exist there and the
+	// bind fails ("connection refused" back in nvim). /tmp is portable across the
+	// POSIX hosts the remote can be, so use it for remote; locally, os.TempDir().
+	tmpBase := os.TempDir()
+	if len(s.cfg.RemoteCommand) > 0 {
+		tmpBase = "/tmp"
+	}
+	nvimSock := filepath.Join(tmpBase, fmt.Sprintf("rvim-nvim-%d-%d.sock", os.Getpid(), atomic.AddInt64(&nvimSockSeq, 1)))
 	cfg := map[string]any{
 		"url":        "ws://" + host + "/proxy",
 		"mount":      s.cfg.Mount,

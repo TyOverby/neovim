@@ -38,6 +38,7 @@ func main() {
 	flag.Parse()
 	_ = noOpen // auto-open lands in a later phase; the flag is accepted now.
 
+	rootGiven := *root != ""
 	jailRoot := *root
 	if jailRoot == "" {
 		cwd, err := os.Getwd()
@@ -75,13 +76,24 @@ func main() {
 	}
 	if *remote != "" {
 		// Relay mode: each /proxy connection runs `ssh -T <dest> rvim --serve-stdio
-		// --root <remote-root>`. -T = no pseudo-tty (a tty would mangle the binary
-		// frame protocol); BatchMode = never prompt (fail instead). The remote
-		// enforces the jail with its own --root.
-		cfg.RemoteCommand = []string{
+		// [--root <remote-root>]`. -T = no pseudo-tty (a tty would mangle the binary
+		// frame protocol); BatchMode = never prompt (fail instead). The jail root is
+		// a path on the REMOTE — so only forward --root when the user gave one. With
+		// no --root, OMIT it and let the remote `--serve-stdio` default to the
+		// remote's own cwd (your home dir over ssh). Passing the app-server's local
+		// cwd here would name a directory that doesn't exist on the remote, leaving
+		// the jail rooted at a missing path (every :e/:term then fails).
+		cmd := []string{
 			"ssh", "-T", "-o", "BatchMode=yes", *remote,
-			*remoteRvim, "--serve-stdio", "--root", jailRoot, "--mount", *mount,
+			*remoteRvim, "--serve-stdio", "--mount", *mount,
 		}
+		if rootGiven {
+			cmd = append(cmd, "--root", *root)
+		}
+		cfg.RemoteCommand = cmd
+		// The advisory root in /proxy-config.js describes the REMOTE; don't advertise
+		// a local path. Empty when unspecified (the browser routes by --mount).
+		cfg.Root = *root
 	}
 	// Static assets: an explicit --assets-dir (dev) wins; otherwise fall back to a
 	// bundle embedded at build time (`-tags embed_assets`), so a release binary is
@@ -104,8 +116,13 @@ func main() {
 	fmt.Printf("rvim standalone-app server on %s\n", url)
 	fmt.Printf("  proxy WebSocket : %sproxy\n", "ws://"+srv.Addr()+"/")
 	if *remote != "" {
-		fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio --root %s)\n", *remote, *remote, *remoteRvim, jailRoot)
-		fmt.Printf("  remote root    : %s  (jail enforced ON the remote; mount %s)\n", jailRoot, *mount)
+		if rootGiven {
+			fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio --root %s)\n", *remote, *remote, *remoteRvim, *root)
+			fmt.Printf("  remote root    : %s  (jail enforced ON the remote; mount %s)\n", *root, *mount)
+		} else {
+			fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio)\n", *remote, *remote, *remoteRvim)
+			fmt.Printf("  remote root    : <the remote's working dir>  (pass --root to choose; mount %s)\n", *mount)
+		}
 	} else {
 		fmt.Printf("  filesystem root : %s  (jail root; mount %s)\n", jailRoot, *mount)
 	}
