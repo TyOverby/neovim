@@ -739,6 +739,121 @@ func Scenarios() []Scenario {
 			return err
 		}},
 
+		{"sock: getaddrinfo named/numeric/IPv6/empty-host", "sock", func(ctx context.Context, c *Client, root string) error {
+			type addr struct {
+				Family int `json:"family"`
+				Port   int `json:"port"`
+			}
+			get := func(host string, service any) ([]addr, error) {
+				r, err := req(ctx, c, "sock.getaddrinfo", map[string]any{"host": host, "service": service}, nil)
+				if err != nil {
+					return nil, err
+				}
+				var out struct {
+					Addrs []addr `json:"addrs"`
+				}
+				_ = r.Into(&out)
+				return out.Addrs, nil
+			}
+			// named service on a literal IPv4 (the synchronous literal-IP branch).
+			a, err := get("127.0.0.1", "https")
+			if err != nil {
+				return err
+			}
+			if len(a) == 0 || a[0].Family != 4 || a[0].Port != 443 {
+				return fmt.Errorf("127.0.0.1/https = %+v, want family4 port443", a)
+			}
+			// IPv6 literal -> family 6.
+			a, err = get("::1", "http")
+			if err != nil {
+				return err
+			}
+			if len(a) == 0 || a[0].Family != 6 || a[0].Port != 80 {
+				return fmt.Errorf("::1/http = %+v, want family6 port80", a)
+			}
+			// service as a JSON NUMBER (not a string).
+			a, err = get("127.0.0.1", 8080)
+			if err != nil {
+				return err
+			}
+			if len(a) == 0 || a[0].Port != 8080 {
+				return fmt.Errorf("numeric service = %+v, want port8080", a)
+			}
+			// empty host defaults to loopback.
+			a, err = get("", "http")
+			if err != nil {
+				return err
+			}
+			if len(a) == 0 || a[0].Port != 80 {
+				return fmt.Errorf("empty host = %+v, want a loopback addr port80", a)
+			}
+			return nil
+		}},
+		{"sock: connect refused -> ECONNREFUSED; unix connect + echo", "sock", func(ctx context.Context, c *Client, root string) error {
+			// A closed TCP port -> sock.connect_err with code ECONNREFUSED.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return err
+			}
+			port := ln.Addr().(*net.TCPAddr).Port
+			ln.Close() // free the port so the connect is refused
+			r, err := req(ctx, c, "sock.connect", map[string]any{"host": "127.0.0.1", "port": port}, nil)
+			if err != nil {
+				return err
+			}
+			var s struct {
+				ID int `json:"id"`
+			}
+			_ = r.Into(&s)
+			p, err := c.WaitPush(ctx, pushForID("sock.connect_err", s.ID))
+			if err != nil {
+				return err
+			}
+			var ce struct {
+				Code string `json:"code"`
+			}
+			_ = p.Into(&ce)
+			if ce.Code != "ECONNREFUSED" {
+				return fmt.Errorf("connect_err code = %q, want ECONNREFUSED", ce.Code)
+			}
+			// Unix-domain socket: connect + write + echo round-trip.
+			dir, err := os.MkdirTemp("", "rvim-unix-")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+			sockPath := filepath.Join(dir, "echo.sock")
+			uln, err := net.Listen("unix", sockPath)
+			if err != nil {
+				return err
+			}
+			defer uln.Close()
+			go echoServer(uln)
+			r, err = req(ctx, c, "sock.connect", map[string]any{"path": sockPath}, nil)
+			if err != nil {
+				return err
+			}
+			var u struct {
+				ID int `json:"id"`
+			}
+			_ = r.Into(&u)
+			if _, err := c.WaitPush(ctx, pushForID("sock.connect_ok", u.ID)); err != nil {
+				return fmt.Errorf("unix connect_ok: %w", err)
+			}
+			if _, err := req(ctx, c, "sock.write", map[string]any{"id": u.ID}, []byte("unix-ping")); err != nil {
+				return err
+			}
+			d, err := c.WaitPush(ctx, pushForID("sock.data", u.ID))
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(d.Payload, []byte("unix-ping")) {
+				return fmt.Errorf("unix echo = %q", d.Payload)
+			}
+			_, _ = req(ctx, c, "sock.close", map[string]any{"id": u.ID}, nil)
+			return nil
+		}},
+
 		// ---- pty ----
 		{"pty: spawn cat, write, see data, kill, exit", "pty", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "pty.spawn", map[string]any{"argv": []string{"cat"}, "cols": 80, "rows": 24}, nil)
