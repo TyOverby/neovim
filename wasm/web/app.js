@@ -120,6 +120,36 @@
     setStatus(readyMsg + suffix);
   }
 
+  // Durable-PTY rehydration (standalone app only): replace the runtime's default
+  // `term://` restore handler so that, DURING a :mksession restore (g:SessionLoad
+  // is set), restored terminals are spawned with RVIM_ADOPT=1 in their env. The
+  // rvim io-proxy sees that marker and asks the session-host daemon to REATTACH to
+  // the still-running shell whose (cwd, argv) match — repainting from its output
+  // ring — instead of spawning a fresh one. Outside a restore it behaves exactly
+  // like the default (fresh spawn), and a missing/expired daemon pty falls back to
+  // a fresh spawn too. Injected at runtime (only when a proxy is configured), so it
+  // touches no core runtime files and never affects the no-proxy/library path.
+  function installTermAdoptHook(nvim) {
+    var lua = [
+      "local grp = vim.api.nvim_create_augroup('nvim.terminal', { clear = false })",
+      "pcall(vim.api.nvim_clear_autocmds, { group = grp, event = 'BufReadCmd', pattern = 'term://*' })",
+      "vim.api.nvim_create_autocmd('BufReadCmd', {",
+      "  group = grp, pattern = 'term://*', nested = true,",
+      "  desc = 'rvim: term:// buffers; adopt durable daemon ptys on session restore',",
+      "  callback = function(ev)",
+      "    if vim.b[ev.buf].term_title ~= nil then return end",
+      "    local m = ev.match",
+      "    local cwd = m:match('^term://(.-)//') or ''",
+      "    local cmd = m:match('^term://.-//%d+:(.*)$') or m:match('^term://.-//(.*)$') or m",
+      "    local opts = { term = true, cwd = vim.fn.expand(cwd) }",
+      "    if vim.g.SessionLoad ~= nil then opts.env = { RVIM_ADOPT = '1' } end",
+      "    vim.fn.jobstart(cmd, opts)",
+      "  end,",
+      "})",
+    ].join('\n');
+    nvim.request('nvim_exec_lua', [ lua, [] ]).catch(function () {});
+  }
+
   // 2. Renderer: mount a default grid UI into the <pre> and forward keystrokes.
   //    No fixed cols/rows -> mount_into auto-sizes the grid to fill #screen and
   //    tracks its size (drag the resize handle / resize the window to reflow).
@@ -144,6 +174,7 @@
       // if the proxy isn't actually connected the cd/edit fails soft and the user
       // is simply left in the local MEMFS cwd. No effect on the no-proxy demo.
       if (proxy) {
+        installTermAdoptHook(nvim);
         nvim.request('nvim_cmd', [{ cmd: 'cd', args: [ mount ] }, {}]).catch(function () {});
         nvim.request('nvim_cmd', [{ cmd: 'edit', args: [ mount ] }, {}]).catch(function () {});
       }
