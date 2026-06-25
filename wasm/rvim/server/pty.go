@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -24,22 +25,14 @@ import (
 // drops.
 
 type ptyRec struct {
-	id   int
-	cmd  *exec.Cmd
-	ptmx *os.File
-
-	mu     sync.Mutex
-	exited bool
+	id     int
+	cmd    *exec.Cmd
+	ptmx   *os.File
+	exited atomic.Bool // accessed from the reaper goroutine and request handlers
 }
 
 func (r *ptyRec) markExited() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.exited {
-		return false
-	}
-	r.exited = true
-	return true
+	return r.exited.CompareAndSwap(false, true)
 }
 
 type ptyTable struct {
@@ -87,7 +80,7 @@ func (t *ptyTable) killAll() {
 	}
 	t.mu.Unlock()
 	for _, r := range recs {
-		if !r.exited && r.cmd != nil && r.cmd.Process != nil {
+		if !r.exited.Load() && r.cmd != nil && r.cmd.Process != nil {
 			_ = r.cmd.Process.Kill()
 		}
 	}
@@ -164,7 +157,7 @@ func ptySpawn(c *Ctx, params json.RawMessage, payload []byte) (Response, error) 
 func ptyWrite(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	var p procIDParam
 	_ = json.Unmarshal(params, &p)
-	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.ptmx != nil && !rec.exited && len(payload) > 0 {
+	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.ptmx != nil && !rec.exited.Load() && len(payload) > 0 {
 		_, _ = rec.ptmx.Write(payload)
 	}
 	return Response{Result: map[string]any{"ok": true}}, nil
@@ -177,7 +170,7 @@ func ptyResize(c *Ctx, params json.RawMessage, payload []byte) (Response, error)
 		Rows int `json:"rows"`
 	}
 	_ = json.Unmarshal(params, &p)
-	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.ptmx != nil && !rec.exited {
+	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.ptmx != nil && !rec.exited.Load() {
 		cols := uint16(p.Cols)
 		if cols == 0 {
 			cols = 1
@@ -194,7 +187,7 @@ func ptyResize(c *Ctx, params json.RawMessage, payload []byte) (Response, error)
 func ptyKill(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	var p procIDParam
 	_ = json.Unmarshal(params, &p)
-	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.cmd != nil && rec.cmd.Process != nil && !rec.exited {
+	if rec := ptyTableOf(c).get(p.ID); rec != nil && rec.cmd != nil && rec.cmd.Process != nil && !rec.exited.Load() {
 		sig, ok := signalByNumber[p.Signal]
 		if !ok {
 			sig = syscall.SIGHUP // node-pty's default when the number is unknown

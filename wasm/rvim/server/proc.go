@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 )
 
 // PROCESS PROXY (stage 5 — seam 2). The Go port of wasm/server/proc-handlers.js:
@@ -19,23 +20,15 @@ import (
 // are tracked per connection and killed when the connection drops.
 
 type procChild struct {
-	id    int
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-
-	mu     sync.Mutex
-	exited bool
+	id     int
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	exited atomic.Bool // accessed from the reaper goroutine and request handlers
 }
 
 // markExited returns true exactly once (so proc.exit is pushed a single time).
 func (r *procChild) markExited() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.exited {
-		return false
-	}
-	r.exited = true
-	return true
+	return r.exited.CompareAndSwap(false, true)
 }
 
 type procTable struct {
@@ -85,7 +78,7 @@ func (t *procTable) killAll() {
 	}
 	t.mu.Unlock()
 	for _, r := range recs {
-		if !r.exited && r.cmd != nil && r.cmd.Process != nil {
+		if !r.exited.Load() && r.cmd != nil && r.cmd.Process != nil {
 			_ = r.cmd.Process.Kill()
 		}
 	}
@@ -190,7 +183,7 @@ type procIDParam struct {
 func procStdin(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	var p procIDParam
 	_ = json.Unmarshal(params, &p)
-	if rec := procTableOf(c).get(p.ID); rec != nil && rec.stdin != nil && !rec.exited {
+	if rec := procTableOf(c).get(p.ID); rec != nil && rec.stdin != nil && !rec.exited.Load() {
 		_, _ = rec.stdin.Write(payload)
 	}
 	return Response{Result: map[string]any{"ok": true}}, nil
@@ -208,7 +201,7 @@ func procStdinClose(c *Ctx, params json.RawMessage, payload []byte) (Response, e
 func procKill(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	var p procIDParam
 	_ = json.Unmarshal(params, &p)
-	if rec := procTableOf(c).get(p.ID); rec != nil && rec.cmd != nil && rec.cmd.Process != nil && !rec.exited {
+	if rec := procTableOf(c).get(p.ID); rec != nil && rec.cmd != nil && rec.cmd.Process != nil && !rec.exited.Load() {
 		_ = rec.cmd.Process.Signal(toSignal(p.Signal))
 	}
 	return Response{Result: map[string]any{"ok": true}}, nil

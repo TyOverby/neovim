@@ -5,29 +5,27 @@ import (
 	"testing"
 )
 
-// TestProcChildExitedRace demonstrates the data race on procChild.exited (audit
-// finding A2): the reaper sets it under rec.mu (markExited), while procKill /
-// procStdin / killAll read it WITHOUT the lock. Run under `go test -race` — it is
-// flagged until `exited` is accessed atomically. The two goroutines mirror the
-// production accesses exactly: a locked write (as in markExited) racing an
-// unsynchronized read (as in procKill's `!rec.exited`).
+// TestProcChildExitedRace guards audit finding A2: procChild.exited is touched by
+// the reaper goroutine (markExited) AND by request handlers (procKill / procStdin
+// / killAll) concurrently. It must be an atomic.Bool — before the fix these reads
+// were unsynchronized and `go test -race` flagged a DATA RACE here. The two
+// goroutines mirror the production accesses (the reaper's set vs a handler's read).
 func TestProcChildExitedRace(t *testing.T) {
 	rec := &procChild{}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { // reaper side: locked write, as markExited does
+	go func() { // reaper side
 		defer wg.Done()
 		for i := 0; i < 200000; i++ {
-			rec.mu.Lock()
-			rec.exited = true
-			rec.mu.Unlock()
+			rec.markExited()
+			rec.exited.Store(false) // keep the write live across iterations
 		}
 	}()
-	go func() { // handler side: unsynchronized read, as procKill/procStdin do
+	go func() { // handler side: the read procKill/procStdin do
 		defer wg.Done()
 		x := false
 		for i := 0; i < 200000; i++ {
-			x = x || rec.exited
+			x = x || rec.exited.Load()
 		}
 		_ = x
 	}()
