@@ -216,6 +216,46 @@ the current client, on `ws.onclose` calls `close()` + re-dials with backoff, and
   to IndexedDB so a tab-close doesn't lose work. Not v1-critical; it's the
   difference between "annoying" and "lost my work."
 
+### 6.1 Durable `:terminal` — the session-host daemon (Phase 7)
+
+"Live handles tear down" is right for idempotent IO (retry) and one-shot spawns
+(re-run), but **wrong for a `:terminal`**: it is long-lived stateful session — a
+running shell, an `ssh`/`top`/`vim` inside it, scrollback, cwd, history — that the
+user can't just "re-trigger." So PTYs get a deliberate exception.
+
+`rvim --session-host` is a persistent per-user daemon on the IO host (the remote,
+under `--remote`) listening on a unix socket (`$XDG_RUNTIME_DIR/rvim/host.sock`,
+singleton via flock, auto-spawned `ssh-agent`-style and detached with `setsid`).
+It owns the PTY children **outside any single connection**, keyed by a stable
+per-tab session id the browser mints (carried in `?session=` on the `/proxy` URL;
+the app-server threads it to `--serve-stdio --session <key>`). Per-connection
+io-proxies *attach* by key and delegate `pty.*` to the daemon (fs/proc/sock stay
+local/per-connection — the base contract is correct for them). On disconnect the
+daemon **keeps the shells running** and buffers their output; on reattach it
+replays the buffered output so the terminal catches up. PTYs are reaped only on an
+idle TTL or explicit kill.
+
+Because the daemon lives on the IO host, terminals survive **app-server restart**
+and **hard SSH death** while the browser tab is alive — not just a wire blip.
+
+- **What it does NOT cover (by design):** the *cold* case — the browser/nvim
+  itself gone (laptop reboot, closed tab). nvim's terminal *screen* is a libvterm
+  buffer in the browser worker; no daemon can preserve browser-side volatile
+  state, and a fresh nvim has no terminal buffers to reattach. **Run shells under
+  `tmux` for cold-reboot durability** (the daemon keeps tmux's pty alive across
+  restarts; tmux rebuilds the screen on a fresh attach). Native "adopt an orphaned
+  remote pty into a new `:terminal`" was considered and rejected — it reimplements,
+  worse, what tmux already does.
+- **The reconnect seam is no-duplication + a bounded gap, not exactly-once.**
+  Output the io-proxy pulled from the daemon but couldn't push to the browser
+  before a hard drop is lost (the daemon counts it delivered). For a terminal this
+  is self-healing (the next redraw repaints). Closing it to exactly-once needs a
+  browser byte-offset ack on (re)attach so the daemon replays from the last
+  rendered byte — a future hardening, not v1.
+- **Bounds:** per-PTY replay buffer capped (drop oldest — terminal tail is what
+  matters); session idle-TTL before reap; daemon is single-user (loopback / unix
+  socket 0700, same trust model as the bind).
+
 ---
 
 ## 7. Security & auth
@@ -349,6 +389,7 @@ push**.
 | 7 | SSH-stdio remote (**done**) | `--remote`, `--serve-stdio`; relay = framing transcode; conformance + browser e2e over a subprocess stand-in; assume-on-PATH | med |
 | 8 | FS routing table | two-layer `--site`/`--rc` (bundled/local/remote); version-skew warnings | med |
 | 9 | Auth/TLS guard + polish | `--bind`/`--token`/TLS gate; `--no-open`; unsaved-buffer safety net; docs | med |
+| D | Durable `:terminal` (**done**) | `rvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death; tmux for cold reboot | med |
 
 Risk-ordered, the two things to watch are **Phase 6** (the reconnect/cancel
 machine — fault injection must prove no-hang) and the **port itself** staying
