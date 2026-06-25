@@ -475,7 +475,15 @@
     if (proxy.nvimSocket != null && typeof proxy.nvimSocket !== 'string') {
       throw new Error('Neovim.create: proxy.nvimSocket must be a string (the server-side RPC socket path)');
     }
-    return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket };
+    // session (optional): a STABLE per-project id (the host app mints + persists
+    // it) carried in the /proxy URL, routing this tab's :terminal shells to the
+    // session-host daemon so they survive a drop AND can be rehydrated on reload.
+    // Absent -> the worker mints an ephemeral per-load id (durable across
+    // reconnects, but not across a full reload).
+    if (proxy.session != null && typeof proxy.session !== 'string') {
+      throw new Error('Neovim.create: proxy.session must be a string (the durable-PTY session id)');
+    }
+    return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket, session: proxy.session };
   }
 
   function create(opts) {

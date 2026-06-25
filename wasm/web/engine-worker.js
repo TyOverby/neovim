@@ -123,16 +123,18 @@ function setupProxy(proxy) {
   self.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
     ? proxy.mount : '/host';
 
-  // Stage 5 (durable PTYs): a stable per-tab session id, carried in the /proxy URL
-  // (?session=) so the server can route this tab's :terminal shells to the
-  // session-host daemon and reattach them after a transport drop. Minted once and
-  // reused across reconnects (the engine worker outlives a blip), so the SAME id
-  // returns on the reconnect and the daemon recognises the session. It is NOT
-  // persisted across a full tab reload (a fresh worker = a fresh engine with no
-  // terminal buffers — the cold case is served by running shells under tmux).
-  self.__nvimSession = (self.crypto && self.crypto.randomUUID)
-    ? self.crypto.randomUUID()
-    : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+  // Stage 5 (durable PTYs): the session id carried in the /proxy URL (?session=)
+  // routes this tab's :terminal shells to the session-host daemon so they survive
+  // a transport drop. The host app passes a STABLE per-project id (proxy.session,
+  // persisted in localStorage) so a full reload reconnects to the same session and
+  // can rehydrate its terminals. If none was provided (library use without a host,
+  // or localStorage blocked) we mint an ephemeral per-load id: durable across
+  // reconnects, but not across a reload.
+  self.__nvimSession = (typeof proxy.session === 'string' && proxy.session)
+    ? proxy.session
+    : ((self.crypto && self.crypto.randomUUID)
+        ? self.crypto.randomUUID()
+        : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
 
   // Stage 5: a RECONNECTING facade (wasm/proxy-reconnect.js) — a stable object the
   // js-libraries find at self.__nvimProxy. It delegates `request` to the current

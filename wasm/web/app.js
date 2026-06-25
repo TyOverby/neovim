@@ -23,6 +23,26 @@
   var proxy = (typeof window.__NVIM_PROXY === 'object' && window.__NVIM_PROXY) || null;
   var mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
 
+  // Durable-PTY session id: a STABLE id, persisted in localStorage keyed by this
+  // project's URL, so reopening the page reconnects to the SAME session-host
+  // session — whose :terminal shells are still alive — and can rehydrate them (vs.
+  // the worker's ephemeral per-load id, which only survives reconnects). The main
+  // thread mints it because a Web Worker can't reach localStorage. Falls back to
+  // the worker's ephemeral id if localStorage is blocked (private mode).
+  if (proxy && !proxy.session) {
+    try {
+      var sKey = 'rvim:session:' + window.location.origin + window.location.pathname;
+      var sid = window.localStorage.getItem(sKey);
+      if (!sid) {
+        sid = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+        window.localStorage.setItem(sKey, sid);
+      }
+      proxy.session = sid;
+    } catch (_e) { /* localStorage blocked: worker mints an ephemeral id */ }
+  }
+
   // 1. Core: boot `nvim --embed` in a Web Worker and speak msgpack-RPC to it.
   //    clipboard: 'browser' wires the +/* registers (and, via unnamedplus, plain
   //    y/p/d) to the system clipboard through navigator.clipboard. Pasting may
