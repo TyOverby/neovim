@@ -111,6 +111,7 @@ type fsHandle struct {
 	path  string
 	f     *os.File // nil for directories
 	isDir bool
+	appnd bool // opened O_APPEND: writes go to EOF (WriteAt is illegal on such a file)
 }
 
 type fsTable struct {
@@ -257,7 +258,7 @@ func fsOpen(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	if fi, serr := f.Stat(); serr == nil {
 		size = fi.Size()
 	}
-	id := tbl.add(&fsHandle{path: path, f: f})
+	id := tbl.add(&fsHandle{path: path, f: f, appnd: p.Flags&xAPPEND != 0})
 	return Response{Result: map[string]any{"handle": id, "size": size, "isDir": false}}, nil
 }
 
@@ -329,7 +330,13 @@ func fsWrite(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	var n int
 	if p.Handle != nil {
 		if h := fsTableOf(c).get(*p.Handle); h != nil && h.f != nil {
-			n, err = h.f.WriteAt(payload, int64(pos))
+			// O_APPEND files reject WriteAt (Go) and the kernel forces every write
+			// to EOF regardless of offset — so use Write (pos is meaningless here).
+			if h.appnd {
+				n, err = h.f.Write(payload)
+			} else {
+				n, err = h.f.WriteAt(payload, int64(pos))
+			}
 			if err != nil {
 				return Response{}, err
 			}
