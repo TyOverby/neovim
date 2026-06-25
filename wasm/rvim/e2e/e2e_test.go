@@ -107,6 +107,22 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		assertDisk(t, filepath.Join(root, "from-editor.txt"), "written via\nthe editor\n")
 	})
 
+	// 3b) :w on a BRAND-NEW file (plain :w, no bang). Regression test for the
+	//     errno papercut: the proxy returned Linux ENOENT(2) instead of the
+	//     emscripten ENOENT(44) for a missing file, so nvim's "[New file]" check
+	//     failed and the buffer was spuriously 'readonly' -> :w errored E45.
+	t.Run("fs write (:w on a new file, no bang)", func(t *testing.T) {
+		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'edit', args:['/host/new-file.txt']}, {}])`)
+		ro := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['&readonly'])`)
+		if ro != "0" {
+			t.Fatalf("new file buffer is readonly (%s) — the E45 papercut", ro)
+		}
+		evalRPC(t, ctx, `window.nvim.request('nvim_buf_set_lines', [0, 0, -1, false, ['fresh write']])`)
+		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'write'}, {}])`) // plain :w
+		time.Sleep(400 * time.Millisecond)
+		assertDisk(t, filepath.Join(root, "new-file.txt"), "fresh write\n")
+	})
+
 	// 4) proc: system() spawns a real process on the server.
 	t.Run("proc spawn (system)", func(t *testing.T) {
 		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['system("echo proc-proxy-ok")'])`)

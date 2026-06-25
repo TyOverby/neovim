@@ -103,6 +103,16 @@ addToLibrary({
       return fd >= 100000 && HostFS.open[fd] !== undefined;
     },
 
+    // ERRNO VALUES (load-bearing): the hardcoded errno literals below are
+    // EMSCRIPTEN/WASI numbers, NOT Linux ones — the engine + its libuv use the
+    // musl-wasi table where ENOENT=44, EACCES=2, EIO=29, EINVAL=28, EEXIST=20,
+    // EXDEV=75 (NOT the Linux 2/13/5/22/17/18). Returning a Linux errno makes
+    // nvim misread the result: e.g. a missing-file stat returning Linux-2 reads
+    // as EACCES here, so nvim's `perm == UV_ENOENT` "[New file]" check fails and
+    // `:w` on a brand-new host file spuriously errors E45 'readonly'. (`e.errno`
+    // read off a thrown FS.ErrnoError is already an emscripten value — only the
+    // server-rejection fallback literals needed correcting.)
+    //
     // ERRNO HANDLING (load-bearing): our addToLibrary overrides REPLACE the
     // default __syscall_*/fd_* impls, but they do NOT inherit Emscripten's
     // wrapSyscallFunction try/catch that converts a thrown FS.ErrnoError into a
@@ -158,9 +168,9 @@ addToLibrary({
       for (var i = 0; i < rel.length; i++) { ino = ((ino * 31) + rel.charCodeAt(i)) >>> 0; }
       return HostFS.proxy().request(method, { path: rel }).then(function (resp) {
         var r = resp.result || {};
-        if (!r.exists) { return -2; /* -ENOENT */ }
+        if (!r.exists) { return -44; /* -ENOENT */ }
         return HostFS.doHostStat(r, ino || 1, buf);
-      }, function () { return -2; });
+      }, function () { return -44; });
     },
   },
 
@@ -205,7 +215,7 @@ addToLibrary({
         };
         return fd;
       }, function (e) {
-        return -(e && e.errno ? e.errno : 2); // -ENOENT
+        return -(e && e.errno ? e.errno : 44); // -ENOENT
       });
   },
 
@@ -250,7 +260,7 @@ addToLibrary({
         h.pos += total;
         HEAPU32[pnum >> 2] = total;
         return 0;
-      }, function () { return -5; /* -EIO */ });
+      }, function () { return -29; /* -EIO */ });
   },
 
   // --------------------------------------------------------------------------
@@ -291,7 +301,7 @@ addToLibrary({
         if (h.pos > h.size) { h.size = h.pos; }
         HEAPU32[pnum >> 2] = n;
         return 0;
-      }, function () { return -5; /* -EIO */ });
+      }, function () { return -29; /* -EIO */ });
   },
 
   // --------------------------------------------------------------------------
@@ -347,9 +357,9 @@ addToLibrary({
     var h = HostFS.open[fd];
     return HostFS.proxy().request('fs.stat', { path: h.rel }).then(function (resp) {
       var r = resp.result || {};
-      if (!r.exists) { return -2; /* -ENOENT */ }
+      if (!r.exists) { return -44; /* -ENOENT */ }
       return HostFS.doHostStat(r, fd, buf);
-    }, function () { return -2; });
+    }, function () { return -44; });
   },
 
   // --------------------------------------------------------------------------
@@ -370,9 +380,9 @@ addToLibrary({
       var hh = HostFS.open[dirfd];
       return HostFS.proxy().request('fs.stat', { path: hh.rel }).then(function (resp) {
         var r = resp.result || {};
-        if (!r.exists) { return -2; }
+        if (!r.exists) { return -44; }
         return HostFS.doHostStat(r, dirfd, buf);
-      }, function () { return -2; });
+      }, function () { return -44; });
     }
 
     var full;
@@ -387,21 +397,21 @@ addToLibrary({
       var rest = flags & (~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | 0x800 /*AT_NO_AUTOMOUNT*/));
       var fullDef;
       try { fullDef = SYSCALLS.calculateAt(dirfd, p, allowEmpty); }
-      catch (e2) { return -(e2 && e2.errno ? e2.errno : 2); }
+      catch (e2) { return -(e2 && e2.errno ? e2.errno : 44); }
       try { return SYSCALLS.doStat(nofollow ? FS.lstat : FS.stat, fullDef, buf); }
-      catch (e3) { return -(e3 && e3.errno ? e3.errno : 2); }
+      catch (e3) { return -(e3 && e3.errno ? e3.errno : 44); }
     }
 
     var rel = HostFS.rel(full);
     var method = nofollow ? 'fs.lstat' : 'fs.stat';
     return HostFS.proxy().request(method, { path: rel }).then(function (resp) {
       var r = resp.result || {};
-      if (!r.exists) { return -2; }
+      if (!r.exists) { return -44; }
       // Stable-ish inode from the path so equal paths get equal inos.
       var ino = 0;
       for (var i = 0; i < rel.length; i++) { ino = ((ino * 31) + rel.charCodeAt(i)) >>> 0; }
       return HostFS.doHostStat(r, ino || 1, buf);
-    }, function () { return -2; });
+    }, function () { return -44; });
   },
 
   // --------------------------------------------------------------------------
@@ -601,7 +611,7 @@ addToLibrary({
       }
       h.dentsPos = 0;
       return emit();
-    }, function () { return -5; /* -EIO */ });
+    }, function () { return -29; /* -EIO */ });
   },
 
   // --------------------------------------------------------------------------
@@ -620,12 +630,12 @@ addToLibrary({
       var np = PATH.normalize(full);
       if (np[np.length - 1] === '/') { np = np.substr(0, np.length - 1); }
       try { FS.mkdir(np, mode, 0); return 0; }
-      catch (e2) { return -(e2 && e2.errno ? e2.errno : 17 /*EEXIST*/); }
+      catch (e2) { return -(e2 && e2.errno ? e2.errno : 20 /*EEXIST*/); }
     }
     var rel = HostFS.rel(full);
     return HostFS.proxy().request('fs.mkdir', { path: rel, mode: mode }).then(function () {
       return 0;
-    }, function (e) { return -(e && e.errno ? e.errno : 17); });
+    }, function (e) { return -(e && e.errno ? e.errno : 20); });
   },
 
   // --------------------------------------------------------------------------
@@ -645,14 +655,14 @@ addToLibrary({
       try {
         if (flags === 0) { FS.unlink(full); }
         else if (flags === AT_REMOVEDIR) { FS.rmdir(full); }
-        else { return -22 /*EINVAL*/; }
+        else { return -28 /*EINVAL*/; }
         return 0;
-      } catch (e2) { return -(e2 && e2.errno ? e2.errno : 2); }
+      } catch (e2) { return -(e2 && e2.errno ? e2.errno : 44); }
     }
     var rel = HostFS.rel(full);
     return HostFS.proxy().request('fs.unlink', { path: rel, dir: flags === AT_REMOVEDIR })
       .then(function () { return 0; },
-            function (e) { return -(e && e.errno ? e.errno : 2); });
+            function (e) { return -(e && e.errno ? e.errno : 44); });
   },
 
   // --------------------------------------------------------------------------
@@ -672,15 +682,15 @@ addToLibrary({
     if (!oldHost && !newHost) {
       // SYNC fast path: the default renameat.
       try { FS.rename(oldFull, newFull); return 0; }
-      catch (e2) { return -(e2 && e2.errno ? e2.errno : 2); }
+      catch (e2) { return -(e2 && e2.errno ? e2.errno : 44); }
     }
     if (oldHost !== newHost) {
-      return -18; // -EXDEV: cannot rename across the host/MEMFS boundary.
+      return -75; // -EXDEV: cannot rename across the host/MEMFS boundary.
     }
     return HostFS.proxy().request('fs.rename',
       { from: HostFS.rel(oldFull), to: HostFS.rel(newFull) })
       .then(function () { return 0; },
-            function (e) { return -(e && e.errno ? e.errno : 2); });
+            function (e) { return -(e && e.errno ? e.errno : 44); });
   },
 
   // --------------------------------------------------------------------------
@@ -701,15 +711,15 @@ addToLibrary({
     if (!HostFS.isHostPath(full)) {
       // SYNC fast path: the default faccessat (errno -> -errno via guard).
       return HostFS.guard(function () {
-        if (amode & ~7 /* ~S_IRWXO */) { return -22 /*EINVAL*/; }
+        if (amode & ~7 /* ~S_IRWXO */) { return -28 /*EINVAL*/; }
         var lookup = FS.lookupPath(full, { follow: true });
         var node = lookup.node;
-        if (!node) { return -2 /*ENOENT*/; }
+        if (!node) { return -44 /*ENOENT*/; }
         var perms = '';
         if (amode & 4) { perms += 'r'; }
         if (amode & 2) { perms += 'w'; }
         if (amode & 1) { perms += 'x'; }
-        if (perms && FS.nodePermissions(node, perms)) { return -13 /*EACCES*/; }
+        if (perms && FS.nodePermissions(node, perms)) { return -2 /*EACCES*/; }
         return 0;
       });
     }
@@ -717,15 +727,15 @@ addToLibrary({
     var rel = HostFS.rel(full);
     return HostFS.proxy().request('fs.stat', { path: rel }).then(function (resp) {
       var r = resp.result || {};
-      if (!r.exists) { return -2; /* -ENOENT (F_OK fails) */ }
+      if (!r.exists) { return -44; /* -ENOENT (F_OK fails) */ }
       // R_OK/W_OK/X_OK: answer from the mode's owner bits (the server runs as the
       // user who owns the jail). W_OK is the one nvim's writability probe needs.
       var mode = (typeof r.mode === 'number') ? r.mode : (r.isDir ? 0x41ed : 0x81a4);
-      if ((amode & 4) && !(mode & 0x100 /*S_IRUSR*/)) { return -13; }
-      if ((amode & 2) && !(mode & 0x80  /*S_IWUSR*/)) { return -13; }
-      if ((amode & 1) && !(mode & 0x40  /*S_IXUSR*/)) { return -13; }
+      if ((amode & 4) && !(mode & 0x100 /*S_IRUSR*/)) { return -2; }
+      if ((amode & 2) && !(mode & 0x80  /*S_IWUSR*/)) { return -2; }
+      if ((amode & 1) && !(mode & 0x40  /*S_IXUSR*/)) { return -2; }
       return 0;
-    }, function () { return -2; });
+    }, function () { return -44; });
   },
 
   // --------------------------------------------------------------------------
