@@ -46,6 +46,7 @@ const (
 	oWRONLY = 0x1
 	oCREAT  = 0x40
 	oTRUNC  = 0x200
+	oAPPEND = 0x400
 )
 
 // ---- small assertion helpers ------------------------------------------------
@@ -210,6 +211,49 @@ func Scenarios() []Scenario {
 			}
 			_, err = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
 			return err
+		}},
+		{"fs: append open + write appends to EOF", "fs", func(ctx context.Context, c *Client, root string) error {
+			// Create the file with "AB".
+			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/app.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
+			if err != nil {
+				return err
+			}
+			var op struct {
+				Handle int `json:"handle"`
+			}
+			_ = r.Into(&op)
+			if _, err := req(ctx, c, "fs.write", map[string]any{"handle": op.Handle, "pos": 0}, []byte("AB")); err != nil {
+				return err
+			}
+			if _, err := req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil); err != nil {
+				return err
+			}
+			// Re-open O_WRONLY|O_APPEND and write "CD"; it must append -> "ABCD".
+			r, err = req(ctx, c, "fs.open", map[string]any{"path": "/app.txt", "flags": oWRONLY | oAPPEND}, nil)
+			if err != nil {
+				return err
+			}
+			_ = r.Into(&op)
+			r, err = req(ctx, c, "fs.write", map[string]any{"handle": op.Handle, "pos": 0}, []byte("CD"))
+			if err != nil {
+				return err
+			}
+			var w struct {
+				N int `json:"n"`
+			}
+			_ = r.Into(&w)
+			if w.N != 2 {
+				return fmt.Errorf("append write short: n=%d, want 2", w.N)
+			}
+			_, _ = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
+			onDisk, derr := os.ReadFile(filepath.Join(root, "app.txt"))
+			if derr != nil {
+				return derr
+			}
+			if string(onDisk) != "ABCD" {
+				return fmt.Errorf("append result = %q, want \"ABCD\"", string(onDisk))
+			}
+			return nil
 		}},
 		{"fs: stat missing -> exists:false (not error)", "fs", func(ctx context.Context, c *Client, root string) error {
 			r, err := req(ctx, c, "fs.stat", map[string]any{"path": "/nope.txt"}, nil)
