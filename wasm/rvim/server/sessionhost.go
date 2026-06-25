@@ -107,13 +107,14 @@ func (h *SessionHost) attach(key, root string, sink frameSink) *ptySession {
 	s.mu.Lock()
 	s.client = sink
 	s.detachedAt = time.Time{}
-	// Replay each live PTY's buffered output, then surface any exit that happened
-	// during the outage. Ordering matters: data before exit, per PTY.
+	// Warm reattach: replay only the delta each PTY produced past what the (now
+	// re-bound) client was last sent — no duplication. A FRESH client (cold restore)
+	// has delivered≈produced for these ids, so this is ~empty; it repaints via an
+	// explicit pty.adopt instead. Then surface any exit that happened during the
+	// outage. Ordering: data before exit, per PTY.
 	for _, p := range s.ptys {
-		if len(p.ring) > 0 {
-			_ = sink.send(dataHeader(p.id), p.ring)
-			p.ring = nil
-		}
+		p.replayFrom(sink, p.delivered)
+		p.delivered = p.produced
 		if p.exitPending != nil {
 			_ = sink.send(exitHeader(p.id, p.exitPending.code, p.exitPending.signal), nil)
 			delete(s.ptys, p.id)
@@ -183,19 +184,49 @@ type ptySession struct {
 	detachedAt time.Time
 }
 
-// daemonPty is one durable PTY child within a session.
+// daemonPty is one durable PTY child within a session. Output is kept in an
+// always-rolling ring (the recent screen tail) so a FRESH client can repaint the
+// terminal on cold restore (pty.adopt), while `delivered` tracks how far the
+// current/last client has been sent so a WARM reattach replays only the missed
+// delta (no duplication). All of ring/produced/delivered are guarded by sess.mu.
 type daemonPty struct {
-	id          int
-	cmd         *exec.Cmd
-	ptmx        *os.File
-	sess        *ptySession
-	ring        []byte   // output produced while detached (bounded, guarded by sess.mu)
-	exitPending *ptyExit // set if the PTY exited while detached (guarded by sess.mu)
+	id   int
+	cmd  *exec.Cmd
+	ptmx *os.File
+	sess *ptySession
+
+	ring      []byte // rolling tail of recent output (bounded by host.ringCap)
+	produced  int64  // total bytes ever read from the PTY
+	delivered int64  // produced-offset through which the live client has been sent
+
+	cols, rows int
+	pid        int
+
+	exitPending *ptyExit // set if the PTY exited while detached
 	exited      atomic.Bool
 }
 
 type ptyExit struct {
 	code, signal int
+}
+
+// ringBase is the absolute offset of ring[0].
+func (pt *daemonPty) ringBase() int64 { return pt.produced - int64(len(pt.ring)) }
+
+// replayFrom sends ring bytes covering [from, produced) to sink (clamped to the
+// ring base if `from` has scrolled out). Caller holds sess.mu.
+func (pt *daemonPty) replayFrom(sink frameSink, from int64) {
+	base := pt.ringBase()
+	if from < base {
+		from = base
+	}
+	if from >= pt.produced {
+		return
+	}
+	seg := pt.ring[from-base:]
+	if len(seg) > 0 {
+		_ = sink.send(dataHeader(pt.id), seg)
+	}
 }
 
 // dispatch handles one request frame from the attached client. Spawn/write/
@@ -221,6 +252,9 @@ func (s *ptySession) dispatch(h proxy.Header, payload []byte) {
 		_ = json.Unmarshal(h.Params, &p)
 		if pt := s.get(p.ID); pt != nil && pt.ptmx != nil && !pt.exited.Load() {
 			_ = pty.Setsize(pt.ptmx, &pty.Winsize{Rows: winDim(p.Rows), Cols: winDim(p.Cols)})
+			s.mu.Lock()
+			pt.cols, pt.rows = int(winDim(p.Cols)), int(winDim(p.Rows))
+			s.mu.Unlock()
 		}
 		s.respondOK(h.ID)
 	case "pty.kill":
@@ -234,6 +268,49 @@ func (s *ptySession) dispatch(h proxy.Header, payload []byte) {
 			_ = pt.cmd.Process.Signal(sig)
 		}
 		s.respondOK(h.ID)
+	case "pty.list":
+		s.list(h.ID)
+	case "pty.adopt":
+		var p procIDParam
+		_ = json.Unmarshal(h.Params, &p)
+		s.adopt(h.ID, p.ID)
+	}
+}
+
+// list reports the session's live PTYs (id + last-known size + pid) so a fresh
+// client can discover what is still running and adopt each.
+func (s *ptySession) list(reqID int) {
+	s.mu.Lock()
+	out := make([]map[string]any, 0, len(s.ptys))
+	for _, p := range s.ptys {
+		if p.exited.Load() {
+			continue
+		}
+		out = append(out, map[string]any{"id": p.id, "cols": p.cols, "rows": p.rows, "pid": p.pid})
+	}
+	s.mu.Unlock()
+	s.respond(reqID, map[string]any{"ptys": out})
+}
+
+// adopt binds a FRESH client buffer to an existing live PTY (cold restore): it
+// responds with liveness + size, then replays the full ring so the terminal
+// repaints with the current screen, and resumes live delivery. If the PTY is gone
+// (TTL-reaped or exited), it responds alive:false so the caller can respawn.
+func (s *ptySession) adopt(reqID, id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pt := s.ptys[id]
+	if pt == nil || pt.exited.Load() {
+		s.respondLocked(reqID, map[string]any{"alive": false})
+		return
+	}
+	// Respond first (so the client creates its buffer), then repaint from the ring.
+	// The client buffers any interleaved live data by id and discards it on adopt,
+	// so response-vs-replay ordering need not be exact.
+	s.respondLocked(reqID, map[string]any{"alive": true, "id": id, "cols": pt.cols, "rows": pt.rows, "pid": pt.pid})
+	if s.client != nil {
+		pt.replayFrom(s.client, pt.ringBase())
+		pt.delivered = pt.produced
 	}
 }
 
@@ -272,12 +349,18 @@ func (s *ptySession) spawn(h proxy.Header, _ []byte) {
 		s.respondErr(h.ID, fmt.Sprintf("pty.spawn: %v", err))
 		return
 	}
-	pt := &daemonPty{id: s.host.allocPtyID(), cmd: cmd, ptmx: ptmx, sess: s}
+	pt := &daemonPty{
+		id: s.host.allocPtyID(), cmd: cmd, ptmx: ptmx, sess: s,
+		cols: int(winDim(p.Cols)), rows: int(winDim(p.Rows)),
+	}
+	if cmd.Process != nil {
+		pt.pid = cmd.Process.Pid
+	}
 	s.mu.Lock()
 	s.ptys[pt.id] = pt
 	s.mu.Unlock()
 
-	s.respond(h.ID, map[string]any{"id": pt.id})
+	s.respond(h.ID, map[string]any{"id": pt.id, "pid": pt.pid})
 	go pt.run()
 }
 
@@ -303,25 +386,23 @@ func (pt *daemonPty) run() {
 	pt.reap()
 }
 
-// deliver routes one output chunk. Under sess.mu so the attach/detach boundary is
-// race-free: a chunk is either sent live (client set) or ringed (client nil), and
-// attach flushes the ring before any new live delivery — no loss, no duplication.
+// deliver routes one output chunk, under sess.mu so the attach/detach boundary is
+// race-free. The chunk always rolls into the bounded ring (the recent screen tail,
+// kept for cold repaint); if a client is attached it is also sent live and the
+// delivered offset advances. When detached it just accrues in the ring/produced,
+// so a warm reattach replays exactly [delivered, produced) — no loss, no dup.
 func (pt *daemonPty) deliver(b []byte) {
 	s := pt.sess
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	pt.ring = append(pt.ring, b...)
+	if len(pt.ring) > s.host.ringCap {
+		pt.ring = pt.ring[len(pt.ring)-s.host.ringCap:]
+	}
+	pt.produced += int64(len(b))
 	if s.client != nil {
 		_ = s.client.send(dataHeader(pt.id), b)
-		return
-	}
-	pt.appendRing(b, s.host.ringCap)
-}
-
-// appendRing appends to the replay buffer, dropping oldest bytes past cap.
-func (pt *daemonPty) appendRing(b []byte, cap int) {
-	pt.ring = append(pt.ring, b...)
-	if len(pt.ring) > cap {
-		pt.ring = pt.ring[len(pt.ring)-cap:]
+		pt.delivered = pt.produced
 	}
 }
 
@@ -339,11 +420,9 @@ func (pt *daemonPty) reap() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.client != nil {
-		// Flush any tail buffered before this exit, then the exit, then drop it.
-		if len(pt.ring) > 0 {
-			_ = s.client.send(dataHeader(pt.id), pt.ring)
-			pt.ring = nil
-		}
+		// Flush any undelivered tail, then the exit, then drop the PTY.
+		pt.replayFrom(s.client, pt.delivered)
+		pt.delivered = pt.produced
 		_ = s.client.send(exitHeader(pt.id, code, sig), nil)
 		delete(s.ptys, pt.id)
 		return
@@ -381,6 +460,16 @@ func (s *ptySession) send(h proxy.Header, payload []byte) {
 func (s *ptySession) respond(id int, result any) {
 	rj, _ := json.Marshal(result)
 	s.send(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: rj}, nil)
+}
+
+// respondLocked writes a response directly to the live client; the caller already
+// holds sess.mu (so it must not go through s.send, which re-locks).
+func (s *ptySession) respondLocked(id int, result any) {
+	if s.client == nil {
+		return
+	}
+	rj, _ := json.Marshal(result)
+	_ = s.client.send(proxy.Header{T: proxy.TRes, ID: id, OK: boolp(true), Result: rj}, nil)
 }
 
 func (s *ptySession) respondOK(id int) { s.respond(id, map[string]any{"ok": true}) }

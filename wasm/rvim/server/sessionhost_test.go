@@ -222,6 +222,76 @@ func TestSessionGCKillsIdle(t *testing.T) {
 	}
 }
 
+// resResult returns the result object of the response frame with the given id.
+func (m *memSink) resResult(id int) map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.frames {
+		if f.h.T == proxy.TRes && f.h.ID == id && len(f.h.Result) > 0 {
+			var r map[string]any
+			if json.Unmarshal(f.h.Result, &r) == nil {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+// TestSessionAdoptColdRepaint exercises the cold-restore path: a FRESH client
+// attaches the same session (warm auto-replay sends nothing it hasn't seen), then
+// pty.adopt repaints the terminal from the full rolling ring and reports liveness.
+// adopt of an unknown id reports not-alive (so the caller respawns); pty.list shows
+// the live PTY.
+func TestSessionAdoptColdRepaint(t *testing.T) {
+	host := NewSessionHost()
+	defer host.Close()
+
+	sink1 := &memSink{}
+	sess := host.attach("s1", "", sink1)
+	spawnPTY(t, sess, `printf 'SCREEN-MARK\r\n'; sleep 30`)
+	id := spawnReqID(t, sink1)
+	waitFor(t, func() bool { return strings.Contains(string(sink1.data(id)), "SCREEN-MARK") })
+
+	// A fresh client (cold restore): warm auto-replay must NOT resend output the
+	// session already delivered to the prior client — the fresh screen stays blank
+	// until it explicitly adopts.
+	sess.detach(sink1)
+	sink2 := &memSink{}
+	host.attach("s1", "", sink2)
+	if strings.Contains(string(sink2.data(id)), "SCREEN-MARK") {
+		t.Fatalf("warm auto-replay re-sent already-delivered output to a fresh client")
+	}
+
+	// adopt -> alive + full-ring repaint.
+	dispatchReq(sess, 7, "pty.adopt", map[string]any{"id": id})
+	if a := sink2.resResult(7); a == nil || a["alive"] != true {
+		t.Fatalf("adopt of live pty: result=%v", a)
+	}
+	if !strings.Contains(string(sink2.data(id)), "SCREEN-MARK") {
+		t.Fatalf("adopt did not repaint from the ring: %q", sink2.data(id))
+	}
+
+	// adopt of a dead/unknown id -> not alive (caller respawns).
+	dispatchReq(sess, 8, "pty.adopt", map[string]any{"id": 999999})
+	if a := sink2.resResult(8); a == nil || a["alive"] != false {
+		t.Fatalf("adopt of dead pty: result=%v", a)
+	}
+
+	// list -> the live PTY is reported.
+	dispatchReq(sess, 9, "pty.list", map[string]any{})
+	lst := sink2.resResult(9)
+	ptys, _ := lst["ptys"].([]any)
+	if len(ptys) != 1 {
+		t.Fatalf("pty.list = %v, want 1 live pty", lst)
+	}
+
+	dispatchReq(sess, 10, "pty.kill", map[string]any{"id": id, "signal": 9})
+}
+
+func dispatchReq(s *ptySession, reqID int, method string, params map[string]any) {
+	s.dispatch(proxy.Header{T: proxy.TReq, ID: reqID, Method: method, Params: mustJSON(params)}, nil)
+}
+
 // TestSessionWriteRoundTrip: input written to a PTY reaches the child and drives
 // output. (A PTY echoes input by default, so we assert the child's marker appears
 // rather than fighting echo for an exact match.)
