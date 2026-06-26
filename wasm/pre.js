@@ -74,6 +74,7 @@
   var cfgFiles = null;  // { '/abs/path': 'contents' | Uint8Array } files to seed
   var cfgCwd = null;    // '/abs/path' working directory to chdir into last
   var proxyUser = null; // server-reported user of the IO proxy (browser -> $USER)
+  var proxyHome = null; // --rc remote: IO host's home in editor-space (-> $HOME)
   if (typeof globalThis !== 'undefined') {
     if (globalThis.__nvimArgs) {
       args = globalThis.__nvimArgs;
@@ -86,6 +87,9 @@
     // browser default for $USER/$LOGNAME -- a caller's __nvimEnv still overrides it.
     if (typeof globalThis.__nvimProxyUser === 'string' && globalThis.__nvimProxyUser) {
       proxyUser = globalThis.__nvimProxyUser;
+    }
+    if (typeof globalThis.__nvimProxyHome === 'string' && globalThis.__nvimProxyHome) {
+      proxyHome = globalThis.__nvimProxyHome;
     }
     if (globalThis.__nvimEnv) { cfgEnv = globalThis.__nvimEnv; }
     if (globalThis.__nvimFiles) { cfgFiles = globalThis.__nvimFiles; }
@@ -158,7 +162,9 @@
         }
       }
     } else {
-      ENV['HOME'] = '/root';
+      // --rc remote points $HOME at the IO host's home (in editor-space, via the
+      // mount) so nvim loads the box's config/plugins; otherwise the MEMFS default.
+      ENV['HOME'] = proxyHome || '/root';
       // Under the standalone proxy, $USER reflects the user the IO host runs as
       // (the remote user under --remote); otherwise the standalone 'web' default.
       ENV['USER'] = proxyUser || 'web';

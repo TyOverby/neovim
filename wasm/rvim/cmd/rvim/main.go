@@ -30,6 +30,7 @@ func main() {
 		mount       = flag.String("mount", "/host", "in-editor mount prefix mapped to --root")
 		assetsDir   = flag.String("assets-dir", "", "serve the browser bundle from this dir (the build-site.sh output)")
 		proxy       = flag.Bool("proxy", false, "generate /proxy-config.js so visiting the page is the standalone app")
+		rc          = flag.String("rc", "", "where the in-browser nvim's config/$HOME comes from: remote|local|builtin (default: remote with --remote, else builtin)")
 		remote      = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> <remote-rvim> --serve-stdio`")
 		remoteRvim  = flag.String("remote-rvim", "rvim", "path to rvim ON the remote host (like rsync's --rsync-path). `ssh host cmd` does NOT source ~/.bashrc, so the remote PATH usually excludes ~/bin — pass an absolute or ~/ path (the remote shell expands ~) if rvim isn't in the default PATH")
 		serveStdio  = flag.Bool("serve-stdio", false, "(internal) run the io-proxy over stdin/stdout — the remote end of --remote")
@@ -40,6 +41,23 @@ func main() {
 	)
 	flag.Parse()
 	_ = noOpen // auto-open lands in a later phase; the flag is accepted now.
+
+	// --rc: where nvim's config/$HOME comes from. Default to remote when editing a
+	// remote host (you almost always want the box's setup), else builtin (keep the
+	// plain local demo config-free, as before).
+	rcMode := *rc
+	if rcMode == "" {
+		if *remote != "" {
+			rcMode = "remote"
+		} else {
+			rcMode = "builtin"
+		}
+	}
+	switch rcMode {
+	case "remote", "local", "builtin":
+	default:
+		log.Fatalf("rvim: invalid --rc %q (want remote|local|builtin)", *rc)
+	}
 
 	// --session-host: the durable-PTY daemon. Independent of any connection; owns
 	// terminal shells so they survive transport drops. Singleton (flocked).
@@ -93,6 +111,7 @@ func main() {
 		Root:        jailRoot,
 		Mount:       *mount,
 		ProxyConfig: *proxy,
+		RC:          rcMode,
 	}
 	if *remote != "" {
 		// Relay mode: each /proxy connection runs `ssh -T <dest> rvim --serve-stdio
@@ -145,6 +164,16 @@ func main() {
 		}
 	} else {
 		fmt.Printf("  filesystem root : %s  (jail root; mount %s)\n", jailRoot, *mount)
+	}
+	if *proxy {
+		switch rcMode {
+		case "remote":
+			fmt.Printf("  nvim config    : remote ($HOME from the IO host via %s, if under --root)\n", *mount)
+		case "local":
+			fmt.Printf("  nvim config    : local (this machine's ~/.config/nvim, seeded into the browser)\n")
+		default:
+			fmt.Printf("  nvim config    : builtin (nvim defaults; no user config)\n")
+		}
 	}
 	fmt.Printf("  bound to %s (loopback default; no token — single-user model)\n", *bind)
 	if cfg.Assets == nil {

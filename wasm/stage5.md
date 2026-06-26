@@ -137,6 +137,23 @@ to consult the FS routing table — §5), not a blind byte-forwarder.
 
 ## 5. Filesystem: a two-layer prefix-routing table
 
+> **`--rc` shipped** (the config half). Rather than the full live prefix-routing
+> table, `--rc` is implemented via the **already-built `$HOME`/seed seam** (the
+> same hello→identity→`pre.js` path the `$USER` work added):
+> - **`--rc remote`** (default with `--remote`) — the hello ack reports the IO
+>   host's home + its in-editor path (`homeDir`, non-empty only when the home is
+>   under `--root`); the engine worker sets `$HOME` to it **before `main()`**, so
+>   nvim loads the host's `~/.config/nvim` **and plugins** live through the proxy.
+> - **`--rc local`** — the app-server inlines its **own** `~/.config/nvim` into
+>   `/proxy-config.js` (`window.__NVIM_RC_FILES`, capped); `app.js` seeds it into
+>   MEMFS via `create({ filesystem })`. Config dir only (no plugins/data) — for a
+>   full live setup use `remote`.
+> - **`--rc builtin`** (default without `--remote`) — no external config; defaults.
+>
+> So `remote` = live `$HOME` redirect through the existing FS proxy (no new routing
+> layer, no relay decode); `local` = a one-shot MEMFS seed from the app-server's own
+> disk. The full live two-layer table below (and `--site`) is still future work.
+
 `--site` and `--rc` require the app server to sometimes **serve a file itself**
 rather than forward it. Model the whole FS layer as **one prefix-routing table**,
 of which site / rc / project are just entries. The routing splits cleanly across
@@ -418,7 +435,7 @@ push**.
 | 5 | Go io-proxy: sockets | tcp/unix/dns + inbound listen/accept; conformance | med |
 | 6 | `cancel` + ReconnectingProxy | `cancel` frame end-to-end; engine-worker reconnect wrapper (`close()`-on-drop); fault-injection tests | **high** |
 | 7 | SSH-stdio remote (**done**) | `--remote`, `--serve-stdio`; relay = framing transcode; conformance + browser e2e over a subprocess stand-in; assume-on-PATH | med |
-| 8 | FS routing table | two-layer `--site`/`--rc` (bundled/local/remote); version-skew warnings | med |
+| 8 | FS routing table | `--rc remote/local/builtin` **done** (via the `$HOME`/seed seam — §5); full two-layer `--site`/live-`--rc` table + version-skew warnings still future | med |
 | 9 | Auth/TLS guard + polish | `--bind`/`--token`/TLS gate; `--no-open`; unsaved-buffer safety net; docs | med |
 | D | Durable `:terminal` (**done**) | `rvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death | med |
 | E | Cold restore (**done**) | `:mksession` rehydration (§6.2); stable localStorage session id + daemon adopt-on-spawn by (cwd,argv); close tab → reopen → `:source` reattaches live shells; no C change / no wasm recompile | med |

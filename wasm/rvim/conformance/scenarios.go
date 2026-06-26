@@ -138,7 +138,9 @@ func Scenarios() []Scenario {
 					Mount string `json:"mount"`
 					Root  string `json:"root"`
 				} `json:"config"`
-				User string `json:"user"`
+				User    string `json:"user"`
+				Home    string `json:"home"`
+				HomeDir string `json:"homeDir"`
 			}
 			if err := r.Into(&out); err != nil {
 				return err
@@ -149,6 +151,15 @@ func Scenarios() []Scenario {
 			// The hello reports the io-proxy process's user (browser -> $USER).
 			if want := expectedProxyUser(); out.User != want {
 				return fmt.Errorf("hello user = %q, want %q", out.User, want)
+			}
+			// ...and its home dir. The jail root here is a fresh temp dir that does
+			// NOT contain the home, so the in-editor homeDir must be empty (home is
+			// outside the mount, so --rc remote can't reach it).
+			if out.Home == "" {
+				return fmt.Errorf("hello reported no home dir")
+			}
+			if out.HomeDir != "" {
+				return fmt.Errorf("homeDir = %q, want empty (home is outside the temp jail root)", out.HomeDir)
 			}
 			// SECURITY: a client-supplied root must NOT widen the jail; the server
 			// forces its own --root back.

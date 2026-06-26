@@ -532,6 +532,14 @@ You land in `/path/to/project` (mounted in-editor at `/host`) with a full editor
 - **`:terminal`** — a real PTY on the server (via `creack/pty`); resize propagates.
 - **LSP** — a language server configured as a stdio job is spawned on the server
   and "just works" (so does `vim.system` / `vim.lsp`).
+- **Config** — with `--remote` the editor loads **your config from the host**
+  (`--rc remote`, the default): `$HOME` is pointed at the host's home via the mount,
+  so `~/.config/nvim` *and its plugins* load live through the proxy (`$USER` reflects
+  the host user too). `--rc local` instead seeds the **app-server's own**
+  `~/.config/nvim` into the browser (config dir only); `--rc builtin` (the default
+  without `--remote`) uses nvim's defaults. `--rc remote` needs the host's home to
+  fall under `--root` (e.g. `--root /` or `--root ~`); otherwise it warns and stays
+  on defaults.
 
 `--root` defaults to the server's cwd; `--port` defaults to `8001`. The server
 binds `127.0.0.1` only. `--proxy` makes visiting the page the standalone app

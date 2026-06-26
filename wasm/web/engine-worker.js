@@ -117,6 +117,18 @@ onmessage = function (e) {
         if (helloResult && typeof helloResult.user === 'string' && helloResult.user) {
           self.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
         }
+        // --rc remote: point $HOME at the IO host's home (reported by the hello as
+        // the in-editor `homeDir`), so nvim loads the box's config + plugins live.
+        // pre.js reads __nvimProxyHome before main(). Only when the host's home is
+        // reachable under the mount (homeDir non-empty); else warn and stay default.
+        if (init.proxy.rc === 'remote' && helloResult) {
+          if (typeof helloResult.homeDir === 'string' && helloResult.homeDir) {
+            self.__nvimProxyHome = helloResult.homeDir;
+          } else if (!self.__nvimProxyHome) {
+            try { postMessage({ kind: 'stderr', text: 'proxy: --rc remote but the host home (' +
+              (helloResult.home || '?') + ') is not under --root; $HOME not redirected, config not loaded' }); } catch (_e) {}
+          }
+        }
         clearTimeout(bootBackstop);
         bootEngine();
       }

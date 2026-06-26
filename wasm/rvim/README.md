@@ -141,7 +141,18 @@ Two ways to serve the browser bundle:
   (`e2e/TestBrowserRemoteRelay`: real engine → app-server relay → subprocess →
   remote disk). A real ssh-to-localhost run needs sshd + a key configured (not in
   this sandbox); the subprocess stand-in exercises the same transport.
-- Later phases: FS routing (`--site`/`--rc`), auth/TLS, Phase-6 `cancel`.
+- **Phase 8 (`--rc` done):** `--rc remote|local|builtin` selects where the
+  in-browser nvim's config/`$HOME` comes from (default `remote` with `--remote`,
+  else `builtin`). `remote` redirects `$HOME` to the IO host's home via the mount
+  (the hello reports `home`/`homeDir`; `pre.js` sets it before `main()`), so the
+  box's config + plugins load live through the proxy. `local` inlines the
+  app-server's own `~/.config/nvim` into `/proxy-config.js` and seeds it into MEMFS
+  (config dir only). `builtin` is nvim's defaults. Verified by `server` unit tests
+  (`rc_test.go`), the conformance base-hello (`home`/`homeDir`), and two browser
+  e2e tests (`e2e/e2e_rc_test.go`: remote `$HOME` redirect + host config loaded;
+  local seed loaded). The full live two-layer `--site`/`--rc` routing table is
+  still future work.
+- Later phases: full FS routing table (`--site`/live routing), auth/TLS, Phase-6 `cancel`.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:
 …}` in `conformance/gotarget.go`; each handler phase adds its cap there and the

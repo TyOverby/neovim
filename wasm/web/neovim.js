@@ -483,7 +483,14 @@
     if (proxy.session != null && typeof proxy.session !== 'string') {
       throw new Error('Neovim.create: proxy.session must be a string (the durable-PTY session id)');
     }
-    return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket, session: proxy.session };
+    // rc (optional): where nvim's config/$HOME comes from — 'remote' | 'local' |
+    // 'builtin' (set by rvim's /proxy-config.js). 'remote' makes the engine worker
+    // point $HOME at the IO host's home (reported in the hello). Unknown/absent is
+    // treated as 'builtin' downstream.
+    if (proxy.rc != null && typeof proxy.rc !== 'string') {
+      throw new Error('Neovim.create: proxy.rc must be a string (remote|local|builtin)');
+    }
+    return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket, session: proxy.session, rc: proxy.rc };
   }
 
   function create(opts) {

@@ -23,6 +23,12 @@
   var proxy = (typeof window.__NVIM_PROXY === 'object' && window.__NVIM_PROXY) || null;
   var mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
 
+  // --rc local: rvim's /proxy-config.js inlined the app-server's own ~/.config/nvim
+  // as window.__NVIM_RC_FILES { '/abs/path': 'contents' }. Seed it into the engine's
+  // MEMFS at boot so nvim loads that config. (--rc remote instead redirects $HOME to
+  // the IO host via the hello — no seed; handled in the engine worker / pre.js.)
+  var rcFiles = (typeof window.__NVIM_RC_FILES === 'object' && window.__NVIM_RC_FILES) || undefined;
+
   // Durable-PTY session id: left to the engine worker, which mints a UNIQUE id per
   // tab/load (so two tabs to the same host get independent terminal sessions — a
   // shared/stable id would make them clobber each other's single daemon client).
@@ -37,7 +43,7 @@
   //    prompt for clipboard-read permission the first time; needs a secure context
   //    (HTTPS or localhost). When `proxy` is present it is threaded through; when
   //    null, create() ignores it and the no-proxy path is byte-for-byte unchanged.
-  var nvim = Neovim.create({ args: [ '-n' ], clipboard: 'browser', proxy: proxy });
+  var nvim = Neovim.create({ args: [ '-n' ], clipboard: 'browser', proxy: proxy, filesystem: rcFiles });
 
   // Track proxy connection state so we can reflect it in the status line. The
   // engine worker posts {kind:'stdout', text:'proxy: connected to ...'} on success
