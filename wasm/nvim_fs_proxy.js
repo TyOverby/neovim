@@ -80,16 +80,26 @@ addToLibrary({
       var m = (typeof globalThis !== 'undefined' && globalThis.__nvimProxyMount) || null;
       return (typeof m === 'string' && m.length) ? m : null;
     },
+    // A subtree UNDER the mount that is served LOCALLY from MEMFS instead of being
+    // proxied to the remote (set by the engine worker for `--rc local`: the seeded
+    // laptop config at $HOME/.config/nvim, while the rest of $HOME stays remote).
+    localShadow: function () {
+      var s = (typeof globalThis !== 'undefined' && globalThis.__nvimLocalShadow) || null;
+      return (typeof s === 'string' && s.length) ? s : null;
+    },
     // True when proxying is active AND `path` is under the mount prefix. A bare
     // mount path ("/host") and any child ("/host/...") both count, so `:e /host/`
-    // (directory listing of the mount root) works.
+    // (directory listing of the mount root) works. A locally-shadowed subtree is
+    // excluded, so those reads fall through to MEMFS (the seeded config).
     isHostPath: function (path) {
       if (!HostFS.proxy()) { return false; }
       var m = HostFS.mount();
       if (!m || typeof path !== 'string') { return false; }
-      if (path === m) { return true; }
+      if (path !== m && path.indexOf(m + '/') !== 0) { return false; }
       // "/host" matches "/host/..." and "/host/" but not "/hostile".
-      return path.indexOf(m + '/') === 0;
+      var sh = HostFS.localShadow();
+      if (sh && (path === sh || path.indexOf(sh + '/') === 0)) { return false; }
+      return true;
     },
     // Strip the mount prefix -> the server-relative path (always leading-slash,
     // server jails it to its root). "/host" -> "/", "/host/a/b" -> "/a/b".

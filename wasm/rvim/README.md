@@ -145,13 +145,17 @@ Two ways to serve the browser bundle:
   in-browser nvim's config/`$HOME` comes from (default `remote` with `--remote`,
   else `builtin`). `remote` redirects `$HOME` to the IO host's home via the mount
   (the hello reports `home`/`homeDir`; `pre.js` sets it before `main()`), so the
-  box's config + plugins load live through the proxy. `local` inlines the
-  app-server's own `~/.config/nvim` into `/proxy-config.js` and seeds it into MEMFS
-  (config dir only). `builtin` is nvim's defaults. Verified by `server` unit tests
-  (`rc_test.go`), the conformance base-hello (`home`/`homeDir`), and two browser
-  e2e tests (`e2e/e2e_rc_test.go`: remote `$HOME` redirect + host config loaded;
-  local seed loaded). The full live two-layer `--site`/`--rc` routing table is
-  still future work.
+  box's config + plugins load live through the proxy. `local` keeps `$HOME` the
+  host's but **shadows** `$HOME/.config/nvim` to the app-server's own config:
+  inlined into `/proxy-config.js`, remapped by the engine worker onto the
+  editor-space config dir, with `__nvimLocalShadow` making `nvim_fs_proxy.js`
+  exclude that subtree from the proxy (served from MEMFS) — so you edit with your
+  laptop's config while shada/data stay on the host. `builtin` is nvim's defaults;
+  `$USER` always reflects the host. Verified by `server` unit tests (`rc_test.go`),
+  the conformance base-hello (`home`/`homeDir`), and three browser e2e tests
+  (`e2e/e2e_rc_test.go`: remote `$HOME` redirect + host config; local fallback seed;
+  local home-mapped with the shadow proven against a differing remote config). The
+  full live two-layer `--site`/`--rc` routing table is still future work.
 - Later phases: full FS routing table (`--site`/live routing), auth/TLS, Phase-6 `cancel`.
 
 The Go server's implemented capabilities are tracked by `GoTarget{Implemented:

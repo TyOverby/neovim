@@ -144,10 +144,13 @@ to consult the FS routing table — §5), not a blind byte-forwarder.
 >   host's home + its in-editor path (`homeDir`, non-empty only when the home is
 >   under `--root`); the engine worker sets `$HOME` to it **before `main()`**, so
 >   nvim loads the host's `~/.config/nvim` **and plugins** live through the proxy.
-> - **`--rc local`** — the app-server inlines its **own** `~/.config/nvim` into
->   `/proxy-config.js` (`window.__NVIM_RC_FILES`, capped); `app.js` seeds it into
->   MEMFS via `create({ filesystem })`. Config dir only (no plugins/data) — for a
->   full live setup use `remote`.
+> - **`--rc local`** — `$HOME`/`$USER` are still the host's, but `$HOME/.config/nvim`
+>   is **shadowed** to the app-server's own config: the app-server inlines its
+>   `~/.config/nvim` into `/proxy-config.js` (`window.__NVIM_RC_FILES`, capped); the
+>   engine worker remaps the seed onto the editor-space config dir and sets
+>   `__nvimLocalShadow` so `nvim_fs_proxy.js`'s `isHostPath` excludes that subtree
+>   (served from MEMFS, not the remote) — a per-prefix local route. Everything else
+>   under `$HOME` (shada, data) stays on the host. Config dir only (no plugins).
 > - **`--rc builtin`** (default without `--remote`) — no external config; defaults.
 >
 > So `remote` = live `$HOME` redirect through the existing FS proxy (no new routing

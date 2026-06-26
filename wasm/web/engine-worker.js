@@ -117,16 +117,36 @@ onmessage = function (e) {
         if (helloResult && typeof helloResult.user === 'string' && helloResult.user) {
           self.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
         }
-        // --rc remote: point $HOME at the IO host's home (reported by the hello as
-        // the in-editor `homeDir`), so nvim loads the box's config + plugins live.
+        // --rc remote/local: point $HOME at the IO host's home (reported by the
+        // hello as the in-editor `homeDir`), so $HOME/$USER reflect the box.
         // pre.js reads __nvimProxyHome before main(). Only when the host's home is
         // reachable under the mount (homeDir non-empty); else warn and stay default.
-        if (init.proxy.rc === 'remote' && helloResult) {
-          if (typeof helloResult.homeDir === 'string' && helloResult.homeDir) {
-            self.__nvimProxyHome = helloResult.homeDir;
+        //   remote — nvim loads the box's config + plugins live from $HOME.
+        //   local  — $HOME is the box's, but $HOME/.config/nvim is SHADOWED to the
+        //            seeded laptop config (served from MEMFS, not the remote): set
+        //            __nvimLocalShadow and remap the seed onto the editor-space dir.
+        var rc = init.proxy.rc;
+        if ((rc === 'remote' || rc === 'local') && helloResult) {
+          var homeDir = (typeof helloResult.homeDir === 'string') ? helloResult.homeDir : '';
+          if (homeDir) {
+            self.__nvimProxyHome = homeDir;
+            if (rc === 'local') {
+              var shadow = homeDir + '/.config/nvim';
+              self.__nvimLocalShadow = shadow;
+              var FROM = '/root/.config/nvim';   // where the server keyed the seed
+              if (self.__nvimFiles) {
+                var remapped = {};
+                for (var k in self.__nvimFiles) {
+                  if (!Object.prototype.hasOwnProperty.call(self.__nvimFiles, k)) { continue; }
+                  remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = self.__nvimFiles[k];
+                }
+                self.__nvimFiles = remapped;
+              }
+            }
           } else if (!self.__nvimProxyHome) {
-            try { postMessage({ kind: 'stderr', text: 'proxy: --rc remote but the host home (' +
-              (helloResult.home || '?') + ') is not under --root; $HOME not redirected, config not loaded' }); } catch (_e) {}
+            try { postMessage({ kind: 'stderr', text: 'proxy: --rc ' + rc + ' but the host home (' +
+              (helloResult.home || '?') + ') is not under --root; $HOME stays /root' +
+              (rc === 'remote' ? ', config not loaded' : ' (seeded config still loads)') }); } catch (_e) {}
           }
         }
         clearTimeout(bootBackstop);

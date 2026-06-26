@@ -170,7 +170,7 @@ func main() {
 		case "remote":
 			fmt.Printf("  nvim config    : remote ($HOME from the IO host via %s, if under --root)\n", *mount)
 		case "local":
-			fmt.Printf("  nvim config    : local (this machine's ~/.config/nvim, seeded into the browser)\n")
+			fmt.Printf("  nvim config    : local (this machine's ~/.config/nvim shadows the host's $HOME/.config/nvim)\n")
 		default:
 			fmt.Printf("  nvim config    : builtin (nvim defaults; no user config)\n")
 		}
