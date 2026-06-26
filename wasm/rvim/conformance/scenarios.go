@@ -6,9 +6,25 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"time"
 )
+
+// expectedProxyUser mirrors server.serverUser: the username the io-proxy process
+// runs as, reported in the hello ack (browser -> $USER). Kept in sync by hand so
+// the conformance suite pins the wiring.
+func expectedProxyUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	for _, k := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // Scenario is one conformance check. Run executes against a client that has
 // already completed the hello handshake, jailed to `root` (a fresh temp dir).
@@ -122,12 +138,17 @@ func Scenarios() []Scenario {
 					Mount string `json:"mount"`
 					Root  string `json:"root"`
 				} `json:"config"`
+				User string `json:"user"`
 			}
 			if err := r.Into(&out); err != nil {
 				return err
 			}
 			if out.Config.Mount != "/host" {
 				return fmt.Errorf("mount not echoed: %s", r.Result)
+			}
+			// The hello reports the io-proxy process's user (browser -> $USER).
+			if want := expectedProxyUser(); out.User != want {
+				return fmt.Errorf("hello user = %q, want %q", out.User, want)
 			}
 			// SECURITY: a client-supplied root must NOT widen the jail; the server
 			// forces its own --root back.

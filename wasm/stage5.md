@@ -122,6 +122,13 @@ client / app / remote are **separately-built binaries that can drift**:
   reconnection model needs it (to bound suspended syscalls), and long ops (a big
   `:grep`, a slow LSP request) become abortable. Spike A confirms a cancel aborts
   a slow op promptly instead of waiting it out.
+- **`user` in the hello ack** — the io-proxy reports the user it runs as (the
+  *remote* user under `--remote`, since the relay forwards the hello to the remote
+  `--serve-stdio` process, which answers it). The engine worker defers the engine
+  boot until the first hello settles and exports that as `$USER`/`$LOGNAME` before
+  `main()` runs, so the in-browser editor's `$USER` matches the host whose files
+  it edits — not the standalone `'web'` default. A caller's `create({ env })` still
+  wins; a missing/unreachable server falls back to `'web'` (boot proceeds degraded).
 
 The app server is a **protocol participant on both sides** (it terminates frames
 to consult the FS routing table — §5), not a blind byte-forwarder.

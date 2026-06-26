@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -456,6 +457,11 @@ func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 			"hello":         true,
 			"config":        ctx.Config,
 			"serverVersion": proxy.ProtocolVersion,
+			// The user the io-proxy process runs as — the "accessed" user. Under
+			// --remote this handler runs in the remote `--serve-stdio` process (the
+			// relay forwards the hello untouched), so it reports the REMOTE user; in
+			// the local case it's the local user. The browser exposes it as $USER.
+			"user": serverUser(),
 		})
 		_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(true), Result: ack}, nil)
 
@@ -527,6 +533,24 @@ func callHandler(fn HandlerFunc, ctx *Ctx, params json.RawMessage, payload []byt
 }
 
 func boolp(b bool) *bool { return &b }
+
+// serverUser reports the username this io-proxy process runs as — the user
+// "being accessed" through the proxy. It is sent in the hello ack so the browser
+// engine can expose it as $USER (instead of the hardcoded "web"). user.Current()
+// is the source of truth; fall back to $USER/$LOGNAME (e.g. a static build with
+// no /etc/passwd entry), and to "" if nothing is known (the browser then keeps
+// its default).
+func serverUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	for _, k := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // ---- lifecycle --------------------------------------------------------------
 

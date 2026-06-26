@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -85,6 +86,23 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("/host/preexisting.txt"), "\\n")'])`)
 		if !strings.Contains(got, "disk content 42") {
 			t.Fatalf("editor read wrong content: %q", got)
+		}
+	})
+
+	// 1b) $USER reflects the user the IO proxy runs as (here the in-process server,
+	//     i.e. this test process's user) rather than the standalone "web" default.
+	//     The browser learns it from the hello ack and pre.js exports it before boot.
+	t.Run("env $USER from proxy", func(t *testing.T) {
+		want := ""
+		if u, err := user.Current(); err == nil {
+			want = u.Username
+		}
+		if want == "" {
+			t.Skip("cannot determine current user")
+		}
+		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['$USER'])`)
+		if got != want {
+			t.Fatalf("$USER = %q, want %q (the proxied user, not the 'web' default)", got, want)
 		}
 	})
 

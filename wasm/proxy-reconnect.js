@@ -32,6 +32,10 @@
   //                  close(). onmessage receives { data }.
   //   helloParams  - the handshake params ({ mount, root, ... }); the client
   //                  sends its protocol version automatically.
+  //   onHello(res) - optional; called with the hello ack's `result` object on each
+  //                  successful (re)connect (e.g. { config, serverVersion, user }).
+  //                  Lets the worker read server-reported identity (the proxied
+  //                  user → $USER) before booting the engine.
   //   onStatus(ev) - optional; ev.kind in connected|disconnected|error|reconnecting.
   //   baseBackoff  - first reconnect delay ms (default 300).
   //   maxBackoff   - backoff ceiling ms (default 30000).
@@ -39,6 +43,7 @@
     var ProxyClient = opts.ProxyClient;
     var dial = opts.dial;
     var helloParams = opts.helloParams || {};
+    var onHello = opts.onHello || function () {};
     var onStatus = opts.onStatus || function () {};
     var baseBackoff = opts.baseBackoff || 300;
     var maxBackoff = opts.maxBackoff || 30000;
@@ -93,12 +98,13 @@
 
       ws.onmessage = function (ev) { if (transport.onFrame) { transport.onFrame(ev.data); } };
       ws.onopen = function () {
-        client.hello(helloParams).then(function () {
+        client.hello(helloParams).then(function (ack) {
           if (stopped) { try { ws.close(); } catch (_e) {} return; }
           current = client;
           connected = true;
           attempts = 0;
           settled = true;
+          try { onHello(ack && ack.result); } catch (_e) {}
           onStatus({ kind: 'connected' });
         }, function (err) {
           // Handshake failed: drop and let onclose drive the reconnect.

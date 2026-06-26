@@ -73,12 +73,19 @@
   var cfgEnv = null;    // { KEY: 'val', ... } environment overrides (caller wins)
   var cfgFiles = null;  // { '/abs/path': 'contents' | Uint8Array } files to seed
   var cfgCwd = null;    // '/abs/path' working directory to chdir into last
+  var proxyUser = null; // server-reported user of the IO proxy (browser -> $USER)
   if (typeof globalThis !== 'undefined') {
     if (globalThis.__nvimArgs) {
       args = globalThis.__nvimArgs;
     }
     if (globalThis.__nvimChannel) {
       Module['nvimChannel'] = globalThis.__nvimChannel;
+    }
+    // The engine worker stashes the proxied user here from the hello ack (set
+    // before the engine boots; see wasm/web/engine-worker.js). It becomes the
+    // browser default for $USER/$LOGNAME -- a caller's __nvimEnv still overrides it.
+    if (typeof globalThis.__nvimProxyUser === 'string' && globalThis.__nvimProxyUser) {
+      proxyUser = globalThis.__nvimProxyUser;
     }
     if (globalThis.__nvimEnv) { cfgEnv = globalThis.__nvimEnv; }
     if (globalThis.__nvimFiles) { cfgFiles = globalThis.__nvimFiles; }
@@ -152,8 +159,10 @@
       }
     } else {
       ENV['HOME'] = '/root';
-      ENV['USER'] = 'web';
-      ENV['LOGNAME'] = 'web';
+      // Under the standalone proxy, $USER reflects the user the IO host runs as
+      // (the remote user under --remote); otherwise the standalone 'web' default.
+      ENV['USER'] = proxyUser || 'web';
+      ENV['LOGNAME'] = proxyUser || 'web';
       ENV['PWD'] = '/root';
       ENV['TERM'] = 'xterm-256color';
       ENV['LANG'] = 'C.UTF-8';
