@@ -73,8 +73,9 @@ Two ways to serve the browser bundle:
   substantive to embed. Cross-compile a release with the usual `GOOS`/`GOARCH`.
 
 > Module cache: this environment's `$HOME/go` is read-only; point the cache at a
-> writable dir, e.g. `GOMODCACHE=/tmp/gomodcache go test ./...`. Deps are vendored
-> (`vendor/`), so builds are hermetic and need no network.
+> writable dir, e.g. `GOMODCACHE=/tmp/gomodcache go test ./...`. Deps are fetched
+> from the module proxy and pinned by `go.sum`, so the first build needs network;
+> after that the module cache serves them offline.
 
 ## Status
 

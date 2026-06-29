@@ -6,7 +6,7 @@
 // full browser -> wasm engine -> Go server loop actually works.
 //
 // It is a SEPARATE Go module (e2e/go.mod, replace rvim => ../) so chromedp's
-// dependency tree never touches the lean, vendored production module.
+// dependency tree never touches the lean production module.
 //
 // Prerequisites (the test SKIPS, not fails, when missing):
 //   - a Chrome/Chromium binary on PATH (Chrome >= 137 for JSPI);

@@ -126,7 +126,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           out="rvim-${GOOS}-${GOARCH}"
-          go build -mod=vendor -tags embed_assets -trimpath -o "dist/${out}" ./cmd/rvim
+          go build -mod=readonly -tags embed_assets -trimpath -o "dist/${out}" ./cmd/rvim
           ls -l "dist/${out}"
 
       - name: Upload rvim binary

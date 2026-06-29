@@ -8,9 +8,8 @@ safety net that replaces the Node conformance oracle once the Node prototype is
 removed.
 
 It is a **separate Go module** (`go.mod`, `replace rvim => ../`) on purpose: it
-pulls in chromedp's large dependency tree, which must never touch the lean,
-vendored production `rvim` module. This module is dev/CI tooling, not shipped, so
-it is not vendored.
+pulls in chromedp's large dependency tree, which must never touch the lean
+production `rvim` module. This module is dev/CI tooling, not shipped.
 
 ## Running
 

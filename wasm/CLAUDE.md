@@ -18,7 +18,7 @@ to the repo root, so they run from anywhere.
 | `cmake` + `ninja` | the wasm engine | |
 | A **native** build in `build/` | cross-compile codegen | provides `build/lib/libnlua0.so` (`cmake --build build --target nlua0`) + host `luajit` at `.deps/usr/bin/luajit`. |
 | Node ≥ 24 (26 tested) | engine host, dev server, JS tests | Node 22 works with `--experimental-wasm-jspi`; ≤ 20 unsupported. The flag only goes on the top-level node — the engine worker inherits `process.execArgv`. |
-| `go` ≥ 1.24 | the `rvim` server + its tests | deps are vendored (`wasm/rvim/vendor/`), so builds are hermetic / offline. |
+| `go` ≥ 1.24 | the `rvim` server + its tests | deps are fetched from the module proxy on first build (pinned by `go.sum`); needs network the first time, then cached. |
 | `gh` (authenticated) | `rvim/download-rvim.sh` only | |
 | Chrome/Chromium ≥ 137 | browser run + `rvim/e2e` | JSPI on by default. The e2e **skips** (not fails) without it. |
 
