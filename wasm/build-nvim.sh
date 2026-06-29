@@ -217,12 +217,16 @@ cp -R "${RT}/." "${STAGE_ROOT}/full/"
 # variant that ships doc/ (core/minimal drop it), so it's the only one tagged.
 echo "==> Generating help tags for the full runtime variant (doc/tags)"
 rm -f "${STAGE_ROOT}/full/doc/tags"
+helptags_err="${BUILD}/.helptags.err"
 node "${BUILD}/bin/nvim.js" -- -u NONE -i NONE -e --headless \
-  -c "helptags ++t ${STAGE_ROOT}/full/doc" -c quit >/dev/null 2>&1 || true
+  -c "helptags ++t ${STAGE_ROOT}/full/doc" -c quit >"${helptags_err}" 2>&1 || true
 if [ ! -s "${STAGE_ROOT}/full/doc/tags" ]; then
   echo "ERROR: failed to generate doc/tags for the full variant (:help would be broken)." >&2
+  echo "       engine output (node $(node --version)):" >&2
+  sed 's/^/       | /' "${helptags_err}" >&2 || true
   exit 1
 fi
+rm -f "${helptags_err}"
 echo "    doc/tags ($(wc -l < "${STAGE_ROOT}/full/doc/tags") tags)"
 
 # minimal: boot + the vim.* stdlib only. Stages lua/, plugin/, scripts/ and

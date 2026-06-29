@@ -30,14 +30,15 @@ runs:
         sudo apt-get update
         sudo apt-get install -y ninja-build gettext cmake unzip curl build-essential
 
-    # Node 24+ has JSPI (WebAssembly.Suspending) on by default — REQUIRED to run
-    # the wasm engine under Node. build-nvim.sh runs `node nvim.js` to verify each
-    # runtime variant boots clean AND to generate the full variant's help-tag
-    # database (doc/tags). Node 20 lacks JSPI, so the engine can't boot there (the
-    # verify gate silently passed vacuously, and :help shipped untagged).
+    # Node 26 is the version wasm/README.md documents as tested for JSPI
+    # (WebAssembly.Suspending) — REQUIRED to run the wasm engine under Node.
+    # build-nvim.sh runs `node nvim.js` to verify each runtime variant boots clean
+    # AND to generate the full variant's help-tag database (doc/tags). Node 20
+    # lacks JSPI (the verify gate then passed vacuously and :help shipped
+    # untagged); Node 24 still gates JSPI behind a flag — 26 has it on by default.
     - uses: actions/setup-node@v4
       with:
-        node-version: 24
+        node-version: 26
 
     # Emscripten, pinned to the version the wasm build was developed against.
     - name: Setup Emscripten
