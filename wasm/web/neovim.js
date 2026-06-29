@@ -451,7 +451,7 @@
   var PLUGIN_VARIANTS = { full: 1, core: 1, minimal: 1 };
 
   // Validate the optional Stage 4 `proxy` config (the standalone-app IO proxy --
-  // see wasm/stage4.md). It is ADDITIVE and OPT-IN: absent => behave exactly as
+  // see wasm/docs/history/stage4.md). It is ADDITIVE and OPT-IN: absent => behave exactly as
   // today (no server connection). Shape: { url:<string>, root?:<string>,
   // mount?:<string> }. Throw a clear error on a bad shape, mirroring the
   // `plugins` validation. Returns the (possibly normalized) proxy config or null.

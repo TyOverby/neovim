@@ -422,7 +422,7 @@ configured and follow them around between sites.
 > engine as the library, but the engine worker also opens a WebSocket to a small
 > server that performs all real IO. Visit the page the server hosts and you get a
 > full editor whose **filesystem, `:!`, `jobstart()`, `:terminal`, and LSP run on
-> the server**, jailed to a configured root. See `stage4.md` for the full design.
+> the server**, jailed to a configured root. See `docs/history/stage4.md` for the full design.
 
 The most ambitious part of the project, the standalone `neovim.js` application
 is a full replacement for running neovim on a remote server. With a standard
@@ -512,7 +512,7 @@ binds `127.0.0.1` only. `--proxy` makes visiting the page the standalone app
 > reimplemented it as the `rvim` Go binary (`wasm/rvim/`) — a small static binary
 > with no runtime deps and easy cross-compilation — verified to behave identically
 > by the conformance suite + a headless-Chrome e2e (`wasm/rvim/e2e/`). The Node
-> prototype has been removed; `wasm/stage5.md` has the design.
+> prototype has been removed; `wasm/docs/history/stage5.md` has the design.
 
 ### How "visit the server" wires up (the opt-in)
 
@@ -548,7 +548,7 @@ The proxy is **additive and opt-in**: nothing connects to a server unless a
 
 ### Reconnect + durable `:terminal`
 
-> **Status: ✅ shipped (stage 5).** Design in `stage5.md` §6; verified by
+> **Status: ✅ shipped (stage 5).** Design in `docs/history/stage5.md` §6; verified by
 > `wasm/web/reconnect.test.js` and `wasm/rvim/e2e/e2e_durable_term_test.go`.
 
 The **browser engine is the only durable state.** On any transport drop, the
@@ -606,7 +606,7 @@ process's privileges. The defaults reflect that:
   handler family. Caveats: IPv6 is carried but the proxy routes by host:port so
   the literal address is advisory; nvim's default startup `serverstart` (its
   `$NVIM` pipe) routes to the proxy and fails cleanly on the server's FS, as it did
-  before. See `stage4.md` → "TCP sockets".
+  before. See `docs/history/stage4.md` → "TCP sockets".
 - **`:terminal` input is byte-streamed** to the server PTY; multi-byte UTF-8 typed
   across separate input events is forwarded as-is and reassembled by the PTY, so
   pathological partial-codepoint splits rely on the terminal's own buffering.
@@ -616,7 +616,7 @@ process's privileges. The defaults reflect that:
 
 ### The three-tier remote — `rvim` (stage 5)
 
-> **Status: ✅ shipped.** Full design and phase plan in `stage5.md`. The binary,
+> **Status: ✅ shipped.** Full design and phase plan in `docs/history/stage5.md`. The binary,
 > the SSH-stdio remote, the reconnect contract, durable terminals, and `--rc` all
 > ship today; what's left is the full `--site` routing table, auth/TLS for
 > non-loopback binds, and the protocol `cancel` frame. Verified by the Go
@@ -640,7 +640,7 @@ serves the page, and forwards all IO to the remote over SSH:
    rvim --serve-stdio   (io-proxy on the remote: your files)
 ```
 
-The headline pieces (see `stage5.md`):
+The headline pieces (see `docs/history/stage5.md`):
 
 - **One Go binary, three modes** — app/web server, `--serve-stdio` remote
   io-proxy, and the local case (io-proxy in-process). Go because the goal is a
@@ -678,7 +678,7 @@ HTTP headers and runs on any static host.
 > client on the Node main thread (`nvim file.txt`). It was a stepping stone to
 > prove the worker + JSPI + postMessage architecture under Node, and has been
 > removed now that the browser UI works and the headless e2e test covers the
-> engine path. `stage2.md` records it for history.
+> engine path. `docs/history/stage2.md` records it for history.
 
 It is **additive**: the normal native build is unchanged. Every change to the
 shared build files (`CMakeLists.txt`, `cmake.deps/…`) is guarded by
@@ -696,11 +696,11 @@ What works today (`node nvim.js -- <args>`):
 | Real filesystem access (MEMFS + NODEFS under Node) | ✅ |
 | `nvim --embed` msgpack-RPC server | ✅ |
 | Engine in a worker + JS client over `postMessage` | ✅ |
-| **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `stage3.md`, `wasm/web/`) |
+| **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `docs/history/stage3.md`, `wasm/web/`) |
 | Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone *library* (no spawn in wasm) · ✅ under the **standalone server** (proxied to the host — stage 4) |
-| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (the `rvim` Go server — `wasm/rvim/`; see `stage5.md`) |
-| **Three-tier remote (`rvim --remote user@host` over SSH stdio)** | ✅ (stage 5 — `wasm/rvim/`; see `stage5.md`) |
+| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (the `rvim` Go server — `wasm/rvim/`; see `docs/history/stage5.md`) |
+| **Three-tier remote (`rvim --remote user@host` over SSH stdio)** | ✅ (stage 5 — `wasm/rvim/`; see `docs/history/stage5.md`) |
 | **Reconnect (fail-fast `-EIO` + auto re-dial) + durable `:terminal`** | ✅ (the session-host daemon + `:mksession` rehydrate — `wasm/proxy-reconnect.js`, `wasm/rvim/server/sessionhost.go`) |
 
 ## Prerequisites
@@ -752,7 +752,7 @@ node wasm/web/serve.js          # plain static server (default :8000)
 The page (`wasm/web/`) runs `nvim --embed` in a Web Worker and renders the
 `ext_linegrid` grid into a `<pre>` with a small msgpack-RPC client on the main
 thread — **no wasm and no JSPI on the page**, only in the Worker. Click the grid
-and type. See `stage3.md` for the design and `wasm/web/` for the code.
+and type. See `docs/history/stage3.md` for the design and `wasm/web/` for the code.
 
 ### Deploy to a static host (GitHub Pages)
 
@@ -806,10 +806,10 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `nvim_sock_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the full socket + DNS proxy backend — outbound connect (a virtual bidirectional pollable fd backing each `uv_tcp_t`/`uv_pipe_t`; the `--wrap=uv_tcp_connect`/`uv_pipe_connect` paths) AND inbound listen/accept (the listener table + `sock.listen`/`accept`/`incoming` routing; the `--wrap=uv_listen`/`uv_accept` paths), plus `sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo` and the server pushes. Pairs with the socket wraps in `uv_stubs.c`. Active only when a proxy is configured. |
 | `proxy-client.js` | Stage 4 proxy **client** + frame codec, shared by the engine worker (browser/Node) and the server. Defines the framed protocol (`hello`/`req`/`res`/`push` + binary trailer) and `createProxyClient(transport)`. The worker `importScripts` it next to `nvim.js` when `create({ proxy })` is used. |
 | `proxy-reconnect.js` | Stage 5 **ReconnectingProxy** (opt-in): a stable facade at `self.__nvimProxy` that delegates `request` to the live client (fast-rejecting during an outage so suspended syscalls return `-EIO`, never hang), `close()`s the dead client on drop, preserves the push router across reconnects, and re-dials with backoff. Wired by `web/engine-worker.js`. |
-| `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families, jailed to `--root`), `cmd/rvim` (the binary; `--root`/`--port`/`--proxy`/`--assets-dir`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `stage5.md`. |
+| `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families, jailed to `--root`), `cmd/rvim` (the binary; `--root`/`--port`/`--proxy`/`--assets-dir`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `docs/history/stage5.md`. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
 | `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `rvim --proxy`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
-| `stage1.md` / `stage2.md` / `stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
+| `docs/history/stage1.md` / `docs/history/stage2.md` / `docs/history/stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
 
@@ -905,7 +905,7 @@ needs no cross-origin isolation.
 - **Testing hook** — `window.nvim.input(keys)`, `.gridText()`, `.resize(c,r)` and
   `.state()` are exposed for driving/asserting from automation or the console.
 
-`stage3.md` records the design, what shipped, and the remaining browser follow-ups
+`docs/history/stage3.md` records the design, what shipped, and the remaining browser follow-ups
 (live resize, IDBFS for real files). The runtime size is now addressed by the
 `plugins` variants (full / core / minimal — see **Runtime bundles**).
 

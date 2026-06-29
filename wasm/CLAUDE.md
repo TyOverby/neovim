@@ -4,7 +4,7 @@ See **`README.md`** for the capability reference (what the port does, the
 embedding API, the standalone-app design) — it is large and user-facing, so it is
 **not** auto-included here; read it on demand. **This file is the operational
 companion**: every build, dev, and test script in `wasm/`, what it needs, and
-what it produces. Stage history lives in `stage{1..5}.md`.
+what it produces. Stage history lives in `docs/history/stage{1..5}.md`.
 
 Everything is **additive and `EMSCRIPTEN`-guarded** — the normal native build is
 untouched. All shell scripts are `set -euo pipefail` and resolve paths relative
@@ -118,7 +118,7 @@ embed_assets`), `--rc remote|local|builtin` (where the in-browser nvim's config 
 `$HOME` comes from), `--remote-rvim` (path to `rvim` on the remote). **Internal**
 (don't pass by hand): `--serve-stdio` (the remote endpoint), `--session-host` /
 `--session` / `--daemon-sock` (the durable-PTY daemon, auto-spawned by the
-io-proxy). See `rvim/README.md` and `stage5.md`.
+io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
 
 ## Layout map
 
@@ -132,5 +132,5 @@ io-proxy). See `rvim/README.md` and `stage5.md`.
 | `worker.js` | Node engine host (worker_thread) — used by `e2e.test.js`. |
 | `web/` | browser target: `neovim.js` (RPC core), `neovim-ui.js` (renderer), `neovim-utils.js` (helpers), `app.js` (page glue), `engine-worker.js` (Web Worker host), `serve.js`, `build-site.sh`, `build-lib.sh`, `*.mjs` ESM mirrors, `e2e.test.js`, `reconnect.test.js`. |
 | `rvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/rvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |
-| `stage{1..5}.md` | design history per stage. |
+| `docs/history/stage{1..5}.md` | design history per stage. |
 | `*.log` | gitignored build logs from prior runs. |

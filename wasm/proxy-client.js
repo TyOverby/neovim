@@ -1,7 +1,7 @@
 // wasm/proxy-client.js - the shared, dependency-free IO-proxy client (Stage 4).
 //
 // This is the CLIENT half of the second, separate transport stage 4 adds (see
-// wasm/stage4.md): the engine worker opens its OWN connection to a server that
+// wasm/docs/history/stage4.md): the engine worker opens its OWN connection to a server that
 // performs the engine's real IO (filesystem, processes, PTY). This file is the
 // transport-agnostic request/response layer that rides that connection; it knows
 // nothing about WebSockets or worker_threads -- the host hands it a `transport`.

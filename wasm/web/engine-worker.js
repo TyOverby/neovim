@@ -208,7 +208,7 @@ function setupProxy(proxy, bootSignal) {
   // live client (fast-rejecting during an outage so suspended syscalls return
   // -EIO instead of hanging), preserves the push router across reconnects, and
   // re-dials with backoff after a drop. The engine itself never restarts — only
-  // the wire reconnects, so buffers/undo survive a blip (see stage5.md §6).
+  // the wire reconnects, so buffers/undo survive a blip (see docs/history/stage5.md §6).
   self.__nvimProxy = self.ProxyReconnect.createReconnectingProxy({
     ProxyClient: self.ProxyClient,
     dial: function () {

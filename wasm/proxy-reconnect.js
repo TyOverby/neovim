@@ -4,7 +4,7 @@
 // but neither rejected FUTURE requests nor reconnected — so a blip left the
 // editor's IO permanently dead (and a syscall issued during the outage window
 // hung on the stale-but-open client). Stage 5 wraps the transport in a
-// reconnecting facade that implements the reconnection contract from stage5.md:
+// reconnecting facade that implements the reconnection contract from docs/history/stage5.md:
 //
 //   The browser engine is the only durable state. On any disconnect, in-flight
 //   ops fail fast (the syscalls' -EIO rejection arm fires — no hang), the dead

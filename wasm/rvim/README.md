@@ -1,6 +1,6 @@
 # rvim — the stage-5 Go server + conformance harness
 
-This is the Go side of stage 5 (see `../stage5.md`): the native, dependency-free
+This is the Go side of stage 5 (see `../docs/history/stage5.md`): the native, dependency-free
 server that productionizes the standalone app into the three-tier `rvim`
 architecture. It is verified by a **conformance suite** (protocol-level, in
 process) plus a **headless-Chrome e2e** (`e2e/`, the full browser→engine→server
