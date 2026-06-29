@@ -815,7 +815,7 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | File | Purpose |
 |---|---|
 | `build-deps.sh` | Cross-compile the bundled dependencies to wasm. |
-| `build-nvim.sh` | Configure + build nvim to wasm; install the Node engine host (`worker.js`); stage + `file_packager` the three runtime variants (`nvim-{full,core,minimal}.data` + loaders). |
+| `build-nvim.sh` | Configure + build nvim to wasm; install the Node engine host (`worker.js`); stage + `file_packager` the three runtime variants (`nvim-{full,core,minimal}.data` + loaders). Generates the help-tag database (`doc/tags`, via `node nvim.js … :helptags`) for the `full` variant — the native build does this at install time, but the wasm build packages `runtime/` directly and `runtime/doc/tags` is gitignored, so without this a fresh checkout would ship docs with no tags and `:help <topic>` would fail (E149). |
 | `shim.h` | Force-included into every emcc compile (`EMCC_CFLAGS`); small libc gap fills (pthread thread-name stubs). |
 | `uv_stubs.c` | libuv / libc functions the Emscripten builds omit (sys-info, `uv_exepath`, `sched_*`, `pthread_*_np`). Linked into nvim only for wasm. |
 | `extern-pre.js` | Emscripten `--extern-pre-js` (runs before everything): under Node, points `locateFile` at nvim.js's dir so a data package resolves from any cwd. |

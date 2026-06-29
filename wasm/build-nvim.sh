@@ -207,6 +207,24 @@ echo "==> Staging runtime variants for file_packager"
 mkdir -p "${STAGE_ROOT}/full"
 cp -R "${RT}/." "${STAGE_ROOT}/full/"
 
+# Generate the help-tag database (doc/tags) for the full variant. The native
+# build produces this via a `helptags` install step (runtime/CMakeLists.txt), but
+# the wasm build packages runtime/ directly and runtime/doc/tags is gitignored --
+# so a fresh checkout (CI) ships doc/*.txt with NO tags, and :help <topic> fails
+# with E149. Regenerate it deterministically by running the just-built engine
+# under Node with `:helptags` (the same node nvim.js the verify gate uses; helptags
+# is pure editor file IO, no spawning, so it works in wasm). full is the only
+# variant that ships doc/ (core/minimal drop it), so it's the only one tagged.
+echo "==> Generating help tags for the full runtime variant (doc/tags)"
+rm -f "${STAGE_ROOT}/full/doc/tags"
+node "${BUILD}/bin/nvim.js" -- -u NONE -i NONE -e --headless \
+  -c "helptags ++t ${STAGE_ROOT}/full/doc" -c quit >/dev/null 2>&1 || true
+if [ ! -s "${STAGE_ROOT}/full/doc/tags" ]; then
+  echo "ERROR: failed to generate doc/tags for the full variant (:help would be broken)." >&2
+  exit 1
+fi
+echo "    doc/tags ($(wc -l < "${STAGE_ROOT}/full/doc/tags") tags)"
+
 # minimal: boot + the vim.* stdlib only. Stages lua/, plugin/, scripts/ and
 # filetype.lua, PLUS the tiny syntax framework so default `syntax on` succeeds
 # (no language files => no actual highlighting). Drops the pack-dependent plugins
