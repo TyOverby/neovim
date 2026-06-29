@@ -1,9 +1,8 @@
-@README.md
-
 # wasm/ — dev / build / test quick reference
 
-The `README.md` above is the capability reference (what the port does, the
-embedding API, the standalone-app design). **This section is the operational
+See **`README.md`** for the capability reference (what the port does, the
+embedding API, the standalone-app design) — it is large and user-facing, so it is
+**not** auto-included here; read it on demand. **This file is the operational
 companion**: every build, dev, and test script in `wasm/`, what it needs, and
 what it produces. Stage history lives in `stage{1..5}.md`.
 
