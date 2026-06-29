@@ -1,15 +1,23 @@
-// wasm/web/app.js - page wiring for the browser demo.
+// wasm/web/src/app.ts - page wiring for the browser demo.
 //
 // This is the thin glue an embedder would write: it composes the two library
 // layers -- the headless core (neovim.js) and the default renderer
 // (neovim-ui.js) -- into the page. All the reusable logic lives in those two
 // modules; this file only knows about *this* page's DOM and status line.
-'use strict';
+//
+// Loaded as a classic <script> after neovim.js / neovim-ui.js set their globals,
+// so it reads `Neovim` / `NeovimUI` off the global scope (declared below).
+
+// The library globals set by the UMD <script> bundles loaded before us, plus
+// the page's window hooks. Kept loose: this file is page glue, not library API.
+declare const Neovim: any;
+declare const NeovimUI: any;
 
 (function () {
-  var statusEl = document.getElementById('status');
-  var screenEl = document.getElementById('screen');
-  function setStatus(s) { if (statusEl) { statusEl.textContent = s; } }
+  const win = window as any;
+  const statusEl = document.getElementById('status');
+  const screenEl = document.getElementById('screen') as HTMLElement;
+  function setStatus(s: string) { if (statusEl) { statusEl.textContent = s; } }
 
   setStatus('starting engine worker…');
 
@@ -20,14 +28,14 @@
   // server, jailed to its --root. When it's ABSENT (the plain serve.js static
   // demo, or the library used without a proxy) we behave EXACTLY as before --
   // no server connection, MEMFS-only. The mechanism is documented in index.html.
-  var proxy = (typeof window.__NVIM_PROXY === 'object' && window.__NVIM_PROXY) || null;
-  var mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
+  const proxy = (typeof win.__NVIM_PROXY === 'object' && win.__NVIM_PROXY) || null;
+  const mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
 
   // --rc local: rvim's /proxy-config.js inlined the app-server's own ~/.config/nvim
   // as window.__NVIM_RC_FILES { '/abs/path': 'contents' }. Seed it into the engine's
   // MEMFS at boot so nvim loads that config. (--rc remote instead redirects $HOME to
   // the IO host via the hello — no seed; handled in the engine worker / pre.js.)
-  var rcFiles = (typeof window.__NVIM_RC_FILES === 'object' && window.__NVIM_RC_FILES) || undefined;
+  const rcFiles = (typeof win.__NVIM_RC_FILES === 'object' && win.__NVIM_RC_FILES) || undefined;
 
   // Durable-PTY session id: left to the engine worker, which mints a UNIQUE id per
   // tab/load (so two tabs to the same host get independent terminal sessions — a
@@ -43,12 +51,12 @@
   //    prompt for clipboard-read permission the first time; needs a secure context
   //    (HTTPS or localhost). When `proxy` is present it is threaded through; when
   //    null, create() ignores it and the no-proxy path is byte-for-byte unchanged.
-  var nvim = Neovim.create({ args: [ '-n' ], clipboard: 'browser', proxy: proxy, filesystem: rcFiles });
+  const nvim = Neovim.create({ args: [ '-n' ], clipboard: 'browser', proxy: proxy, filesystem: rcFiles });
 
   // Track proxy connection state so we can reflect it in the status line. The
   // engine worker posts {kind:'stdout', text:'proxy: connected to ...'} on success
   // and {kind:'stderr', text:'proxy: ...'} on failure (see engine-worker.js).
-  var proxyState = proxy ? 'connecting' : null;
+  let proxyState = proxy ? 'connecting' : null;
 
   // Standalone-app RPC host: once nvim is ready AND the proxy is connected, start
   // nvim's RPC server on the SERVER-side socket the server suggested
@@ -58,8 +66,8 @@
   // paths there), so the path is valid for server-side children; the connection's
   // cleanup removes it on disconnect. Runs once. We can't do this at nvim startup:
   // the proxy connects asynchronously after boot, so an early serverstart fails.
-  var nvimReady = false;
-  var rpcServerStarted = false;
+  let nvimReady = false;
+  let rpcServerStarted = false;
   function maybeStartRpcServer() {
     if (rpcServerStarted || !nvimReady || proxyState !== 'connected') { return; }
     if (!proxy || !proxy.nvimSocket) { return; }
@@ -77,14 +85,14 @@
       'vim.env.NVIM = a\n' +
       'return a',
       [ proxy.nvimSocket ]
-    ]).then(function (addr) {
+    ]).then(function (addr: any) {
       console.log('[rvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
-    }, function (err) {
+    }, function (err: any) {
       console.warn('[rvim] serverstart failed: ' + (err && err.message || err));
     });
   }
 
-  nvim.onStatus(function (s) {
+  nvim.onStatus(function (s: any) {
     if (!s) { return; }
     if (s.kind === 'booting') { setStatus('engine booting (loading wasm + runtime)…'); }
     else if (s.kind === 'stdout' || s.kind === 'stderr') {
@@ -102,10 +110,10 @@
   });
 
   // Compose the attached/ready status with the proxy connection state (if any).
-  var readyMsg = '';
+  let readyMsg = '';
   function refreshStatus() {
     if (!readyMsg) { return; }   // only after ready; pre-ready status is owned above
-    var suffix = '';
+    let suffix = '';
     if (proxy) {
       if (proxyState === 'connected') { suffix = ' — proxy connected (' + proxy.url + ', files at ' + mount + ')'; }
       else if (proxyState === 'error') { suffix = ' — proxy NOT connected (' + proxy.url + '); IO stays local'; }
@@ -123,8 +131,8 @@
   // like the default (fresh spawn), and a missing/expired daemon pty falls back to
   // a fresh spawn too. Injected at runtime (only when a proxy is configured), so it
   // touches no core runtime files and never affects the no-proxy/library path.
-  function installTermAdoptHook(nvim) {
-    var lua = [
+  function installTermAdoptHook(nvim: any) {
+    const lua = [
       "local grp = vim.api.nvim_create_augroup('nvim.terminal', { clear = false })",
       "pcall(vim.api.nvim_clear_autocmds, { group = grp, event = 'BufReadCmd', pattern = 'term://*' })",
       "vim.api.nvim_create_autocmd('BufReadCmd', {",
@@ -153,7 +161,7 @@
   //    tracks its size (drag the resize handle / resize the window to reflow).
   //    font_family / font_size are applied to the element (and pin a stable
   //    line-height for the grid math).
-  var ui = NeovimUI.mount_into(nvim, screenEl, {
+  const ui = NeovimUI.mount_into(nvim, screenEl, {
     font_family: 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
     font_size: 16,
   });
@@ -177,13 +185,13 @@
         nvim.request('nvim_cmd', [{ cmd: 'edit', args: [ mount ] }, {}]).catch(function () {});
       }
     })
-    .catch(function (err) { setStatus('failed to start: ' + (err && err.message || err)); });
+    .catch(function (err: any) { setStatus('failed to start: ' + (err && err.message || err)); });
 
   // 3. Expose a tiny API for debugging / automated testing (unchanged surface).
-  window.nvim = {
-    input: function (keys) { return nvim.input(keys); },
-    request: function (method, params) { return nvim.request(method, params); },
-    resize: function (c, r) { return ui.resize(c, r); },
+  win.nvim = {
+    input: function (keys: string) { return nvim.input(keys); },
+    request: function (method: string, params: any[]) { return nvim.request(method, params); },
+    resize: function (c: number, r: number) { return ui.resize(c, r); },
     gridText: function () { return ui.screen.text(); },
     cursor: ui.screen.cursor,
     state: function () { return { cols: ui.screen.cols, rows: ui.screen.rows, cursor: ui.screen.cursor }; },

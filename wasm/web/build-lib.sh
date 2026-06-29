@@ -27,6 +27,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WEB="${ROOT}/wasm/web"
+DIST="${WEB}/dist"
 BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 MSGPACK_ESM="${WEB}/node_modules/@msgpack/msgpack/dist.esm"
@@ -77,13 +78,21 @@ done
 [ -f "${MSGPACK}" ] || { echo "missing ${MSGPACK} (run: cd wasm/web && npm install)"; exit 1; }
 [ -f "${MSGPACK_ESM}/index.mjs" ] || { echo "missing ${MSGPACK_ESM}/index.mjs (run: cd wasm/web && npm install)"; exit 1; }
 
+# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/ by
+# build-ts.sh. Build it first so the bundle always ships fresh artifacts.
+"${WEB}/build-ts.sh"
+
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
-# --- library JS: UMD source + ESM entry points + engine worker ---------------
-cp "${WEB}/neovim.js" "${WEB}/neovim-ui.js" "${WEB}/neovim-utils.js" \
-   "${WEB}/neovim.mjs" "${WEB}/neovim-ui.mjs" "${WEB}/neovim-utils.mjs" \
-   "${WEB}/engine-worker.js" "${OUT}/"
+# --- library JS: UMD source + ESM entry points + engine worker + types -------
+# All compiled from src/*.ts into dist/ (see build-ts.sh).
+cp "${DIST}/neovim.js" "${DIST}/neovim-ui.js" "${DIST}/neovim-utils.js" \
+   "${DIST}/neovim.mjs" "${DIST}/neovim-ui.mjs" "${DIST}/neovim-utils.mjs" \
+   "${DIST}/engine-worker.js" "${OUT}/"
+# TypeScript declarations: .d.ts for require()/UMD consumers, .d.mts for ESM.
+cp "${DIST}"/neovim.d.ts "${DIST}"/neovim-ui.d.ts "${DIST}"/neovim-utils.d.ts \
+   "${DIST}"/neovim.d.mts "${DIST}"/neovim-ui.d.mts "${DIST}"/neovim-utils.d.mts "${OUT}/"
 # Stage 4 IO-proxy client (lives in wasm/, one dir up): the engine worker
 # importScripts('proxy-client.js') at runtime when create({ proxy }) is used, so
 # it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.
@@ -125,18 +134,22 @@ cat > "${OUT}/package.json" <<JSON
   "type": "module",
   "main": "neovim.js",
   "module": "neovim.mjs",
+  "types": "neovim.d.ts",
   "exports": {
     ".": {
+      "types": "./neovim.d.ts",
       "import": "./neovim.mjs",
       "require": "./neovim.js",
       "default": "./neovim.mjs"
     },
     "./ui": {
+      "types": "./neovim-ui.d.ts",
       "import": "./neovim-ui.mjs",
       "require": "./neovim-ui.js",
       "default": "./neovim-ui.mjs"
     },
     "./utils": {
+      "types": "./neovim-utils.d.ts",
       "import": "./neovim-utils.mjs",
       "require": "./neovim-utils.js",
       "default": "./neovim-utils.mjs"

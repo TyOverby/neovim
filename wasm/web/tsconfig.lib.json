@@ -1,0 +1,17 @@
+{
+  "// description": "Library modules: the three core modules (CommonJS, later UMD-wrapped) + their .mts ESM entry points + .d.ts/.d.mts declarations. Emitted to dist-lib/, then assembled into dist/ by build-ts.sh.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist-lib",
+    "rootDir": "./src",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"]
+  },
+  "files": [
+    "src/neovim.ts",
+    "src/neovim-ui.ts",
+    "src/neovim-utils.ts",
+    "src/neovim.mts",
+    "src/neovim-ui.mts",
+    "src/neovim-utils.mts"
+  ]
+}

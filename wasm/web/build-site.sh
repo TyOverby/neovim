@@ -12,9 +12,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WEB="${ROOT}/wasm/web"
+DIST="${WEB}/dist"
 BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 OUT="${1:-${ROOT}/_site}"
+
+# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/.
+# Build it first so the site always ships fresh artifacts (idempotent, no bundler).
+"${WEB}/build-ts.sh"
 
 # Shared engine + the three runtime-variant packages (full/core/minimal). The
 # demo ships all three so it can switch via create({ plugins }) in the browser.
@@ -27,10 +32,12 @@ done
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
-# Page + library layers (flat, relative-path references)
-cp "${WEB}/index.html" "${WEB}/neovim.js" "${WEB}/neovim-ui.js" \
-   "${WEB}/neovim-utils.js" "${WEB}/neovim-utils.mjs" "${WEB}/app.js" \
-   "${WEB}/engine-worker.js" "${OUT}/"
+# Page + library layers (flat, relative-path references). index.html is
+# hand-written (wasm/web); the JS is the tsc output from dist/.
+cp "${WEB}/index.html" "${OUT}/"
+cp "${DIST}/neovim.js" "${DIST}/neovim-ui.js" \
+   "${DIST}/neovim-utils.js" "${DIST}/neovim-utils.mjs" "${DIST}/app.js" \
+   "${DIST}/engine-worker.js" "${OUT}/"
 # Stage 4 IO-proxy client (one dir up, in wasm/): the engine worker
 # importScripts('proxy-client.js') at runtime when a `proxy` config is passed, so
 # it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.

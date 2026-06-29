@@ -1,25 +1,27 @@
-// wasm/web/neovim.mjs - ESM entry point for the headless msgpack-RPC core.
+// wasm/web/src/neovim.mts - ESM entry point for the headless msgpack-RPC core.
 //
-// WHY THIS SHAPE: the source of truth stays the hand-written UMD module
-// (neovim.js). The UMD file remains usable as a <script> global, via require()
-// in Node, and via importScripts() in the engine worker -- none of which we may
-// break. Rather than fork the implementation or add a bundler, this ESM file
-// imports neovim.js purely for its SIDE EFFECT of populating a global, then
-// re-exports the same API as proper ESM named + default exports.
+// WHY THIS SHAPE: the source of truth is the core module (src/neovim.ts), which
+// the build emits as the UMD `neovim.js`. The UMD file must stay usable as a
+// <script> global, via require() in Node, and via importScripts() in the engine
+// worker -- none of which we may break. Rather than fork the implementation,
+// this ESM entry imports neovim.js purely for its SIDE EFFECT of populating a
+// global, then re-exports the same API as proper ESM named + default exports.
 //
-// This works in a real browser with no build step: when neovim.js runs in ESM
+// This works in a real browser with no extra wiring: when neovim.js runs in ESM
 // module scope, `module`/`exports` are undefined, so its UMD wrapper takes the
 // `else` branch and assigns to `root.Neovim`, where `root` resolves to the
-// global (`self` in a browser/worker, else `globalThis`). We read it back off
-// `globalThis` here. In Node ESM the UMD `module.exports` branch is taken
-// instead and the global is not set, so we fall back to a dynamic `import()` of
-// the CommonJS module via its default export. Either way the named surface below
-// is identical to the UMD object.
+// global. We read it back off `globalThis` here. In Node ESM the UMD
+// `module.exports` branch is taken instead and the global is not set, so we fall
+// back to a dynamic `import()` of the CommonJS module via its default export.
+// Either way the named surface below is identical to the UMD object.
 import './neovim.js';
+import type {
+  CreateOptions, CreateNvimOptions, NeovimFacade, NeovimInstance, MessagePackModule,
+} from './neovim.js';
 
-const ns =
-  (typeof globalThis !== 'undefined' && globalThis.Neovim) ||
-  (await import('./neovim.js')).default ||
+const ns: any =
+  (typeof globalThis !== 'undefined' && (globalThis as any).Neovim) ||
+  ((await import('./neovim.js')) as any).default ||
   {};
 
 // MessagePack injection: an embedder who `import`s this ESM entry must NOT have
@@ -40,27 +42,36 @@ const ns =
 // available anywhere errors -- and then with neovim.js's clear message. Top-level
 // await is valid ESM and is what lets us resolve the dynamic import before the
 // wrapped create()/createNvim() are first called.
-let bundledMP = null;
+let bundledMP: any = null;
 try {
+  // @ts-ignore - copied next to the bundle by build-lib.sh; absent in the source tree.
   bundledMP = await import('./msgpack.esm/index.mjs');
 } catch (_e) {
   bundledMP = null;   // not bundled (e.g. running from the source tree) -- fine.
 }
 
-function withMessagePack(opts) {
-  opts = opts || {};
+function withMessagePack<T extends { MessagePack?: MessagePackModule }>(opts?: T): T {
+  opts = (opts || {}) as T;
   if (opts.MessagePack) { return opts; }   // caller override wins; don't clobber.
-  var mp = (typeof globalThis !== 'undefined' && globalThis.MessagePack) || bundledMP;
+  const mp = (typeof globalThis !== 'undefined' && (globalThis as any).MessagePack) || bundledMP;
   if (!mp) { return opts; }                // none available: let createNvim error clearly.
   return Object.assign({}, opts, { MessagePack: mp });
 }
 
-export function create(opts) { return ns.create(withMessagePack(opts)); }
-export function createNvim(opts) { return ns.createNvim(withMessagePack(opts)); }
+export function create(opts?: CreateOptions): NeovimFacade { return ns.create(withMessagePack(opts)); }
+export function createNvim(opts?: CreateNvimOptions): NeovimInstance { return ns.createNvim(withMessagePack(opts)); }
 export const enableClipboard = ns.enableClipboard;
 export const browserEngineTransport = ns.browserEngineTransport;
 export const resolveEngineUrl = ns.resolveEngineUrl;
 export const ByteQueue = ns.ByteQueue;
+
+// Re-export the public types so `import { create } from 'neovim'` consumers also
+// get the option/instance types from the ESM entry.
+export type {
+  CreateOptions, CreateNvimOptions, NeovimFacade, NeovimInstance, MessagePackModule,
+  Transport, NvimStatus, ClipboardProvider, ClipboardOption, ProxyConfig,
+  PluginsVariant, BrowserEngineConfig, RequestHandler,
+} from './neovim.js';
 
 // `default` mirrors the wrapped surface, so `import neovim from '...'`-style use
 // (`neovim.create(...)`) also gets the auto-injected MessagePack.

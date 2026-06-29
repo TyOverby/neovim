@@ -23,9 +23,11 @@ const fs = require('fs');
 const { Worker } = require('worker_threads');
 
 const MessagePack = require('@msgpack/msgpack');
-const Neovim = require('./neovim.js');
-const NeovimUI = require('./neovim-ui.js');
-const NeovimUtils = require('./neovim-utils.js');
+// The library is compiled from TypeScript (src/) into dist/ by build-ts.sh; this
+// test drives those build artifacts. `npm test` runs the build first (pretest).
+const Neovim = require('./dist/neovim.js');
+const NeovimUI = require('./dist/neovim-ui.js');
+const NeovimUtils = require('./dist/neovim-utils.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const BIN = path.join(ROOT, 'build-wasm', 'bin');

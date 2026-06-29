@@ -20,9 +20,19 @@ const fs = require('fs');
 const path = require('path');
 
 const WEB = __dirname;                                   // wasm/web
+const DIST = path.join(WEB, 'dist');                     // wasm/web/dist (tsc output)
 const WASM = path.resolve(__dirname, '..');              // wasm
 const ROOT = path.resolve(__dirname, '..', '..');        // repo root
 const BUILD = path.join(ROOT, 'build-wasm', 'bin');
+
+// The page + library JS is compiled from TypeScript (src/) into dist/ by
+// build-ts.sh; serve those built artifacts (index.html itself is hand-written and
+// stays in wasm/web). Keep this list in sync with build-ts.sh's dist/ output.
+const BUILT = new Set([
+  'neovim.js', 'neovim-ui.js', 'neovim-utils.js',
+  'neovim.mjs', 'neovim-ui.mjs', 'neovim-utils.mjs',
+  'app.js', 'engine-worker.js',
+]);
 const MSGPACK = path.join(WEB, 'node_modules', '@msgpack', 'msgpack', 'dist.umd', 'msgpack.min.js');
 
 const TYPES = {
@@ -53,6 +63,8 @@ function resolveStaticPath(urlPath) {
   // resolve at the bundle root.
   if (urlPath === '/proxy-client.js') { return path.join(WASM, 'proxy-client.js'); }
   if (urlPath === '/proxy-reconnect.js') { return path.join(WASM, 'proxy-reconnect.js'); }
+  // The TypeScript-compiled page + library JS lives in dist/.
+  if (BUILT.has(urlPath.slice(1))) { return path.join(DIST, urlPath); }
   // Everything else from wasm/web, but never escape it.
   const p = path.normalize(path.join(WEB, urlPath));
   return p.startsWith(WEB) ? p : null;
@@ -97,12 +109,17 @@ function warnIfBuildStale() {
     console.warn('  WARNING: missing in ' + BUILD + ': ' + missing.join(', '));
     console.warn('  WARNING: Run wasm/build-nvim.sh to (re)build the engine + runtime data packages.');
   }
+  // The page + library JS is compiled into dist/ by build-ts.sh.
+  if (!fs.existsSync(path.join(DIST, 'neovim.js'))) {
+    console.warn('  WARNING: missing ' + path.join(DIST, 'neovim.js') +
+      ' — run wasm/web/build-ts.sh (or `npm run build`) to compile the TypeScript page + library.');
+  }
 }
 
 const PORT = parseInt(process.argv[2] || '8000', 10);
 http.createServer(handleRequest).listen(PORT, function () {
   console.log('serving Neovim wasm grid UI on http://localhost:' + PORT);
-  console.log('  web assets : ' + WEB);
+  console.log('  page+lib   : ' + DIST + ' (compiled from ' + path.join(WEB, 'src') + ')');
   console.log('  wasm build : ' + BUILD);
   warnIfBuildStale();
 });

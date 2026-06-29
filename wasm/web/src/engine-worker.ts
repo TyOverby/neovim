@@ -1,4 +1,4 @@
-// wasm/web/engine-worker.js - Neovim engine endpoint, run in a Web Worker.
+// wasm/web/src/engine-worker.ts - Neovim engine endpoint, run in a Web Worker.
 //
 // The browser analogue of wasm/worker.js. Hosts the Neovim engine wasm
 // (`nvim --embed`) directly in this Worker and backs its stdin/stdout (fd 0/1)
@@ -21,49 +21,56 @@
 // nvim.js, and self.Module must already exist so the loader's
 // `var Module = typeof Module != 'undefined' ? Module : {}` binds to OUR Module
 // (the same one nvim.js then uses) rather than a throwaway object.
+//
+// Compiled (by wasm/web/build-ts.sh) to a classic worker script engine-worker.js
+// — it stays importScripts-loadable and module-wrapper-free.
 'use strict';
 
-var VARIANTS = { full: 1, core: 1, minimal: 1 };
-var started = false;
+// `self` carries a pile of dynamic __nvim* config globals (read by pre.js) plus
+// Emscripten's Module and the importScripted proxy client/reconnect helpers.
+const S: any = self as any;
 
-onmessage = function (e) {
+const VARIANTS: Record<string, number> = { full: 1, core: 1, minimal: 1 };
+let started = false;
+
+onmessage = function (e: MessageEvent) {
   if (!started) {
     started = true;
-    var init = e.data || {};
-    var args = init.args || [];
+    const init = e.data || {};
+    const args = init.args || [];
 
     // The channel object wasm/nvim_io.js reads (Module.nvimChannel).
-    var channel = {
-      inQueue: [],
+    const channel = {
+      inQueue: [] as any[],
       closed: false,
-      notify: null,
-      postOutput: function (u8) { postMessage(u8.buffer, [u8.buffer]); },
+      notify: null as null | (() => void),
+      postOutput: function (u8: Uint8Array) { (postMessage as any)(u8.buffer, [u8.buffer]); },
     };
-    self.__nvimChannel = channel;
-    self.__nvimArgs = ['--embed'].concat(args);
+    S.__nvimChannel = channel;
+    S.__nvimArgs = ['--embed'].concat(args);
 
     // create() runtime config (env/cwd/filesystem) travels in the same init
     // message and is handed to the engine via the __nvim* globals pre.js reads,
     // mirroring the Node host (wasm/worker.js) exactly.
-    if (init.env) { self.__nvimEnv = init.env; }
-    if (init.filesystem) { self.__nvimFiles = init.filesystem; }
-    if (typeof init.cwd === 'string') { self.__nvimCwd = init.cwd; }
+    if (init.env) { S.__nvimEnv = init.env; }
+    if (init.filesystem) { S.__nvimFiles = init.filesystem; }
+    if (typeof init.cwd === 'string') { S.__nvimCwd = init.cwd; }
 
     // Surface engine stdout/stderr + exit back to the page. Set BEFORE boot so the
     // engine's own prints are captured even on the deferred-boot (proxy) path.
-    self.Module = self.Module || {};
-    self.Module.print = function (s) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
-    self.Module.printErr = function (s) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
-    self.Module.onExit = function () { try { postMessage({ kind: 'exit' }); } catch (_e) {} };
+    S.Module = S.Module || {};
+    S.Module.print = function (s: string) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
+    S.Module.printErr = function (s: string) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
+    S.Module.onExit = function () { try { postMessage({ kind: 'exit' }); } catch (_e) {} };
 
     // Runtime variant: default 'full'. create() already validates this, but guard
     // here too since the worker can be driven directly.
-    var variant = init.plugins || 'full';
+    const variant = init.plugins || 'full';
 
     // bootEngine loads the variant's data package + nvim.js (which runs main()).
     // Idempotent: the proxy path can race several boot signals (hello / failed
     // connect / backstop timer) and only the first one boots.
-    var booted = false;
+    let booted = false;
     function bootEngine() {
       if (booted) { return; }
       booted = true;
@@ -84,7 +91,7 @@ onmessage = function (e) {
       // an actionable message instead of letting the worker die silently.
       try {
         importScripts('nvim-' + variant + '.data.js');
-      } catch (err) {
+      } catch (err: any) {
         postMessage({ kind: 'error', error:
           "failed to load the runtime package 'nvim-" + variant + ".data.js' (" +
           (err && err.message || err) + "). The wasm build is likely stale -- run " +
@@ -109,13 +116,13 @@ onmessage = function (e) {
     // acks). A connection failure must NOT crash the worker; bootEngine() is
     // idempotent so whichever fires first wins.
     if (init.proxy && init.proxy.url) {
-      var bootBackstop = setTimeout(function () {
+      const bootBackstop = setTimeout(function () {
         try { postMessage({ kind: 'stderr', text: 'proxy: no hello within timeout; booting without server identity' }); } catch (_e) {}
         bootEngine();
       }, 8000);
-      function bootSignal(helloResult) {
+      function bootSignal(helloResult?: any) {
         if (helloResult && typeof helloResult.user === 'string' && helloResult.user) {
-          self.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
+          S.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
         }
         // --rc remote/local: point $HOME at the IO host's home (reported by the
         // hello as the in-editor `homeDir`), so $HOME/$USER reflect the box.
@@ -125,25 +132,25 @@ onmessage = function (e) {
         //   local  — $HOME is the box's, but $HOME/.config/nvim is SHADOWED to the
         //            seeded laptop config (served from MEMFS, not the remote): set
         //            __nvimLocalShadow and remap the seed onto the editor-space dir.
-        var rc = init.proxy.rc;
+        const rc = init.proxy.rc;
         if ((rc === 'remote' || rc === 'local') && helloResult) {
-          var homeDir = (typeof helloResult.homeDir === 'string') ? helloResult.homeDir : '';
+          const homeDir = (typeof helloResult.homeDir === 'string') ? helloResult.homeDir : '';
           if (homeDir) {
-            self.__nvimProxyHome = homeDir;
+            S.__nvimProxyHome = homeDir;
             if (rc === 'local') {
-              var shadow = homeDir + '/.config/nvim';
-              self.__nvimLocalShadow = shadow;
-              var FROM = '/root/.config/nvim';   // where the server keyed the seed
-              if (self.__nvimFiles) {
-                var remapped = {};
-                for (var k in self.__nvimFiles) {
-                  if (!Object.prototype.hasOwnProperty.call(self.__nvimFiles, k)) { continue; }
-                  remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = self.__nvimFiles[k];
+              const shadow = homeDir + '/.config/nvim';
+              S.__nvimLocalShadow = shadow;
+              const FROM = '/root/.config/nvim';   // where the server keyed the seed
+              if (S.__nvimFiles) {
+                const remapped: Record<string, any> = {};
+                for (const k in S.__nvimFiles) {
+                  if (!Object.prototype.hasOwnProperty.call(S.__nvimFiles, k)) { continue; }
+                  remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = S.__nvimFiles[k];
                 }
-                self.__nvimFiles = remapped;
+                S.__nvimFiles = remapped;
               }
             }
-          } else if (!self.__nvimProxyHome) {
+          } else if (!S.__nvimProxyHome) {
             try { postMessage({ kind: 'stderr', text: 'proxy: --rc ' + rc + ' but the host home (' +
               (helloResult.home || '?') + ') is not under --root; $HOME stays /root' +
               (rc === 'remote' ? ', config not loaded' : ' (seeded config still loads)') }); } catch (_e) {}
@@ -153,7 +160,7 @@ onmessage = function (e) {
         bootEngine();
       }
       try { setupProxy(init.proxy, bootSignal); }
-      catch (err) {
+      catch (err: any) {
         try { postMessage({ kind: 'stderr', text: 'proxy setup failed: ' + (err && err.message || err) }); } catch (_e) {}
         clearTimeout(bootBackstop);
         bootEngine();
@@ -165,7 +172,7 @@ onmessage = function (e) {
   }
 
   // After init, every message is RPC input bytes (a transferred ArrayBuffer).
-  var ch = self.__nvimChannel;
+  const ch = S.__nvimChannel;
   ch.inQueue.push({ buf: new Uint8Array(e.data), off: 0 });
   if (ch.notify) { ch.notify(); }
 };
@@ -180,14 +187,14 @@ onmessage = function (e) {
 // until the proxy's identity is known: it is called with the hello ack's result
 // on each successful (re)connect, and with no argument on the first disconnect
 // (server unreachable) so the caller can boot degraded rather than wait forever.
-function setupProxy(proxy, bootSignal) {
+function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
   bootSignal = bootSignal || function () {};
   importScripts('proxy-client.js');     // sets self.ProxyClient
   importScripts('proxy-reconnect.js');  // sets self.ProxyReconnect (stage 5)
 
   // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
   // '/host' when a proxy is configured but no mount was given (documented).
-  self.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
+  S.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
     ? proxy.mount : '/host';
 
   // Stage 5 (durable PTYs): the session id carried in the /proxy URL (?session=)
@@ -197,10 +204,10 @@ function setupProxy(proxy, bootSignal) {
   // can rehydrate its terminals. If none was provided (library use without a host,
   // or localStorage blocked) we mint an ephemeral per-load id: durable across
   // reconnects, but not across a reload.
-  self.__nvimSession = (typeof proxy.session === 'string' && proxy.session)
+  S.__nvimSession = (typeof proxy.session === 'string' && proxy.session)
     ? proxy.session
-    : ((self.crypto && self.crypto.randomUUID)
-        ? self.crypto.randomUUID()
+    : ((S.crypto && S.crypto.randomUUID)
+        ? S.crypto.randomUUID()
         : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
 
   // Stage 5: a RECONNECTING facade (wasm/proxy-reconnect.js) — a stable object the
@@ -209,29 +216,29 @@ function setupProxy(proxy, bootSignal) {
   // -EIO instead of hanging), preserves the push router across reconnects, and
   // re-dials with backoff after a drop. The engine itself never restarts — only
   // the wire reconnects, so buffers/undo survive a blip (see docs/history/stage5.md §6).
-  self.__nvimProxy = self.ProxyReconnect.createReconnectingProxy({
-    ProxyClient: self.ProxyClient,
+  S.__nvimProxy = S.ProxyReconnect.createReconnectingProxy({
+    ProxyClient: S.ProxyClient,
     dial: function () {
-      var url = proxy.url + (proxy.url.indexOf('?') >= 0 ? '&' : '?') +
-        'session=' + encodeURIComponent(self.__nvimSession);
-      var ws = new WebSocket(url);
+      const url = proxy.url + (proxy.url.indexOf('?') >= 0 ? '&' : '?') +
+        'session=' + encodeURIComponent(S.__nvimSession);
+      const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
       return ws;
     },
     // nvimSocket goes in the hello so the SERVER knows nvim's RPC socket path and
     // can export $NVIM to spawned children (app.js serverstart()s on this path).
-    helloParams: { mount: self.__nvimProxyMount, root: proxy.root, nvimSocket: proxy.nvimSocket },
+    helloParams: { mount: S.__nvimProxyMount, root: proxy.root, nvimSocket: proxy.nvimSocket },
     // Carries the hello ack's result (incl. the proxied `user` -> $USER) to the
     // deferred-boot logic above on every successful (re)connect.
-    onHello: function (result) { try { bootSignal(result); } catch (_e) {} },
-    onStatus: function (ev) {
+    onHello: function (result: any) { try { bootSignal!(result); } catch (_e) {} },
+    onStatus: function (ev: any) {
       try {
         if (ev.kind === 'connected') {
           postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url });
         } else if (ev.kind === 'disconnected') {
           // First disconnect with no prior hello == server unreachable: release the
           // deferred boot so the editor still loads (degraded), rather than hang.
-          bootSignal();
+          bootSignal!();
           postMessage({ kind: 'stderr', text: 'proxy: connection lost — in-flight IO failed; reconnecting…' });
         } else if (ev.kind === 'reconnecting') {
           postMessage({ kind: 'stderr', text: 'proxy: reconnecting in ' + ev.delay + 'ms' });
