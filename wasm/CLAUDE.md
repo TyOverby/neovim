@@ -133,6 +133,5 @@ io-proxy). See `rvim/README.md` and `stage5.md`.
 | `worker.js` | Node engine host (worker_thread) — used by `e2e.test.js`. |
 | `web/` | browser target: `neovim.js` (RPC core), `neovim-ui.js` (renderer), `neovim-utils.js` (helpers), `app.js` (page glue), `engine-worker.js` (Web Worker host), `serve.js`, `build-site.sh`, `build-lib.sh`, `*.mjs` ESM mirrors, `e2e.test.js`, `reconnect.test.js`. |
 | `rvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/rvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |
-| `spikes/` | throwaway proof-of-concepts for stage-5 risks (ssh-stdio, reconnect, durable-term adopt). Reference only, not built or shipped. |
 | `stage{1..5}.md` | design history per stage. |
 | `*.log` | gitignored build logs from prior runs. |
