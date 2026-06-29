@@ -505,12 +505,25 @@ bundle embedded, then point it at the project you want to edit:
 wasm/build-deps.sh && wasm/build-nvim.sh        # the wasm engine (once)
 cd wasm/rvim
 ../web/build-site.sh server/site                # assemble the bundle into the embed dir
+./precompress.sh server/site                    # gzip the big assets in place (optional)
 go build -tags embed_assets -o rvim ./cmd/rvim  # self-contained binary (bundle baked in)
 ./rvim --root /path/to/project --port 8001 --proxy
 ```
 
+`precompress.sh` gzips the large assets (`nvim.wasm`, the `nvim-*.data`
+packages, the JS) in place and drops the raw originals, so the binary embeds the
+**compressed** bytes and serves them with `Content-Encoding: gzip` — no
+per-request compression, the binary shrinks ~47 MB → ~20 MB, and the wasm/`.data`
+downloads to ~26 % of raw. It is optional: skip it and the binary embeds the raw
+bundle and serves it uncompressed, exactly as before. The `AssetServer` is generic
+— it prefers a `<name>.gz` sibling for gzip-capable clients, gunzips on the fly for
+the rare client that can't, and serves raw (with Range support) when there is no
+`.gz`. (CI runs `precompress.sh` automatically before the embed build.)
+
 (For dev, skip the embed and serve the bundle off disk: `go build -o rvim
-./cmd/rvim` then `./rvim --assets-dir <build-site output> --root … --proxy`.)
+./cmd/rvim` then `./rvim --assets-dir <build-site output> --root … --proxy`. The
+dev `--assets-dir` path is raw build-site.sh output, so it serves uncompressed
+with Range — `precompress.sh` only touches the embed copy.)
 
 **Editing a remote host** (the three-tier mode): run `rvim` on a machine you can
 reach in a browser (e.g. your laptop) and point it at the box that holds the files

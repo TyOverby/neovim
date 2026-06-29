@@ -23,9 +23,12 @@ func EmbeddedAssets() (fs.FS, bool) {
 		return nil, false
 	}
 	// Confirm there's actually an index.html (an empty site/ would compile but
-	// serve nothing useful).
+	// serve nothing useful). precompress.sh may have gzipped it to index.html.gz
+	// and dropped the raw, so accept either — the AssetServer serves both.
 	if _, err := fs.Stat(sub, "index.html"); err != nil {
-		return nil, false
+		if _, err := fs.Stat(sub, "index.html.gz"); err != nil {
+			return nil, false
+		}
 	}
 	return sub, true
 }

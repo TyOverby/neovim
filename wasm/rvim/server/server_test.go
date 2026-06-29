@@ -1,13 +1,17 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // startTestServer brings up a server with a synthetic flat bundle dir and
@@ -113,6 +117,89 @@ func TestStaticMIMEAndRange(t *testing.T) {
 	// A directory path is a 404 (no listing).
 	if resp, _ := get(t, base+"/sub"); resp.StatusCode != 404 {
 		t.Fatalf("GET /sub (dir) = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestStaticPrecompressed covers the precompression-aware lookup: a `.gz`
+// sibling is preferred for gzip-capable clients (served verbatim with
+// Content-Encoding: gzip), gunzipped on the fly for clients that can't take
+// gzip, and a raw-only asset is unaffected. Mirrors what precompress.sh + the
+// embedded release build produce.
+func TestStaticPrecompressed(t *testing.T) {
+	raw := []byte("(()=>{ /* a sizeable app bundle body */ })();")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	zw.Close()
+	gz := buf.Bytes()
+
+	// big.js: precompressed only (raw dropped — the embedded-release shape).
+	// app.js: raw only (the dev --assets-dir shape). both.js: raw + .gz.
+	fsys := fstest.MapFS{
+		"big.js.gz":  {Data: gz},
+		"app.js":     {Data: raw},
+		"both.js":    {Data: raw},
+		"both.js.gz": {Data: gz},
+	}
+	a := NewAssetServer(fsys)
+	do := func(path, ae string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if ae != "" {
+			req.Header.Set("Accept-Encoding", ae)
+		}
+		rec := httptest.NewRecorder()
+		a.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// gzip client + precompressed sibling: serve the .gz bytes verbatim, with
+	// the LOGICAL .js content type (not the gz's), Content-Encoding, and Vary.
+	rec := do("/big.js", "gzip, deflate, br")
+	if rec.Code != 200 || rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("big.js gzip = %d enc=%q", rec.Code, rec.Header().Get("Content-Encoding"))
+	}
+	if !bytes.Equal(rec.Body.Bytes(), gz) {
+		t.Fatalf("big.js gzip body is not the verbatim .gz bytes")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Fatalf("big.js content-type = %q, want text/javascript", ct)
+	}
+	if rec.Header().Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("big.js missing Vary: Accept-Encoding")
+	}
+
+	// non-gzip client, only the .gz exists: decompress on the fly to identity.
+	rec = do("/big.js", "")
+	if rec.Code != 200 || rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("big.js identity = %d enc=%q", rec.Code, rec.Header().Get("Content-Encoding"))
+	}
+	if !bytes.Equal(rec.Body.Bytes(), raw) {
+		t.Fatalf("big.js identity body = %q, want decompressed raw", rec.Body.Bytes())
+	}
+
+	// raw-only asset with a gzip client: no .gz sibling, so plain raw (no
+	// Content-Encoding, no Vary — nothing to vary on).
+	rec = do("/app.js", "gzip")
+	if rec.Code != 200 || rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("app.js gzip = %d enc=%q, want raw", rec.Code, rec.Header().Get("Content-Encoding"))
+	}
+	if !bytes.Equal(rec.Body.Bytes(), raw) {
+		t.Fatalf("app.js body mismatch")
+	}
+
+	// both present: gzip client gets the .gz; identity client gets raw. Both Vary.
+	if rec := do("/both.js", "gzip"); rec.Header().Get("Content-Encoding") != "gzip" || rec.Header().Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("both.js gzip enc=%q vary=%q", rec.Header().Get("Content-Encoding"), rec.Header().Get("Vary"))
+	}
+	if rec := do("/both.js", "identity"); rec.Header().Get("Content-Encoding") != "" || rec.Header().Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("both.js identity enc=%q vary=%q", rec.Header().Get("Content-Encoding"), rec.Header().Get("Vary"))
+	}
+
+	// q=0 explicitly disables gzip even though the token is present.
+	if rec := do("/big.js", "gzip;q=0"); rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("gzip;q=0 should not serve gzip, got enc=%q", rec.Header().Get("Content-Encoding"))
 	}
 }
 

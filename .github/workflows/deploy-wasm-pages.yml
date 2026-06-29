@@ -111,6 +111,13 @@ jobs:
           name: wasm-site
           path: wasm/rvim/server/site
 
+      # Gzip the large assets in place (raw dropped) so the binary embeds the
+      # compressed bytes and serves them with Content-Encoding: gzip. Shrinks the
+      # binary ~47MB -> ~20MB and the wasm/.data downloads to ~26%.
+      - name: Precompress embedded assets
+        working-directory: wasm/rvim
+        run: ./precompress.sh server/site
+
       - name: Cross-compile rvim
         working-directory: wasm/rvim
         env:
