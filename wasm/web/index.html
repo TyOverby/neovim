@@ -43,14 +43,8 @@
 </style>
 </head>
 <body>
-  <h1>Neovim → WebAssembly — character-grid UI</h1>
   <div id="status">loading…</div>
   <pre id="screen" aria-label="Neovim screen"></pre>
-  <div class="hint">
-    Engine (<code>nvim --embed</code>) runs in a Web Worker; this page is a pure-JS
-    msgpack-RPC client rendering the <code>ext_linegrid</code> grid. Click the grid, then type.
-    Drag the bottom-right corner (or resize the window) to reflow the grid.
-  </div>
 
   <!-- Standalone app: when this page is served BY `rvim --proxy`,
        /proxy-config.js sets window.__NVIM_PROXY = { url, mount, root } and app.js
