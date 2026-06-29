@@ -17,9 +17,11 @@ BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 OUT="${1:-${ROOT}/_site}"
 
-# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/.
-# Build it first so the site always ships fresh artifacts (idempotent, no bundler).
+# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/,
+# and the proxy client (proxy-client.js / proxy-reconnect.js, copied below) from
+# wasm/src. Build both first so the site always ships fresh artifacts (idempotent).
 "${WEB}/build-ts.sh"
+"${ROOT}/wasm/build-ts.sh"
 
 # Shared engine + the three runtime-variant packages (full/core/minimal). The
 # demo ships all three so it can switch via create({ plugins }) in the browser.

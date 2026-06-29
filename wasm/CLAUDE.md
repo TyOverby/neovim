@@ -60,8 +60,9 @@ rebuild (`build-nvim.sh`).
 | Script | Produces / does | Prereqs · key flags |
 |---|---|---|
 | `web/build-ts.sh` | Compiles the page + library **TypeScript** (`web/src/*.ts`) into `web/dist/` (gitignored): `neovim{,-ui,-utils}.js` (UMD + global), `.mjs` (ESM), `.d.ts`/`.d.mts`, `app.js`, `engine-worker.js`. Three `tsc` passes (no bundler); cores are UMD-wrapped by `web/tools/umd-wrap.mjs`. Also runnable as `npm run build` in `wasm/web`. | Needs `npm install` in `wasm/web` (the `typescript` devDependency). |
+| `build-ts.sh` | Compiles the wasm/ host **TypeScript** (`src/*.ts`) **in place** (gitignored) to the filenames the engine build + hosts expect: `proxy-client.js` / `proxy-reconnect.js` (UMD — `require()` in Node + `self.ProxyClient`/`ProxyReconnect` under classic-worker importScripts) and `worker.js` (Node worker_thread host, CommonJS). Two `tsc` passes; proxy client UMD-wrapped by `tools/umd-wrap.mjs`. The six Emscripten link inputs (`pre.js`, `extern-pre.js`, `nvim_io.js`, `nvim_{fs,proc,sock}_proxy.js`) are **not** built here — they stay hand-written. | Needs `npm install` in `wasm/` (`typescript` + `@types/node`). `build-nvim.sh` / `build-site.sh` / `build-lib.sh` run it for you. |
 | `build-deps.sh` | Cross-compiles libuv, PUC Lua 5.1, lpeg, luv, tree-sitter (+ parsers), unibilium, utf8proc → `.deps-wasm/usr`. Vendors libuv internal headers into the install (for `uv_stubs.c`). | **Fast path**: exits early if `.deps-wasm/usr/lib/liblua.a` exists. CI caches only `.deps-wasm/usr` (never the configure tree — it embeds emsdk's absolute path). Force a rebuild by removing `.deps-wasm`. |
-| `build-nvim.sh [extra cmake args…]` | Cross-compiles `nvim` → `build-wasm/bin/nvim.{js,wasm}`; copies the Node engine host (`worker.js`, `proxy-client.js`, `proxy-reconnect.js`) next to it; stages + `file_packager`s the **three runtime variants** (`nvim-{full,core,minimal}.data` + `.data.js`); generates `doc/tags` for `full`; runs the **boot gate**; installs `wasm/web` npm deps. Extra args pass through to the configure `cmake`. | Needs `build-deps.sh` done + `build/lib/libnlua0.so` + `.deps/usr/bin/luajit`. Runtime is **not** baked into `nvim.wasm` — it's packaged out-of-band per variant (see *Runtime variants* below). |
+| `build-nvim.sh [extra cmake args…]` | Cross-compiles `nvim` → `build-wasm/bin/nvim.{js,wasm}`; compiles the wasm/ host TS (`build-ts.sh`) and copies the Node engine host (`worker.js`, `proxy-client.js`, `proxy-reconnect.js`) next to it; stages + `file_packager`s the **three runtime variants** (`nvim-{full,core,minimal}.data` + `.data.js`); generates `doc/tags` for `full`; runs the **boot gate**; installs `wasm/` + `wasm/web` npm deps. Extra args pass through to the configure `cmake`. | Needs `build-deps.sh` done + `build/lib/libnlua0.so` + `.deps/usr/bin/luajit`. Runtime is **not** baked into `nvim.wasm` — it's packaged out-of-band per variant (see *Runtime variants* below). |
 | `web/build-site.sh [out=_site]` | Flat, relative-path **demo site** (all three variants, msgpack UMD, a no-op `proxy-config.js`, `.nojekyll`). For GitHub Pages / any static host. Runs `build-ts.sh` first, then ships `web/dist/`. | Needs `build-nvim.sh` + `npm install` in `wasm/web`. |
 | `web/build-lib.sh [out=_lib] [version] [--variant full\|core\|minimal\|all]` | Redistributable **npm library** bundle: UMD + ESM entry points + **`.d.ts`/`.d.mts` types**, engine worker, msgpack (UMD + ESM under `msgpack.esm/`), engine assets, generated `package.json` with an `exports` map (incl. `types`). Runs `build-ts.sh` first. `--variant` selects which runtime(s) to ship (default `full`; `all` = switchable at runtime). Version defaults from `CMakeLists.txt`. | Same prereqs as `build-site.sh`. |
 | `rvim/build-release.sh` | Cross-compiles **self-contained `rvim` binaries** (`CGO_ENABLED=0`, `-tags embed_assets`, bundle baked in) into `rvim/dist/` for a target set. | Needs the wasm engine built. `TARGETS="linux/amd64 darwin/arm64" ./build-release.sh` to override (default: linux/darwin × amd64/arm64). Embeds via `web/build-site.sh server/site` first. |
@@ -85,7 +86,7 @@ packages are a browser-only concern.
 | Command | What it tests | Notes |
 |---|---|---|
 | `node wasm/web/e2e.test.js` | Boots the real engine in a Node `worker_thread` (`worker.js`) and drives it through the compiled `dist/neovim.js` + `neovim-ui.js` + `neovim-utils.js` — locks the core/renderer split + the msgpack-RPC contract end to end. | Needs `build-nvim.sh` + `wasm/web` npm deps + `dist/` built (`web/build-ts.sh`). Node ≥ 24 (or 22 + flag). Run as `npm test` in `wasm/web` (its `pretest` builds `dist/` first). |
-| `node wasm/web/reconnect.test.js` | The `ReconnectingProxy` fault-injection test: real facade + real `proxy-client` + a mock WS server, with a mid-flight drop → asserts in-flight fail-fast, during-outage fail-fast, auto-reconnect, pushes survive. | Needs `ws` (installed by `build-nvim.sh`). |
+| `node wasm/web/reconnect.test.js` | The `ReconnectingProxy` fault-injection test: real facade + real `proxy-client` + a mock WS server, with a mid-flight drop → asserts in-flight fail-fast, during-outage fail-fast, auto-reconnect, pushes survive. Drives the compiled `wasm/proxy-{client,reconnect}.js`. | Needs `ws` + the wasm/ TS built (both via `build-nvim.sh`, or `cd wasm && npm install && ./build-ts.sh`). |
 | `cd wasm/rvim && go test ./...` | Frame codec unit tests + the **in-process conformance suite** (every IO seam: base/fs/proc/pty/sock, the jail, disconnect cleanup, the SSH-stdio relay, `--rc`, the session-host daemon). No Node, no network. | If `$HOME/go` is read-only, prefix `GOMODCACHE=/tmp/gomodcache`. Run under `-race` for the proc/pty/sock paths. |
 | `cd wasm/rvim && go run ./cmd/conformance` | The same conformance scenarios with a pass/fail summary (non-test entry point). | |
 | `cd wasm/rvim/e2e && go test -v` | **Headless-Chrome** browser→engine→Go-server e2e: real FS read/write, `system()` spawn, `glob`, a `:terminal` PTY, the `--remote` relay, `--rc` modes, durable-terminal rehydrate. | **Separate Go module** (keeps chromedp out of the production build). **Skips** without Chrome or a built bundle. Point at a prebuilt bundle with `RVIM_BUNDLE=<build-site output>`; else it runs `build-site.sh` itself. |
@@ -107,7 +108,11 @@ packages are a browser-only concern.
 - **Help tags.** `doc/tags` (gitignored) is regenerated for `full` by running the
   just-built engine under Node with `:helptags`; without it `:help <topic>` → E149.
 - **npm deps.** Installs `@msgpack/msgpack` (UI client) + `ws` (reconnect test)
-  into `wasm/web/node_modules` if missing.
+  into `wasm/web/node_modules`, and `typescript` + `@types/node` into
+  `wasm/node_modules` (for `wasm/build-ts.sh`), if missing.
+- **wasm/ TS host.** Runs `wasm/build-ts.sh` to compile `wasm/src/*.ts` →
+  `proxy-client.js` / `proxy-reconnect.js` / `worker.js` before copying them next
+  to `nvim.js` in `build-wasm/bin`.
 
 ## The `rvim` standalone server (runtime usage)
 
@@ -135,8 +140,9 @@ io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
 | `shim.h`, `uv_stubs.c`, `extern-pre.js`, `pre.js` | compile/link glue (force-include, libc/libuv gap-fills, argv/`$VIMRUNTIME`/env, `locateFile`). |
 | `nvim_io.js` | JSPI `__syscall_poll` + the postMessage channel for fd 0/1. |
 | `nvim_fs_proxy.js`, `nvim_proc_proxy.js`, `nvim_sock_proxy.js` | the stage-4 **opt-in** `--js-library` proxy backends (FS / process+PTY / socket+DNS). Inert with no proxy. |
-| `proxy-client.js`, `proxy-reconnect.js` | the proxy wire client/codec + the `ReconnectingProxy` facade. |
-| `worker.js` | Node engine host (worker_thread) — used by `e2e.test.js`. |
+| `src/proxy-client.ts`, `src/proxy-reconnect.ts` | **TypeScript** source for the proxy wire client/codec + the `ReconnectingProxy` facade. `build-ts.sh` compiles them to UMD `proxy-client.js` / `proxy-reconnect.js` at the wasm/ root (gitignored). |
+| `src/worker.ts` | **TypeScript** source for the Node engine host (worker_thread) — used by `e2e.test.js`. `build-ts.sh` compiles it to `worker.js` (gitignored). |
+| `build-ts.sh` (+ `tsconfig.*.json`, `tools/umd-wrap.mjs`, `package.json`) | the wasm/ TS build (see the build-scripts table). |
 | `web/src/` | browser target **TypeScript source**: `neovim.ts` (RPC core), `neovim-ui.ts` (renderer), `neovim-utils.ts` (helpers), `*.mts` (ESM entry points), `app.ts` (page glue), `engine-worker.ts` (Web Worker host). |
 | `web/` | build + run harness: `build-ts.sh` (+ `tsconfig.*.json`, `tools/umd-wrap.mjs`), `serve.js`, `build-site.sh`, `build-lib.sh`, `e2e.test.js`, `reconnect.test.js`. `dist/` = gitignored `tsc` output (the `.js`/`.mjs`/`.d.ts` everything else consumes). |
 | `rvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/rvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |

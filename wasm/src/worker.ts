@@ -1,4 +1,4 @@
-// wasm/worker.js - Neovim engine endpoint, run in a Node worker_thread.
+// wasm/src/worker.ts - Neovim engine endpoint, run in a Node worker_thread.
 //
 // Hosts the Neovim engine wasm (`nvim --embed`) directly in this worker and
 // backs its stdin/stdout (fd 0/1) with a postMessage channel to the main thread
@@ -10,6 +10,11 @@
 // The engine does NOT block: nvim's poll() suspends via JSPI and resumes when a
 // message arrives, so this worker keeps returning to its event loop to receive
 // the parent's messages.
+//
+// Compiled (by wasm/build-ts.sh) to a classic Node CommonJS script worker.js
+// (gitignored) -- it is loaded by `new Worker(path)` and require()s nvim.js +
+// proxy-client.js from its own directory at runtime, so it stays require-based
+// and module-wrapper-free. This TypeScript is the SOURCE OF TRUTH.
 'use strict';
 
 const { parentPort, workerData } = require('worker_threads');
@@ -17,13 +22,13 @@ const path = require('path');
 
 // The channel object wasm/nvim_io.js reads (Module.nvimChannel) to back fd 0/1.
 const channel = {
-  inQueue: [],         // bytes from the main thread; drained on fd-0 read
-  closed: false,       // parent went away -> fd-0 read reports EOF
-  notify: null,        // nvim_io installs this; we call it after push/close
-  postOutput: function (u8) { parentPort.postMessage(u8.buffer, [u8.buffer]); },
+  inQueue: [] as any[],   // bytes from the main thread; drained on fd-0 read
+  closed: false,          // parent went away -> fd-0 read reports EOF
+  notify: null as null | (() => void),  // nvim_io installs this; we call it after push/close
+  postOutput: function (u8: Uint8Array) { parentPort.postMessage(u8.buffer, [u8.buffer]); },
 };
 
-parentPort.on('message', function (d) {
+parentPort.on('message', function (d: any) {
   channel.inQueue.push({ buf: new Uint8Array(d), off: 0 });
   if (channel.notify) { channel.notify(); }
 });
@@ -42,15 +47,16 @@ if (process.env.NVIM_LOG_FILE) {
 // Hand the channel + argv to the engine wasm. pre.js reads these globals (it
 // can't see a require()-set Module because Emscripten's own `var Module`
 // shadows it).
-globalThis.__nvimChannel = channel;
-globalThis.__nvimArgs = ['--embed'].concat(workerData.args || []);
+const G = globalThis as any;
+G.__nvimChannel = channel;
+G.__nvimArgs = ['--embed'].concat(workerData.args || []);
 
 // The create() runtime config travels the same seam as args: the Node transport
 // puts it on workerData, we forward it onto the __nvim* globals pre.js reads.
 // (The browser analogue is engine-worker.js doing the same off its init message.)
-if (workerData.env) { globalThis.__nvimEnv = workerData.env; }
-if (workerData.filesystem) { globalThis.__nvimFiles = workerData.filesystem; }
-if (typeof workerData.cwd === 'string') { globalThis.__nvimCwd = workerData.cwd; }
+if (workerData.env) { G.__nvimEnv = workerData.env; }
+if (workerData.filesystem) { G.__nvimFiles = workerData.filesystem; }
+if (typeof workerData.cwd === 'string') { G.__nvimCwd = workerData.cwd; }
 
 // Stage 4 (additive/opt-in): if a proxy URL was supplied, open the IO-proxy
 // WebSocket and wire the shared proxy client, the Node analogue of
@@ -66,8 +72,8 @@ if (workerData.proxy && workerData.proxy.url) {
     // a workerData-provided path, a bare require (when worker.js runs in-tree),
     // and the repo's web-bundle node_modules (../../wasm/web/node_modules from
     // build-wasm/bin). The web bundle is where build-nvim.sh npm-installs ws.
-    let WebSocket = null;
-    const wsCandidates = [];
+    let WebSocket: any = null;
+    const wsCandidates: string[] = [];
     if (workerData.proxy.wsModule) { wsCandidates.push(workerData.proxy.wsModule); }
     wsCandidates.push('ws');
     wsCandidates.push(path.resolve(__dirname, '..', '..', 'wasm', 'web', 'node_modules', 'ws'));
@@ -77,24 +83,24 @@ if (workerData.proxy && workerData.proxy.url) {
     }
     if (!WebSocket) { throw new Error("the 'ws' npm package could not be resolved"); }
     const ws = new WebSocket(workerData.proxy.url);
-    const transport = {
-      send: function (data) { ws.send(data); },
+    const transport: any = {
+      send: function (data: any) { ws.send(data); },
       close: function () { try { ws.close(); } catch (_e) {} },
     };
     const client = createProxyClient(transport);
-    globalThis.__nvimProxy = client;
+    G.__nvimProxy = client;
     // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
     // '/host' when a proxy is configured but no mount was given (documented).
-    globalThis.__nvimProxyMount = (typeof workerData.proxy.mount === 'string' &&
+    G.__nvimProxyMount = (typeof workerData.proxy.mount === 'string' &&
       workerData.proxy.mount.length) ? workerData.proxy.mount : '/host';
-    ws.on('message', function (d) { if (transport.onFrame) { transport.onFrame(d); } });
+    ws.on('message', function (d: any) { if (transport.onFrame) { transport.onFrame(d); } });
     ws.on('open', function () {
-      client.hello({ mount: globalThis.__nvimProxyMount, root: workerData.proxy.root })
+      client.hello({ mount: G.__nvimProxyMount, root: workerData.proxy.root })
         .catch(function () { /* ignore; engine keeps running */ });
     });
     ws.on('close', function () { if (client.onTransportClosed) { client.onTransportClosed(); } });
     ws.on('error', function () { /* ignore; transport errors surface as close */ });
-  } catch (e) {
+  } catch (e: any) {
     // proxy-client.js or ws missing -> skip the seam; the engine still boots
     // (MEMFS/NODEFS only). Surface it on stderr so a misconfigured proxy isn't
     // a silent no-op (Phase 2: mount-path file ops would then fail to open).

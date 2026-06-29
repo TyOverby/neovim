@@ -79,8 +79,10 @@ done
 [ -f "${MSGPACK_ESM}/index.mjs" ] || { echo "missing ${MSGPACK_ESM}/index.mjs (run: cd wasm/web && npm install)"; exit 1; }
 
 # The page + library JS is compiled from TypeScript (wasm/web/src) into dist/ by
-# build-ts.sh. Build it first so the bundle always ships fresh artifacts.
+# build-ts.sh; the proxy client (proxy-client.js / proxy-reconnect.js, copied
+# below) from wasm/src. Build both first so the bundle always ships fresh artifacts.
 "${WEB}/build-ts.sh"
+"${ROOT}/wasm/build-ts.sh"
 
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
