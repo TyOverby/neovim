@@ -773,9 +773,14 @@ wasm/web/build-site.sh _site   # gather the flat, relative-path bundle into _sit
 ```
 
 `.github/workflows/deploy-wasm-pages.yml` does this automatically on every push to
-`wasm-build`: it builds the native host helpers, cross-compiles the deps + nvim to
-wasm, assembles the site, and deploys to Pages. Enable it once under
-**Settings → Pages → Source: GitHub Actions**.
+`wasm-build`. The expensive wasm compile + site assembly is factored into a shared
+composite action (`.github/actions/build-wasm`) and runs **once** in a `build` job;
+its assembled site then fans out to two downstream jobs: `deploy` (uploads it to
+Pages) and `build-rvim` (cross-compiles the `rvim` Go server — see "As a standalone
+application" — for linux/darwin amd64+arm64 with that bundle baked in via
+`-tags embed_assets`, and uploads each binary as a `rvim-<os>-<arch>` artifact).
+Enable Pages once under **Settings → Pages → Source: GitHub Actions**. (Windows is
+not built: the server uses Unix-only syscalls.)
 
 ## How cross-compilation works
 

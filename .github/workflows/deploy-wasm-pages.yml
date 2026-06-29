@@ -1,14 +1,21 @@
-# Build the WebAssembly port and deploy the browser grid UI (wasm/web/) to
-# GitHub Pages. See wasm/README.md and wasm/stage3.md for the architecture.
+# Build the WebAssembly port once, then fan out: deploy the browser grid UI
+# (wasm/web/) to GitHub Pages AND cross-compile the `rvim` standalone-app server
+# (wasm/rvim/) with that same bundle embedded. See wasm/README.md, wasm/stage3.md
+# (browser UI) and wasm/stage5.md (rvim server) for the architecture.
+#
+# The expensive wasm compile + site assembly lives in a shared composite action
+# (.github/actions/build-wasm); the `build` job runs it ONCE and publishes the
+# assembled site as an artifact that both downstream jobs consume — Pages uploads
+# it, and `build-rvim` embeds it into the Go binary (-tags embed_assets).
 #
 # Pages setup (one-time, in the repo): Settings -> Pages -> Build and deployment
 #   -> Source: "GitHub Actions".
-name: Deploy wasm to Pages
+name: Deploy wasm to Pages + build rvim
 
 on:
   push:
     branches: [wasm-build]
-    # Only rebuild when something that affects the wasm build/site changes.
+    # Only rebuild when something that affects the wasm build/site/server changes.
     paths:
       - 'wasm/**'
       - 'src/**'
@@ -17,6 +24,7 @@ on:
       - 'runtime/**'
       - 'CMakeLists.txt'
       - '.github/workflows/deploy-wasm-pages.yml'
+      - '.github/actions/build-wasm/**'
   workflow_dispatch:
 
 # Needed by actions/deploy-pages (OIDC) and to publish the Pages artifact.
@@ -31,6 +39,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cross-compile nvim to wasm and assemble the static site ONCE. The site is
+  # published two ways: as the Pages artifact (for `deploy`) and as a regular
+  # artifact named `wasm-site` (for `build-rvim` to embed into the Go binary).
   build:
     runs-on: ubuntu-latest
     env:
@@ -38,62 +49,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build gettext cmake unzip curl build-essential
-
-      - uses: actions/setup-node@v4
+      - name: Build wasm + assemble site
+        uses: ./.github/actions/build-wasm
         with:
-          node-version: 20
+          em-version: ${{ env.EM_VERSION }}
+          site-dir: _site
 
-      # Emscripten, pinned to the version the wasm build was developed against.
-      - name: Setup Emscripten
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: ${{ env.EM_VERSION }}
-          actions-cache-folder: emsdk-cache-${{ env.EM_VERSION }}
-
-      # The cross build needs two host helpers produced by a native build:
-      # the bundled host luajit (.deps/usr/bin/luajit) and the nlua0 Lua C-module
-      # (build/lib/libnlua0.so) that drives Neovim's C-from-Lua codegen.
-      - name: Cache native deps (.deps)
-        uses: actions/cache@v4
-        with:
-          path: .deps
-          key: native-deps-${{ runner.os }}-${{ hashFiles('cmake.deps/**') }}
-
-      - name: Build native deps + nlua0 host helper
-        run: |
-          cmake -S cmake.deps -B .deps -G Ninja -D CMAKE_BUILD_TYPE=Release
-          cmake --build .deps
-          cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=Release
-          cmake --build build --target nlua0
-
-      # Cache ONLY the install output (libs + headers), never the CMake configure
-      # tree. The configure tree hard-codes emsdk's absolute path, and setup-emsdk
-      # reinstalls emsdk to a fresh random temp dir each run, so a cached configure
-      # tree points at a now-deleted toolchain and breaks the build. usr/ is
-      # path-independent and is all build-nvim.sh consumes (DEPS=.deps-wasm/usr).
-      - name: Cache wasm deps (.deps-wasm/usr)
-        uses: actions/cache@v4
-        with:
-          path: .deps-wasm/usr
-          key: wasm-deps-${{ runner.os }}-${{ env.EM_VERSION }}-${{ hashFiles('cmake.deps/**', 'wasm/build-deps.sh', 'wasm/shim.h') }}
-
-      - name: Cross-compile bundled deps to wasm
-        run: wasm/build-deps.sh
-
-      - name: Cross-compile Neovim to wasm
-        run: wasm/build-nvim.sh
-
-      - name: Assemble the static site
-        run: wasm/web/build-site.sh "${GITHUB_WORKSPACE}/_site"
-
+      # For the Pages deploy.
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+
+      # For the rvim cross-compile (embedded via -tags embed_assets). A plain
+      # artifact (not the Pages one) so build-rvim can download it standalone.
+      - name: Upload site artifact (for rvim embed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-site
+          path: _site
+          retention-days: 7
 
   deploy:
     needs: build
@@ -105,3 +80,51 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # Cross-compile the rvim Go server for each supported host, with the wasm
+  # bundle baked in (-tags embed_assets reads wasm/rvim/server/site/). Windows is
+  # excluded: the server uses Unix-only syscalls (Stat_t, Flock, Setsid, ...).
+  build-rvim:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm/rvim/go.mod
+          cache-dependency-path: wasm/rvim/go.sum
+
+      # The same assembled site the Pages job built — drop it into the embed dir
+      # so `-tags embed_assets` (`//go:embed all:site`) bakes it into the binary.
+      - name: Download wasm site bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-site
+          path: wasm/rvim/server/site
+
+      - name: Cross-compile rvim
+        working-directory: wasm/rvim
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out="rvim-${GOOS}-${GOARCH}"
+          go build -mod=vendor -tags embed_assets -trimpath -o "dist/${out}" ./cmd/rvim
+          ls -l "dist/${out}"
+
+      - name: Upload rvim binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: wasm/rvim/dist/rvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          retention-days: 7
