@@ -307,13 +307,17 @@ rm -rf "${STAGE_ROOT}"
 # tree by wasm/web/serve.js (which also points /nvim.js,/nvim.wasm and the
 # nvim-<variant>.data(.js) packages at this build dir), so nothing is copied. It
 # only needs the msgpack dependency.
-# Deps: @msgpack/msgpack (the UI client) and ws (used by the Node reconnect-facade
-# test, wasm/web/reconnect.test.js). Both are declared in wasm/web/package.json;
-# install if either is missing. (The stage-5 IO-proxy server is the Go `rvim`
-# binary in wasm/rvim/ — no npm server deps.)
+# Deps: @msgpack/msgpack (the UI client), ws (the Node reconnect-facade test,
+# wasm/web/reconnect.test.js), and the typescript devDependency (build-site.sh /
+# build-lib.sh compile wasm/web/src/*.ts via build-ts.sh). All are declared in
+# wasm/web/package.json; a full `npm install` (devDeps included) runs if any is
+# missing. (The stage-5 IO-proxy server is the Go `rvim` binary in wasm/rvim/ —
+# no npm server deps.)
 if command -v npm >/dev/null 2>&1; then
-  if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ] || [ ! -d "${ROOT}/wasm/web/node_modules/ws" ]; then
-    echo "==> Installing wasm/web npm deps (@msgpack/msgpack, ws)"
+  if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ] || \
+     [ ! -d "${ROOT}/wasm/web/node_modules/ws" ] || \
+     [ ! -x "${ROOT}/wasm/web/node_modules/.bin/tsc" ]; then
+    echo "==> Installing wasm/web npm deps (@msgpack/msgpack, ws, typescript)"
     ( cd "${ROOT}/wasm/web" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
       || echo "    (npm install failed; run it manually in wasm/web before serving)"
   fi
