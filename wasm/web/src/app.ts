@@ -15,9 +15,33 @@ declare const NeovimUI: any;
 
 (function () {
   const win = window as any;
-  const statusEl = document.getElementById('status');
+  const toastsEl = document.getElementById('toasts');
   const screenEl = document.getElementById('screen') as HTMLElement;
-  function setStatus(s: string) { if (statusEl) { statusEl.textContent = s; } }
+
+  // Status updates surface as toast notifications: a message slides into the
+  // bottom-right corner and fades out on its own. Consecutive duplicates are
+  // skipped (refreshStatus may recompute the same line), and errors get a
+  // distinct style + a longer dwell. CSS for .toast lives in index.html.
+  let lastToast = '';
+  function setStatus(s: string, opts?: { error?: boolean }) {
+    if (!toastsEl || !s || s === lastToast) { return; }
+    lastToast = s;
+    const el = document.createElement('div');
+    el.className = 'toast' + (opts && opts.error ? ' error' : '');
+    el.textContent = s;
+    toastsEl.appendChild(el);
+    // Force a reflow, then add .show so the CSS transition runs (fade/slide in).
+    // A forced reflow (reading offsetWidth) is used rather than requestAnimationFrame
+    // because rAF is throttled to never in a backgrounded tab, which would leave the
+    // toast stuck at opacity:0.
+    void el.offsetWidth;
+    el.classList.add('show');
+    const dwell = opts && opts.error ? 8000 : 4000;
+    setTimeout(function () {
+      el.classList.remove('show');
+      setTimeout(function () { el.remove(); }, 250);   // after the fade-out transition
+    }, dwell);
+  }
 
   setStatus('starting engine worker…');
 
@@ -106,7 +130,7 @@ declare const NeovimUI: any;
       }
     }
     else if (s.kind === 'exit') { setStatus('engine exited'); }
-    else if (s.kind === 'error') { console.error('engine error', s.error); setStatus('engine error: ' + s.error); }
+    else if (s.kind === 'error') { console.error('engine error', s.error); setStatus('engine error: ' + s.error, { error: true }); }
   });
 
   // Compose the attached/ready status with the proxy connection state (if any).
@@ -185,7 +209,7 @@ declare const NeovimUI: any;
         nvim.request('nvim_cmd', [{ cmd: 'edit', args: [ mount ] }, {}]).catch(function () {});
       }
     })
-    .catch(function (err: any) { setStatus('failed to start: ' + (err && err.message || err)); });
+    .catch(function (err: any) { setStatus('failed to start: ' + (err && err.message || err), { error: true }); });
 
   // 3. Expose a tiny API for debugging / automated testing (unchanged surface).
   win.nvim = {
