@@ -376,93 +376,34 @@ to wire only the `+`/`*` registers.
 > (Node has no `navigator`); the `'browser'` path must be smoke-tested in a real
 > browser.
 
-### Planned API
+### The one remaining gap: cross-origin loading
 
-The snippet below is the longer-term vision for the embedding API. Parts of it
-run today — each feature is annotated with its current status. ESM `import`,
-`baseUrl`, the `build-lib.sh` bundle, an **awaitable `create()`**, the
-**`env` / `cwd` / `filesystem`** runtime config, **`plugins`** (runtime-bundle
-selection), and **`neovim-utils.js`** (the `open_file_in_editor` /
-`read_file` / `write_file` / `create_autocmd` / `add_notify_handler` /
-`on_autocmd` **free functions** — see "Available today"), the **`clipboard`**
-option (see "Clipboard" above), and the renderer's **`font_family` / `font_size`**
-+ **auto-resize** (see `mount_into` under "Available today") now ship. Note the
-helpers ship as free functions `helper(instance, ...)`, **not** as instance
-methods (`instance.helper(...)`) — the snippet below uses the planned-method
-shape, but the real calls are the free-function form. Same-origin-only is the one remaining ESM gap: `import` works,
-but `new Worker()` (and thus `baseUrl`) can't point at a different-origin CDN yet
-— `https://tyoverby.com/neovim.js` from a different origin needs a Blob-bootstrap
-shim that isn't built.
+Everything described under **Available today** is the whole embedding API — the
+"longer-term vision" has landed. ESM `import`, `baseUrl`, the `build-lib.sh`
+bundle, the awaitable `create()`, the `env` / `cwd` / `filesystem` / `plugins`
+runtime config, the `neovim-utils.js` helpers, the `clipboard` option, and the
+renderer's `font_family` / `font_size` + auto-resize all ship.
+
+The **single** thing that doesn't work yet is **cross-origin** loading. `import`
+from another origin is fine, but `new Worker()` (which `create()` uses, and which
+`baseUrl` configures) is **same-origin only** — so `baseUrl` may be a subpath of
+the page's own origin but not a different-origin CDN:
 
 ```js
-// SHIPS TODAY as a local/same-origin import (e.g. './neovim.mjs' or '/lib/neovim.mjs').
-// PLANNED: cross-ORIGIN import-from-URL like the absolute URL below still needs a
-// Blob-bootstrap shim for the worker (new Worker is same-origin only).
-import neovim from 'https://tyoverby.com/neovim.js';
+// Works today: same-origin import + baseUrl.
+import { create } from '/lib/neovim.mjs';
+const nvim = create({ args: ['-n'], baseUrl: '/lib/' });
 
-// utilities for hooking up a neovim instance to a dom element (SHIPS TODAY at
-// neovim-ui.mjs; cross-origin URL still PLANNED as above)
-import { mount_into } from 'https://tyoverby.com/neovim-ui.js';
-
-// SHIPS TODAY at neovim-utils.mjs: the helpers are FREE FUNCTIONS that take the
-// instance as the first arg (helper(instance, ...)), NOT instance methods.
-// (cross-origin URL still PLANNED as above.)
-import { open_file_in_editor, on_autocmd, read_file }
-  from 'https://tyoverby.com/neovim-utils.js';
-
-// SHIPS TODAY: `await neovim.create(...)` resolves to a ready instance (create()
-// returns an awaitable promise-facade). The synchronous pattern still works too:
-// `const nvim = neovim.create({...}); await nvim.ready;`
-const instance = await neovim.create({
-  // SHIPS TODAY: selects which packaged runtime bundle the engine loads --
-  // 'full' (default) | 'core' | 'minimal', all sharing one nvim.wasm. NOT about
-  // toggling `-u NONE`. See "Runtime bundles" above.
-  plugins: 'full',
-  // SHIPS TODAY: chdir into this dir after the filesystem is seeded.
-  cwd: "/bar",
-  // SHIPS TODAY: seed files into the in-memory wasm FS before boot (parent dirs
-  // are created; values are string or Uint8Array contents).
-  filesystem: { "/bar/foo.txt": "content of /bar/foo.txt" },
-  // SHIPS TODAY: environment overrides applied on top of the defaults.
-  env: { "HOME": "/bar" },
-  // SHIPS TODAY: back the +/* registers with the system clipboard via
-  // navigator.clipboard (or pass a custom { get, set } provider). See "Clipboard".
-  clipboard: "browser"
-});
-
-// SHIPS TODAY: a free function (instance is the first arg).
-await open_file_in_editor(instance, "/bar/foo.txt");
-
-// SHIPS TODAY: the whole "notify me on save" round-trip in one call. on_autocmd
-// creates the augroup + autocmd whose action rpcnotify()s back at us AND
-// registers the handler; `payload.file` is expand('<afile>:p'). It replaces the
-// ~15-line create_autocmd + add_notify_handler dance shown previously. The
-// lower-level free functions (create_autocmd(instance, events, opts),
-// add_notify_handler(instance, name, fn)) are also available if you want to wire
-// the two halves yourself.
-const handle = await on_autocmd(instance, ["BufWritePost"], { pattern: ["*"] },
-  async ({ file }) => {
-    // read_file(instance, path) reads the engine FS (null if missing).
-    let contents = await read_file(instance, file);
-    alert(file + " has been saved: " + contents);
-  });
-// handle.unsubscribe();  // stop notifications + delete the augroup
-
-// mount_into ships today: it renders COLOUR (decodes the ext_linegrid highlight
-// stream into fg/bg/bold/italic/underline/undercurl/strikethrough/reverse spans)
-// and accepts `font_family` / `font_size`. Omitting `cols`/`rows` AUTO-SIZES the
-// grid to the element and tracks its resizes (a ResizeObserver drives
-// nvim_ui_try_resize); passing `cols`/`rows` keeps a fixed grid. (mount_into is
-// synchronous — no `await` needed.)
-const ui = mount_into(instance, document.querySelector(".code-container"), {
-  font_family: "monospace",
-  font_size: 16,
-});
+// Not yet: a different-origin CDN. `new Worker('https://cdn.example/…')` is
+// blocked by the same-origin policy; supporting it needs a Blob-bootstrap shim
+// for the worker that isn't built.
+import { create } from 'https://cdn.example/neovim.mjs';   // import is fine…
+// …but create({ baseUrl: 'https://cdn.example/' }) can't spawn the worker (yet).
 ```
 
-The end goal is that you have the full power of the neovim RPC API, and can even
-build extensions as an embedder, allowing neovim to seamlessly communicate with
-the rest of your application.
+The end goal — the full neovim RPC API, with embedders building extensions so
+neovim communicates with the rest of the app — is reachable today; only hosting
+the bundle on a third-party origin awaits the worker shim.
 
 ## As a chrome extension
 
