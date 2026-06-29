@@ -1,4 +1,4 @@
-// wasm/web/serve.js - Dev server for the browser build.
+// wasm/web/serve.js - Plain static dev server for the browser build.
 //
 // The transport is postMessage (not SharedArrayBuffer), so the page needs NO
 // special headers — this is a plain static server, the same as any host would
@@ -7,9 +7,12 @@
 //     engine-worker.js)                                   -> wasm/web/
 //   * the msgpack UMD bundle (msgpack.min.js)             -> node_modules
 //   * the wasm build artifacts (nvim.js/.wasm/.data)      -> build-wasm/bin/
+//   * the proxy client (proxy-client.js, proxy-reconnect.js), which the engine
+//     worker importScripts at runtime                     -> wasm/
 //
 // So you can edit the page JS and just reload — only pre.js/runtime changes need
-// a rebuild.  Usage:  node wasm/web/serve.js [port]
+// a rebuild. The standalone-app server is the Go `rvim` binary (wasm/rvim/); this
+// is just the no-proxy dev server.  Usage:  node wasm/web/serve.js [port]
 'use strict';
 
 const http = require('http');
@@ -33,11 +36,9 @@ const TYPES = {
   '.map': 'application/json',
 };
 
-// Map a request URL path to a file on disk (or null to forbid). This is the
-// static-serving logic both serve.js and the stage-4 server.js use: page +
-// library from wasm/web, engine assets from build-wasm/bin, plus proxy-client.js
-// (the stage-4 IO-proxy client) which the engine worker importScripts at runtime
-// and therefore must be served next to neovim.js.
+// Map a request URL path to a file on disk (or null to forbid): page + library
+// from wasm/web, engine assets from build-wasm/bin, and the proxy client from
+// wasm/ (the engine worker importScripts it relative to its own URL).
 function resolveStaticPath(urlPath) {
   if (urlPath === '/' || urlPath === '') { return path.join(WEB, 'index.html'); }
   // Engine assets live in build-wasm/bin: nvim.js/.wasm and the per-variant
@@ -47,20 +48,16 @@ function resolveStaticPath(urlPath) {
     return path.join(BUILD, urlPath);
   }
   if (urlPath === '/msgpack.min.js') { return MSGPACK; }
-  // The stage-4 IO-proxy client lives one dir up (wasm/), not in wasm/web; the
-  // engine worker importScripts('proxy-client.js') relative to its own URL, so
-  // it must resolve at the bundle root.
+  // The proxy client + reconnect facade live one dir up (wasm/), not in wasm/web;
+  // the engine worker importScripts them relative to its own URL, so they must
+  // resolve at the bundle root.
   if (urlPath === '/proxy-client.js') { return path.join(WASM, 'proxy-client.js'); }
-  // The stage-5 ReconnectingProxy, importScripted by the engine worker right
-  // after proxy-client.js; same bundle-root resolution.
   if (urlPath === '/proxy-reconnect.js') { return path.join(WASM, 'proxy-reconnect.js'); }
   // Everything else from wasm/web, but never escape it.
   const p = path.normalize(path.join(WEB, urlPath));
   return p.startsWith(WEB) ? p : null;
 }
 
-// Serve a static request given a pre-resolved file path (or null -> 403). Shared
-// by serve.js and server.js so the file-serving behavior stays identical.
 function serveStaticFile(file, urlPath, res) {
   res.setHeader('Cache-Control', 'no-store');
   if (!file) { res.statusCode = 403; res.end('forbidden'); return; }
@@ -75,8 +72,7 @@ function serveStaticFile(file, urlPath, res) {
   });
 }
 
-// The request handler for the plain no-proxy dev server.
-function handleStaticRequest(req, res) {
+function handleRequest(req, res) {
   const urlPath = decodeURIComponent(req.url.split('?')[0]);
   // The page unconditionally loads /proxy-config.js (the standalone-app hook):
   // the `rvim --proxy` Go server GENERATES it with the real proxy config so
@@ -92,36 +88,21 @@ function handleStaticRequest(req, res) {
   serveStaticFile(resolveStaticPath(urlPath), urlPath, res);
 }
 
-// Warn early if the wasm build is stale (the page needs nvim.js + a runtime
-// data package). Shared so server.js can surface the same hint.
-function warnIfBuildStale(warn) {
+// Warn early if the wasm build is stale (the page needs nvim.js + a runtime data
+// package).
+function warnIfBuildStale() {
   const missing = ['nvim.js', 'nvim.wasm', 'nvim-full.data.js', 'nvim-full.data']
     .filter(function (f) { return !fs.existsSync(path.join(BUILD, f)); });
   if (missing.length) {
-    warn('missing in ' + BUILD + ': ' + missing.join(', '));
-    warn('Run wasm/build-nvim.sh to (re)build the engine + runtime data packages.');
+    console.warn('  WARNING: missing in ' + BUILD + ': ' + missing.join(', '));
+    console.warn('  WARNING: Run wasm/build-nvim.sh to (re)build the engine + runtime data packages.');
   }
 }
 
-module.exports = {
-  TYPES: TYPES,
-  WEB: WEB,
-  WASM: WASM,
-  BUILD: BUILD,
-  resolveStaticPath: resolveStaticPath,
-  serveStaticFile: serveStaticFile,
-  handleStaticRequest: handleStaticRequest,
-  warnIfBuildStale: warnIfBuildStale,
-};
-
-// Run as a standalone dev server only when invoked directly (`node serve.js`),
-// not when required() by server.js for its helpers.
-if (require.main === module) {
-  const PORT = parseInt(process.argv[2] || '8000', 10);
-  http.createServer(handleStaticRequest).listen(PORT, function () {
-    console.log('serving Neovim wasm grid UI on http://localhost:' + PORT);
-    console.log('  web assets : ' + WEB);
-    console.log('  wasm build : ' + BUILD);
-    warnIfBuildStale(function (m) { console.warn('  WARNING: ' + m); });
-  });
-}
+const PORT = parseInt(process.argv[2] || '8000', 10);
+http.createServer(handleRequest).listen(PORT, function () {
+  console.log('serving Neovim wasm grid UI on http://localhost:' + PORT);
+  console.log('  web assets : ' + WEB);
+  console.log('  wasm build : ' + BUILD);
+  warnIfBuildStale();
+});
