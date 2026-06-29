@@ -605,6 +605,37 @@ The proxy is **additive and opt-in**: nothing connects to a server unless a
   paths under `mount` (and all spawn/PTY) to the server. With **no `proxy`**, the
   library is byte-for-byte the self-contained MEMFS build it has always been.
 
+### Reconnect + durable `:terminal`
+
+> **Status: ✅ shipped (stage 5).** Design in `stage5.md` §6; verified by
+> `wasm/web/reconnect.test.js` and `wasm/rvim/e2e/e2e_durable_term_test.go`.
+
+The **browser engine is the only durable state.** On any transport drop, the
+`ReconnectingProxy` (`wasm/proxy-reconnect.js`, wired by `web/engine-worker.js`)
+**fails in-flight ops fast** — a suspended syscall returns `-EIO` rather than
+hanging — then **re-dials with backoff** so the next op succeeds. There is no
+transparent replay: idempotent IO (reads/writes) retries, one-shot spawns re-run.
+The engine never restarts; your buffers, undo, and plugin state live in the
+browser and are untouched by a blip.
+
+The one deliberate exception is **`:terminal`**, which is long-lived stateful
+session (a running shell, an `ssh`/`top` inside it, scrollback, cwd) that can't
+just be "re-triggered." A per-user **session-host daemon** (`rvim --session-host`,
+**auto-spawned** detached by the io-proxy — you don't run it by hand) owns the PTY
+children *outside any single connection*, keyed by a stable per-tab session id.
+On disconnect it **keeps the shells running** and buffers their output; on
+reattach it **replays** the buffer so the terminal catches up. PTYs are reaped
+only on an idle TTL or explicit kill — never on a mere disconnect. Because the
+daemon lives on the IO host, terminals survive an **app-server restart** and a
+**hard SSH death** while the tab is alive.
+
+The *cold* case (the tab/engine itself gone — reload, reboot) is covered by
+**`:mksession` rehydration**: the daemon **matches a restore-spawn to a
+still-running PTY by (resolved cwd, argv)** and reattaches, replaying its output
+ring so libvterm repaints — so `:terminal` → `:mksession` → reload → `:source`
+brings the terminal back on its live shell. No persisted pid, no C/engine change,
+no wasm recompile. (Limit: only as durable as the daemon's idle TTL and ring cap.)
+
 ### Security model — read before exposing it
 
 The server is a **remote-code-execution surface by design**: `:!rm -rf`,
@@ -642,10 +673,14 @@ process's privileges. The defaults reflect that:
   demo and the Node e2e suites; the `serve.js` static demo intentionally has no
   proxy.
 
-### Where this is going — `rvim` (stage 5, designed)
+### The three-tier remote — `rvim` (stage 5)
 
-> **Status: design + spikes.** Full design and phase plan in `stage5.md`; the two
-> riskiest mechanisms are de-risked (spikes green). Not yet built.
+> **Status: ✅ shipped.** Full design and phase plan in `stage5.md`. The binary,
+> the SSH-stdio remote, the reconnect contract, durable terminals, and `--rc` all
+> ship today; what's left is the full `--site` routing table, auth/TLS for
+> non-loopback binds, and the protocol `cancel` frame. Verified by the Go
+> conformance suite (`wasm/rvim/conformance/`) + headless-Chrome e2e
+> (`wasm/rvim/e2e/`). The `rvim --remote user@host` Quickstart above is this.
 
 Stage 4 proxies IO to a server on **the same machine** that serves the page.
 Stage 5 (`rvim`, "remote vim") separates those roles, because the machine holding
@@ -673,9 +708,10 @@ The headline pieces (see `stage5.md`):
   transport (WebSocket / SSH stdio / in-process), gaining a `version` field and a
   `cancel` frame.
 - **`rvim` / `rvim --remote user@host`** — SSH stdio is the remote transport
-  (ssh handles encryption + auth; the remote io-proxy binds no ports). `--site`
-  and `--rc` (`bundled`|`local`|`remote`) pick where the runtime files and your
-  config come from, via a two-layer prefix-routing table.
+  (ssh handles encryption + auth; the remote io-proxy binds no ports). `--rc`
+  (`remote`|`local`|`builtin`) picks where the in-browser nvim's config / `$HOME`
+  comes from (see the Quickstart's three-tier section); the full `--site` runtime
+  routing table is the remaining piece.
 - **Reconnect contract** — *the browser engine is the only durable state; on any
   disconnect, in-flight ops fail fast (`-EIO`, never hang), live handles tear
   down, then the transport reconnects so the next op succeeds.* No transparent
@@ -683,8 +719,9 @@ The headline pieces (see `stage5.md`):
 - **Auth** — `127.0.0.1` by default (covers nginx-on-loopback); binding wider
   requires a token + TLS.
 - **Testing** — Go unit tests on the io-proxy library, a language-neutral
-  protocol conformance suite (the stage-4 Node server is the reference oracle),
-  and `chromedp`-driven headless-browser e2e including fault injection.
+  protocol conformance suite (originally validated against the stage-4 Node
+  reference, since removed; now the Go server's in-process contract test), and
+  `chromedp`-driven headless-browser e2e including fault injection.
 
 # Neovim on WebAssembly (Emscripten + Node / Browser)
 
@@ -722,6 +759,8 @@ What works today (`node nvim.js -- <args>`):
 | Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone *library* (no spawn in wasm) · ✅ under the **standalone server** (proxied to the host — stage 4) |
 | **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (the `rvim` Go server — `wasm/rvim/`; see `stage5.md`) |
+| **Three-tier remote (`rvim --remote user@host` over SSH stdio)** | ✅ (stage 5 — `wasm/rvim/`; see `stage5.md`) |
+| **Reconnect (fail-fast `-EIO` + auto re-dial) + durable `:terminal`** | ✅ (the session-host daemon + `:mksession` rehydrate — `wasm/proxy-reconnect.js`, `wasm/rvim/server/sessionhost.go`) |
 
 ## Prerequisites
 
