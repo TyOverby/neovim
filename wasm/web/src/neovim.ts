@@ -326,19 +326,44 @@ function browserClipboardProvider(): ClipboardProvider {
   function clip(): any {
     return (typeof navigator !== 'undefined' && navigator.clipboard) || null;
   }
+  // A plain-text clipboard cannot carry nvim's regtype (charwise 'v' vs linewise
+  // 'V' vs blockwise 'b'), so a naive round-trip would turn every `yy` into a
+  // charwise paste (`yyp` -> "linelines" instead of two lines). We recover the
+  // regtype two ways, mirroring nvim's own provider/clipboard.vim:
+  //   1. cache the last value WE wrote, and reuse its regtype when the clipboard
+  //      still holds it (the common in-editor yank->put); and
+  //   2. otherwise infer from a trailing newline -- the same convention the
+  //      shell providers (xclip/pbcopy/win32yank) use: text ending in "\n" is
+  //      linewise. This makes copy/paste with external apps behave sanely too.
+  let last: { text: string; value: [string[], string] } | null = null;
   return {
     get: function () {
       const c = clip();
       if (!c || typeof c.readText !== 'function') {
         return Promise.reject(new Error('clipboard: navigator.clipboard.readText unavailable'));
       }
-      return c.readText().then(function (text: any): [string[], string] {
-        return [String(text == null ? '' : text).split('\n'), 'v'];
+      return c.readText().then(function (raw: any): [string[], string] {
+        const text = String(raw == null ? '' : raw);
+        // If the clipboard still holds what we last copied, reuse its regtype.
+        // Some platform clipboards strip a lone trailing newline, so match the
+        // stored text with and without it.
+        if (last && (text === last.text || text + '\n' === last.text)) {
+          return [last.value[0].slice(), last.value[1]];
+        }
+        // External copy: a trailing newline marks a linewise selection.
+        if (text.length > 0 && text.charAt(text.length - 1) === '\n') {
+          return [text.slice(0, -1).split('\n'), 'V'];
+        }
+        return [text.split('\n'), 'v'];
       });
     },
     set: function (lines, regtype) {
       const c = clip();
-      const text = Array.isArray(lines) ? lines.join('\n') : String(lines == null ? '' : lines);
+      const arr = Array.isArray(lines) ? lines : [String(lines == null ? '' : lines)];
+      const text = arr.join('\n');
+      // Remember the exact bytes + regtype so a later get() can restore the
+      // regtype the plain-text clipboard would otherwise lose.
+      last = { text: text, value: [arr.slice(), regtype || 'v'] };
       if (!c || typeof c.writeText !== 'function') {
         if (typeof console !== 'undefined') {
           console.warn('clipboard: navigator.clipboard.writeText unavailable; copy ignored');
