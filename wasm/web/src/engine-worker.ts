@@ -118,43 +118,56 @@ onmessage = function (e: MessageEvent) {
     if (init.proxy && init.proxy.url) {
       const bootBackstop = setTimeout(function () {
         try { postMessage({ kind: 'stderr', text: 'proxy: no hello within timeout; booting without server identity' }); } catch (_e) {}
-        bootEngine();
+        bootSignal();
       }, 8000);
+      const hasUserCwd = (typeof init.cwd === 'string');
       function bootSignal(helloResult?: any) {
         if (helloResult && typeof helloResult.user === 'string' && helloResult.user) {
           S.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
         }
-        // --rc remote/local: point $HOME at the IO host's home (reported by the
-        // hello as the in-editor `homeDir`), so $HOME/$USER reflect the box.
-        // pre.js reads __nvimProxyHome before main(). Only when the host's home is
-        // reachable under the mount (homeDir non-empty); else warn and stay default.
-        //   remote — nvim loads the box's config + plugins live from $HOME.
-        //   local  — $HOME is the box's, but $HOME/.config/nvim is SHADOWED to the
-        //            seeded laptop config (served from MEMFS, not the remote): set
-        //            __nvimLocalShadow and remap the seed onto the editor-space dir.
+        // The server's filesystem is mounted at the engine's root; the SHADOW
+        // list is the set of MEMFS overlay subtrees served locally instead of
+        // proxied. Base: the packaged runtime + device/proc pseudo-files. What
+        // else is shadowed depends on the --rc mode and the hello's identity:
+        //   remote — $HOME is the IO host's home (helloResult.home): nvim loads
+        //            the box's config + plugins live; nothing more is shadowed.
+        //   local  — $HOME is the box's, but $HOME/.config/nvim is SHADOWED to
+        //            the seeded laptop config (served from MEMFS): remap the
+        //            seed onto that dir and shadow it.
+        //   builtin (or no home known) — $HOME stays the MEMFS /root: shadow it
+        //            so the fake home never round-trips to the server.
+        // pre.js reads __nvimProxyHome / __nvimCwd before main().
+        const shadows = ['/usr/share/nvim', '/dev', '/proc'];
         const rc = init.proxy.rc;
-        if ((rc === 'remote' || rc === 'local') && helloResult) {
-          const homeDir = (typeof helloResult.homeDir === 'string') ? helloResult.homeDir : '';
-          if (homeDir) {
-            S.__nvimProxyHome = homeDir;
-            if (rc === 'local') {
-              const shadow = homeDir + '/.config/nvim';
-              S.__nvimLocalShadow = shadow;
-              const FROM = '/root/.config/nvim';   // where the server keyed the seed
-              if (S.__nvimFiles) {
-                const remapped: Record<string, any> = {};
-                for (const k in S.__nvimFiles) {
-                  if (!Object.prototype.hasOwnProperty.call(S.__nvimFiles, k)) { continue; }
-                  remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = S.__nvimFiles[k];
-                }
-                S.__nvimFiles = remapped;
+        const home = (helloResult && typeof helloResult.home === 'string') ? helloResult.home : '';
+        if ((rc === 'remote' || rc === 'local') && home) {
+          S.__nvimProxyHome = home;
+          if (rc === 'local') {
+            const shadow = home + '/.config/nvim';
+            shadows.push(shadow);
+            const FROM = '/root/.config/nvim';   // where the server keyed the seed
+            if (S.__nvimFiles) {
+              const remapped: Record<string, any> = {};
+              for (const k in S.__nvimFiles) {
+                if (!Object.prototype.hasOwnProperty.call(S.__nvimFiles, k)) { continue; }
+                remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = S.__nvimFiles[k];
               }
+              S.__nvimFiles = remapped;
             }
-          } else if (!S.__nvimProxyHome) {
-            try { postMessage({ kind: 'stderr', text: 'proxy: --rc ' + rc + ' but the host home (' +
-              (helloResult.home || '?') + ') is not under --root; $HOME stays /root' +
+          }
+        } else {
+          shadows.push('/root');
+          if ((rc === 'remote' || rc === 'local') && helloResult && !S.__nvimProxyHome) {
+            try { postMessage({ kind: 'stderr', text: 'proxy: --rc ' + rc + ' but the server reported no home; $HOME stays /root' +
               (rc === 'remote' ? ', config not loaded' : ' (seeded config still loads)') }); } catch (_e) {}
           }
+        }
+        S.__nvimProxyShadows = shadows;
+        // Land the editor in the server's working dir (the project dir rvim was
+        // started in / the remote's login dir) unless the page supplied a cwd.
+        // pre.js chdirs into it (creating the MEMFS stub chain) before main().
+        if (!hasUserCwd && helloResult && typeof helloResult.cwd === 'string' && helloResult.cwd) {
+          S.__nvimCwd = helloResult.cwd;
         }
         clearTimeout(bootBackstop);
         bootEngine();
@@ -316,11 +329,6 @@ function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
   importScripts('proxy-client.js');     // sets self.ProxyClient
   importScripts('proxy-reconnect.js');  // sets self.ProxyReconnect (stage 5)
 
-  // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
-  // '/host' when a proxy is configured but no mount was given (documented).
-  S.__nvimProxyMount = (typeof proxy.mount === 'string' && proxy.mount.length)
-    ? proxy.mount : '/host';
-
   // Stage 5 (durable PTYs): the session id carried in the /proxy URL (?session=)
   // routes this tab's :terminal shells to the session-host daemon so they survive
   // a transport drop. The host app passes a STABLE per-project id (proxy.session,
@@ -351,7 +359,7 @@ function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
     },
     // nvimSocket goes in the hello so the SERVER knows nvim's RPC socket path and
     // can export $NVIM to spawned children (app.js serverstart()s on this path).
-    helloParams: { mount: S.__nvimProxyMount, root: proxy.root, nvimSocket: proxy.nvimSocket },
+    helloParams: { nvimSocket: proxy.nvimSocket },
     // Carries the hello ack's result (incl. the proxied `user` -> $USER) to the
     // deferred-boot logic above on every successful (re)connect.
     onHello: function (result: any) { try { bootSignal!(result); } catch (_e) {} },

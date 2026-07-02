@@ -118,7 +118,7 @@ func TestSessionReattachReplaysExactlyOnce(t *testing.T) {
 	defer host.Close()
 
 	sink1 := &memSink{}
-	sess := host.attach("s1", "", sink1)
+	sess := host.attach("s1", sink1)
 	// Emit 200 deterministic lines fast (pure-shell loop, no external bins needed
 	// beyond /bin/sh + its printf builtin).
 	spawnPTY(t, sess, `i=0; while [ $i -lt 200 ]; do i=$((i+1)); printf 'line%03d\n' "$i"; done`)
@@ -130,7 +130,7 @@ func TestSessionReattachReplaysExactlyOnce(t *testing.T) {
 	// Detach and reattach mid-stream to a fresh sink.
 	sess.detach(sink1)
 	sink2 := &memSink{}
-	host.attach("s1", "", sink2)
+	host.attach("s1", sink2)
 
 	// Wait until the tail line appears across either sink (process ran to the end,
 	// i.e. it survived the detach).
@@ -174,7 +174,7 @@ func TestSessionExitReplayedAfterReattach(t *testing.T) {
 	defer host.Close()
 
 	sink1 := &memSink{}
-	sess := host.attach("s1", "", sink1)
+	sess := host.attach("s1", sink1)
 	spawnPTY(t, sess, `printf hi; exit 0`)
 	id := spawnReqID(t, sink1)
 
@@ -183,7 +183,7 @@ func TestSessionExitReplayedAfterReattach(t *testing.T) {
 	waitFor(t, func() bool { return sess.exitPendingSet(id) })
 
 	sink2 := &memSink{}
-	host.attach("s1", "", sink2)
+	host.attach("s1", sink2)
 	waitFor(t, func() bool { return sink2.sawExit(id) })
 	if string(sink2.data(id)) != "hi" {
 		t.Fatalf("buffered output before exit not replayed: %q", sink2.data(id))
@@ -198,7 +198,7 @@ func TestSessionGCKillsIdle(t *testing.T) {
 	defer host.Close()
 
 	sink := &memSink{}
-	sess := host.attach("s1", "", sink)
+	sess := host.attach("s1", sink)
 	spawnPTY(t, sess, `sleep 300`)
 	id := spawnReqID(t, sink)
 	pt := sess.get(id)
@@ -254,7 +254,7 @@ func TestSessionAdoptOnSpawnRepaint(t *testing.T) {
 
 	cwd := t.TempDir()
 	sink1 := &memSink{}
-	sess := host.attach("s1", "", sink1)
+	sess := host.attach("s1", sink1)
 	// Original terminal: marker then a long-lived read loop (stays alive).
 	spawnPTYIn(t, sess, cwd, []string{"/bin/sh", "-c", `printf 'SCREEN-MARK\r\n'; sleep 30`})
 	id := spawnReqID(t, sink1)
@@ -263,7 +263,7 @@ func TestSessionAdoptOnSpawnRepaint(t *testing.T) {
 	// Fresh client (reopened tab): warm auto-replay sends nothing it hasn't seen.
 	sess.detach(sink1)
 	sink2 := &memSink{}
-	host.attach("s1", "", sink2)
+	host.attach("s1", sink2)
 	if strings.Contains(string(sink2.data(id)), "SCREEN-MARK") {
 		t.Fatalf("warm auto-replay re-sent already-delivered output to a fresh client")
 	}
@@ -304,14 +304,14 @@ func TestSessionCrossSessionAdopt(t *testing.T) {
 	argv := []string{"/bin/sh", "-c", `printf 'XSESS\r\n'; sleep 30`}
 
 	sinkA := &memSink{}
-	sessA := host.attach("A", "", sinkA)
+	sessA := host.attach("A", sinkA)
 	spawnPTYIn(t, sessA, cwd, argv)
 	idA := spawnReqID(t, sinkA)
 	waitFor(t, func() bool { return strings.Contains(string(sinkA.data(idA)), "XSESS") })
 	sessA.detach(sinkA) // tab A closed; pty orphaned but alive
 
 	sinkB := &memSink{}
-	sessB := host.attach("B", "", sinkB)
+	sessB := host.attach("B", sinkB)
 	adoptSpawn(sessB, 7, cwd, argv)
 	r := sinkB.resResult(7)
 	if r == nil || r["adopted"] != true {
@@ -333,9 +333,9 @@ func TestSessionMultiTabIndependent(t *testing.T) {
 	defer host.Close()
 
 	sinkA := &memSink{}
-	sessA := host.attach("A", "", sinkA)
+	sessA := host.attach("A", sinkA)
 	sinkB := &memSink{}
-	sessB := host.attach("B", "", sinkB)
+	sessB := host.attach("B", sinkB)
 
 	spawnPTYIn(t, sessA, t.TempDir(), []string{"/bin/sh", "-c", `printf 'AAA\r\n'; sleep 30`})
 	idA := spawnReqID(t, sinkA)
@@ -375,7 +375,7 @@ func TestSessionWriteRoundTrip(t *testing.T) {
 	defer host.Close()
 
 	sink := &memSink{}
-	sess := host.attach("s1", "", sink)
+	sess := host.attach("s1", sink)
 	spawnPTY(t, sess, `while IFS= read -r _; do printf 'TOKEN\n'; done`)
 	id := spawnReqID(t, sink)
 

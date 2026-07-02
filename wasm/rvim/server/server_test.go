@@ -17,7 +17,7 @@ import (
 // startTestServer brings up a server with a synthetic flat bundle dir and
 // returns its base URL + a cleanup. (A real bundle is build-site.sh output; the
 // test only needs the serving logic, so a couple of files suffice.)
-func startTestServer(t *testing.T, proxyConfig bool) (string, *Server) {
+func startTestServer(t *testing.T) (string, *Server) {
 	t.Helper()
 	dir := t.TempDir()
 	must := func(name, body string) {
@@ -35,10 +35,9 @@ func startTestServer(t *testing.T, proxyConfig bool) (string, *Server) {
 	}
 
 	srv := New(Config{
-		Root:        t.TempDir(),
-		Port:        0,
-		Assets:      NewAssetServer(os.DirFS(dir)),
-		ProxyConfig: proxyConfig,
+		Dir:    t.TempDir(),
+		Port:   0,
+		Assets: NewAssetServer(os.DirFS(dir)),
 	}, NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
@@ -60,7 +59,7 @@ func get(t *testing.T, url string) (*http.Response, string) {
 }
 
 func TestStaticServing(t *testing.T) {
-	base, _ := startTestServer(t, false)
+	base, _ := startTestServer(t)
 
 	// "/" serves index.html with the right content type.
 	resp, body := get(t, base+"/")
@@ -87,7 +86,7 @@ func TestStaticServing(t *testing.T) {
 }
 
 func TestStaticMIMEAndRange(t *testing.T) {
-	base, _ := startTestServer(t, false)
+	base, _ := startTestServer(t)
 
 	// .mjs must be text/javascript (else the browser refuses the ES module).
 	resp, _ := get(t, base+"/mod.mjs")
@@ -203,24 +202,11 @@ func TestStaticPrecompressed(t *testing.T) {
 	}
 }
 
-func TestProxyConfigNoOpWhenDisabled(t *testing.T) {
-	base, _ := startTestServer(t, false)
-	resp, body := get(t, base+"/proxy-config.js")
-	// Mirrors serve.js: a no-op 200 (NOT a 404), so the page runs as the
-	// no-proxy demo with window.__NVIM_PROXY undefined.
-	if resp.StatusCode != 200 {
-		t.Fatalf("/proxy-config.js (disabled) = %d", resp.StatusCode)
-	}
-	if strings.Contains(body, "__NVIM_PROXY") {
-		t.Fatalf("disabled proxy-config should not set __NVIM_PROXY: %q", body)
-	}
-}
-
-func TestProxyConfigGeneratedWhenEnabled(t *testing.T) {
-	base, _ := startTestServer(t, true)
+func TestProxyConfigGenerated(t *testing.T) {
+	base, _ := startTestServer(t)
 	resp, body := get(t, base+"/proxy-config.js")
 	if resp.StatusCode != 200 || !strings.Contains(body, "window.__NVIM_PROXY") {
-		t.Fatalf("/proxy-config.js (enabled) = %d %q", resp.StatusCode, body)
+		t.Fatalf("/proxy-config.js = %d %q", resp.StatusCode, body)
 	}
 	// The ws URL is derived from the request Host so it works via localhost,
 	// 127.0.0.1, or a forwarded port.

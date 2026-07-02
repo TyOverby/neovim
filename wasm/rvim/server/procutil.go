@@ -26,34 +26,36 @@ type spawnParams struct {
 	Adopt bool `json:"adopt"`
 }
 
-// resolveCwd maps the engine's in-engine cwd to a real server path, the way the
-// FS proxy maps file paths. The engine cwd is either under the mount prefix
-// (-> <root>/<rest>), exactly the mount (-> root), or a MEMFS-only path with no
-// server twin (-> root, NOT <root>/<that> which wouldn't exist — the bug that
-// made :terminal fail while system() worked). Mirrors fs-handlers.js resolveCwd.
+// resolveCwd maps the engine's cwd to a real server directory to spawn in. The
+// server's filesystem is mounted at the engine's root, so an engine cwd IS a
+// server path — but the engine may also sit in a MEMFS-only overlay directory
+// with no server twin (a shadow like the builtin-$HOME /root, or a stale dir).
+// Those fall back to the server's advertised working dir (cfg.Dir) rather than
+// failing — the bug that once made :terminal fail while system() worked.
 func resolveCwd(cfg ConnConfig, cwd string) (string, error) {
-	root := cfg.Root
-	mount := cfg.Mount
-	if mount == "" {
-		mount = "/host"
-	}
-	if cwd == "" {
-		if root != "" {
-			return root, nil
+	fallback := cfg.Dir
+	if fallback == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
 		}
-		return os.Getwd()
+		fallback = wd
 	}
-	if cwd == mount {
-		return resolveJailed(root, "/")
+	// Only an ABSOLUTE engine cwd names a server directory (the engine
+	// absolutizes relative spawn cwds like :terminal's "." itself; a relative
+	// path reaching us would silently anchor at / — not what anyone meant).
+	if strings.HasPrefix(cwd, "/") {
+		if p := resolvePath(cwd); dirExists(p) {
+			return p, nil
+		}
 	}
-	if strings.HasPrefix(cwd, mount+"/") {
-		return resolveJailed(root, cwd[len(mount):]) // keep the leading '/'
-	}
-	// A non-mount in-engine path (MEMFS): no server equivalent -> run in root.
-	if root != "" {
-		return resolveJailed(root, "/")
-	}
-	return os.Getwd()
+	return fallback, nil
+}
+
+// dirExists reports whether p is an existing directory on the server.
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 // childEnv builds the child environment. The child runs on the SERVER, so it

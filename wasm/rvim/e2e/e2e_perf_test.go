@@ -63,10 +63,9 @@ func TestBrowserPerfTrack(t *testing.T) {
 	writeFile(t, filepath.Join(root, "preexisting.txt"), "perf track content\n")
 
 	srv := server.New(server.Config{
-		Root:        root,
-		Port:        0,
-		Assets:      server.NewAssetServer(os.DirFS(bundle)),
-		ProxyConfig: true,
+		Dir:    root,
+		Port:   0,
+		Assets: server.NewAssetServer(os.DirFS(bundle)),
 	}, server.NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
@@ -94,7 +93,7 @@ func TestBrowserPerfTrack(t *testing.T) {
 	//   - a successful fs request/response pair  -> an "IO proxy" track measure;
 	//   - a failing fs request (missing file)    -> a FAILED measure, color 'error';
 	//   - a process spawn whose stdout is pushed -> a 'push proc.stdout' mark.
-	if got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("/host/preexisting.txt"), "\\n")'])`); !strings.Contains(got, "perf track content") {
+	if got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("`+root+`/preexisting.txt"), "\\n")'])`); !strings.Contains(got, "perf track content") {
 		t.Fatalf("readfile returned %q", got)
 	}
 	// readfile() of a MISSING file: the engine's open syscall becomes an fs.open
@@ -103,7 +102,7 @@ func TestBrowserPerfTrack(t *testing.T) {
 	// point — swallow it instead of evalRPC's fail-on-error.
 	var ignored string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(
-		`window.nvim.request('nvim_eval', ['readfile("/host/definitely-missing.txt")']).then(function(){return 'ok'}, function(){return 'expected-error'})`,
+		`window.nvim.request('nvim_eval', ['readfile("`+root+`/definitely-missing.txt")']).then(function(){return 'ok'}, function(){return 'expected-error'})`,
 		&ignored, awaitPromise)); err != nil {
 		t.Fatalf("readfile(missing): %v", err)
 	}
@@ -122,8 +121,8 @@ func TestBrowserPerfTrack(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		entries = workerPerfEntries(t, wctx)
-		if findEntry(entries, "measure", "fs.read /preexisting.txt (") != nil &&
-			findEntry(entries, "measure", "fs.open /definitely-missing.txt FAILED") != nil &&
+		if findEntry(entries, "measure", "fs.read "+root+"/preexisting.txt (") != nil &&
+			findEntry(entries, "measure", "fs.open "+root+"/definitely-missing.txt FAILED") != nil &&
 			findEntry(entries, "mark", "push proc.stdout") != nil {
 			break
 		}
@@ -134,7 +133,7 @@ func TestBrowserPerfTrack(t *testing.T) {
 	}
 
 	t.Run("fs request/response is a custom-track measure", func(t *testing.T) {
-		e := findEntry(entries, "measure", "fs.read /preexisting.txt (")
+		e := findEntry(entries, "measure", "fs.read "+root+"/preexisting.txt (")
 		if e == nil {
 			t.Fatalf("no fs.read measure; entries:\n%s", dumpEntries(entries))
 		}
@@ -157,7 +156,7 @@ func TestBrowserPerfTrack(t *testing.T) {
 	})
 
 	t.Run("failed request is a red FAILED measure with the error", func(t *testing.T) {
-		e := findEntry(entries, "measure", "fs.open /definitely-missing.txt FAILED")
+		e := findEntry(entries, "measure", "fs.open "+root+"/definitely-missing.txt FAILED")
 		if e == nil {
 			t.Fatalf("no FAILED fs.open measure; entries:\n%s", dumpEntries(entries))
 		}

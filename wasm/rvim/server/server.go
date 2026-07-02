@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/user"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,8 +81,10 @@ func (r *Registry) Register(method string, fn HandlerFunc) { r.handlers[method] 
 
 // ConnConfig is the per-connection config established at hello.
 type ConnConfig struct {
-	Root  string `json:"root"`
-	Mount string `json:"mount"`
+	// Dir is the io-proxy's working directory — the project dir rvim was started
+	// in. It is advertised in the hello ack (the browser chdirs the editor into
+	// it) and is the fallback cwd for spawns whose engine cwd has no server twin.
+	Dir string `json:"dir"`
 	// NvimSocket is the server-side path nvim listens on for RPC ($NVIM). The
 	// server exports it into every spawned child's env so plugins/commands/
 	// terminals can drive nvim over RPC, like a normal nvim host.
@@ -225,18 +226,21 @@ func (cn *conn) readFrame() (proxy.Header, []byte, error) {
 
 // Config configures a Server.
 type Config struct {
-	Bind        string       // listen address (default 127.0.0.1)
-	Port        int          // listen port (0 = ephemeral)
-	Root        string       // FS jail root (authoritative; a client hello cannot widen it)
-	Mount       string       // in-editor mount prefix (default /host)
-	Assets      *AssetServer // static bundle server (may be nil: no static serving)
-	ProxyConfig bool         // generate /proxy-config.js so visiting == the standalone app
+	Bind   string       // listen address (default 127.0.0.1)
+	Port   int          // listen port (0 = ephemeral)
+	Assets *AssetServer // static bundle server (may be nil: no static serving)
+
+	// Dir is the working directory advertised to the editor (the hello's `cwd`;
+	// the browser chdirs into it on boot). Defaults to the process's cwd. The
+	// server's filesystem is always exposed WHOLE, mounted at the engine's root —
+	// there is no jail and no mount prefix.
+	Dir string
 
 	// RC selects where the in-browser nvim's config / $HOME comes from (stage 5
 	// §5). One of "remote", "local", "builtin" (empty == "builtin"):
-	//   remote  - $HOME points at the IO host's home via the mount (full live
-	//             config + plugins from the box with your files). Advertised to the
-	//             browser; the hello reports the host's home + its in-editor path.
+	//   remote  - $HOME points at the IO host's home (full live config + plugins
+	//             from the box with your files). Advertised to the browser; the
+	//             hello reports the host's home.
 	//   local   - the app-server seeds its OWN ~/.config/nvim into the browser's
 	//             MEMFS (config dir only; served at /rc-bundle.json).
 	//   builtin - no external config; nvim's defaults (the prior behaviour).
@@ -245,8 +249,8 @@ type Config struct {
 	// RemoteCommand, if set, puts the server in RELAY mode: it does NOT handle IO
 	// locally — each /proxy WebSocket is relayed to a fresh subprocess (this argv)
 	// that speaks the proxy protocol over its stdin/stdout. In production that's
-	// `ssh -T <host> rvim --serve-stdio --root <remote-root>` (the three-tier
-	// architecture); tests use a local `rvim --serve-stdio` subprocess.
+	// `ssh -T <host> rvim --serve-stdio` (the three-tier architecture); tests use
+	// a local `rvim --serve-stdio` subprocess.
 	RemoteCommand []string
 
 	// Session, if set, delegates this io-proxy's pty.* traffic to the session-host
@@ -275,8 +279,8 @@ func New(cfg Config, reg *Registry) *Server {
 	if cfg.Bind == "" {
 		cfg.Bind = "127.0.0.1"
 	}
-	if cfg.Mount == "" {
-		cfg.Mount = "/host"
+	if cfg.Dir == "" {
+		cfg.Dir, _ = os.Getwd()
 	}
 	s := &Server{cfg: cfg, reg: reg, conns: map[*conn]struct{}{}}
 	s.srv = &http.Server{Handler: s.handler()}
@@ -306,8 +310,8 @@ func (s *Server) handler() http.Handler {
 			s.handleProxy(w, r)
 			return
 		}
-		// /proxy-config.js: generate the standalone-app hook when proxying is on,
-		// else a no-op 200 (the no-proxy demo) — mirrors serve.js/server.js.
+		// /proxy-config.js: the standalone-app hook — visiting this server IS the
+		// standalone app (proxying is always on).
 		if r.URL.Path == "/proxy-config.js" {
 			s.handleProxyConfig(w, r)
 			return
@@ -324,10 +328,6 @@ func (s *Server) handler() http.Handler {
 func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	if !s.cfg.ProxyConfig {
-		_, _ = w.Write([]byte("// no proxy: this Go server is serving the no-proxy demo.\n"))
-		return
-	}
 	host := r.Host
 	if host == "" {
 		host = fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
@@ -350,8 +350,6 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 	nvimSock := filepath.Join(tmpBase, fmt.Sprintf("rvim-nvim-%d-%d.sock", os.Getpid(), atomic.AddInt64(&nvimSockSeq, 1)))
 	cfg := map[string]any{
 		"url":        "ws://" + host + "/proxy",
-		"mount":      s.cfg.Mount,
-		"root":       s.cfg.Root,
 		"nvimSocket": nvimSock,
 		"rc":         s.rcMode(), // remote|local|builtin: where nvim's config/$HOME comes from
 	}
@@ -464,7 +462,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 // delegates this connection's pty.* to the session-host daemon (durable PTYs).
 func (s *Server) serveConn(cn *conn, session string) {
 	ctx := &Ctx{
-		Config: ConnConfig{Root: s.cfg.Root, Mount: s.cfg.Mount},
+		Config: ConnConfig{Dir: s.cfg.Dir},
 		conn:   cn,
 		state:  map[string]any{},
 	}
@@ -484,7 +482,7 @@ func (s *Server) serveConn(cn *conn, session string) {
 		if selfExe == "" {
 			selfExe, _ = os.Executable()
 		}
-		if d, err := connectDaemon(sock, selfExe, session, s.cfg.Root); err != nil {
+		if d, err := connectDaemon(sock, selfExe, session); err != nil {
 			log.Printf("rvim: session-host attach failed (%v); PTYs are non-durable this session", err)
 		} else {
 			ctx.daemon = d
@@ -515,33 +513,17 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 	switch h.T {
 	case proxy.THello:
-		// Merge the client's hello params (mount), then FORCE the server's root
-		// back — a client-supplied root must never widen/relocate the jail.
+		// Merge the client's hello params (nvimSocket); everything else about the
+		// connection (dir) is the server's to report.
 		var cfg ConnConfig
 		if len(h.Params) > 0 {
 			_ = json.Unmarshal(h.Params, &cfg)
 		}
-		if cfg.Mount != "" {
-			ctx.Config.Mount = cfg.Mount
-		}
 		if cfg.NvimSocket != "" {
 			ctx.Config.NvimSocket = cfg.NvimSocket
 		}
-		ctx.Config.Root = s.cfg.Root // authoritative
 		if h.Version != 0 && h.Version != proxy.ProtocolVersion {
 			log.Printf("rvim: proxy protocol version mismatch: client=%d server=%d", h.Version, proxy.ProtocolVersion)
-		}
-		// The home directory of the io-proxy process (the REMOTE host under --remote,
-		// since the relay forwards the hello untouched). homeDir is that home mapped
-		// into editor-space via the mount, non-empty only when it falls under the
-		// jail root — the browser uses it as $HOME for `--rc remote` (full live config
-		// from the box). home is the raw host path (advisory / diagnostics).
-		home := serverHome()
-		homeDir := ""
-		if home != "" {
-			if p, ok := inEditorPath(ctx.Config.Root, ctx.Config.Mount, home); ok {
-				homeDir = p
-			}
 		}
 		ack, _ := json.Marshal(map[string]any{
 			"hello":         true,
@@ -551,9 +533,13 @@ func (s *Server) dispatch(cn *conn, ctx *Ctx, h proxy.Header, payload []byte) {
 			// --remote this handler runs in the remote `--serve-stdio` process (the
 			// relay forwards the hello untouched), so it reports the REMOTE user; in
 			// the local case it's the local user. The browser exposes it as $USER.
-			"user":    serverUser(),
-			"home":    home,
-			"homeDir": homeDir,
+			"user": serverUser(),
+			// The io-proxy process's home + working dir. The server's filesystem is
+			// mounted at the engine's root, so both are directly usable in-editor:
+			// the browser uses home as $HOME (`--rc remote`/`local`) and chdirs the
+			// editor into cwd on boot.
+			"home": serverHome(),
+			"cwd":  ctx.Config.Dir,
 		})
 		_ = cn.writeFrame(proxy.Header{T: proxy.TRes, ID: h.ID, OK: boolp(true), Result: ack}, nil)
 
@@ -655,20 +641,6 @@ func serverHome() string {
 		return u.HomeDir
 	}
 	return ""
-}
-
-// inEditorPath maps an absolute host path to its in-editor path under the mount,
-// reporting ok=false when it does not fall within the jail root (so it isn't
-// reachable through the proxy). E.g. root=/ mount=/host abs=/home/x -> /host/home/x.
-func inEditorPath(root, mount, abs string) (string, bool) {
-	if root == "" || mount == "" || abs == "" {
-		return "", false
-	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return path.Join(mount, filepath.ToSlash(rel)), true
 }
 
 // rcMode normalises Config.RC to one of remote|local|builtin (empty -> builtin).

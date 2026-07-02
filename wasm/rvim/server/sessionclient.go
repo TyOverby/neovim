@@ -36,17 +36,17 @@ type daemonClient struct {
 	wmu sync.Mutex
 }
 
-// connectDaemon dials the daemon (auto-spawning it if absent), performs the attach
-// handshake for session/root, and returns the client. selfExe is the path to this
+// connectDaemon dials the daemon (auto-spawning it if absent), performs the
+// session attach handshake, and returns the client. selfExe is the path to this
 // rvim binary (os.Executable) used to spawn the daemon.
-func connectDaemon(sockPath, selfExe, session, root string) (*daemonClient, error) {
+func connectDaemon(sockPath, selfExe, session string) (*daemonClient, error) {
 	c, err := dialOrSpawn(sockPath, selfExe)
 	if err != nil {
 		return nil, err
 	}
 	d := &daemonClient{rw: &stdioFrameRW{r: bufio.NewReaderSize(c, 64*1024), w: c}, c: c}
 
-	params, _ := json.Marshal(map[string]string{"session": session, "root": root})
+	params, _ := json.Marshal(map[string]string{"session": session})
 	if err := d.send(proxy.Header{T: proxy.THello, ID: 0, Params: params}); err != nil {
 		c.Close()
 		return nil, err
@@ -105,8 +105,8 @@ func (d *daemonClient) forward(ctx *Ctx, h proxy.Header, payload []byte) {
 	_ = d.sendPayload(h, payload)
 }
 
-// forwardSpawn resolves cwd against the jail and builds the child env (server PATH
-// + $NVIM) HERE — the io-proxy holds that policy/config — then forwards a spawn the
+// forwardSpawn resolves the spawn cwd and builds the child env (server PATH +
+// $NVIM) HERE — the io-proxy holds that policy/config — then forwards a spawn the
 // daemon can exec directly.
 func (d *daemonClient) forwardSpawn(ctx *Ctx, h proxy.Header) {
 	var p spawnParams

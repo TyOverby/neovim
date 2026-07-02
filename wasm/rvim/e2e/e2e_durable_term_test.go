@@ -46,8 +46,8 @@ func TestBrowserDurableTerminalRehydrate(t *testing.T) {
 
 	sidBefore := readSessionID(t, ctx)
 
-	// Save the session onto the server's disk (via the /host mount).
-	evalRPC(t, ctx, `window.nvim.request('nvim_command', ['mksession! /host/Session.vim'])`)
+	// Save the session onto the server's disk (its real path).
+	evalRPC(t, ctx, `window.nvim.request('nvim_command', ['mksession! `+root+`/Session.vim'])`)
 	time.Sleep(400 * time.Millisecond)
 	assertFileExists(t, filepath.Join(root, "Session.vim"))
 
@@ -64,7 +64,7 @@ func TestBrowserDurableTerminalRehydrate(t *testing.T) {
 	// the adopt hook reattaches it to the still-running shell on the daemon — so the
 	// marker the ORIGINAL shell printed repaints (a respawned fresh shell could not
 	// show it). On failure, the daemon snapshot tells whether it respawned.
-	evalRPC(t, ctx, `window.nvim.request('nvim_command', ['source /host/Session.vim'])`)
+	evalRPC(t, ctx, `window.nvim.request('nvim_command', ['source `+root+`/Session.vim'])`)
 	defer func() {
 		if t.Failed() {
 			t.Logf("session-host state:\n%s", host.DebugSummary())
@@ -91,11 +91,10 @@ func newProxyServer(t *testing.T, bundle string) (string, *server.SessionHost, s
 	waitForFile(t, sock)
 
 	srv := server.New(server.Config{
-		Root:        root,
-		Port:        0,
-		Assets:      server.NewAssetServer(os.DirFS(bundle)),
-		ProxyConfig: true,
-		DaemonSock:  sock,
+		Dir:        root,
+		Port:       0,
+		Assets:     server.NewAssetServer(os.DirFS(bundle)),
+		DaemonSock: sock,
 	}, server.NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)

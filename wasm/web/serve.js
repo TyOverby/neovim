@@ -92,7 +92,7 @@ function serveStaticFile(file, urlPath, res) {
 function handleRequest(req, res) {
   const urlPath = decodeURIComponent(req.url.split('?')[0]);
   // The page unconditionally loads /proxy-config.js (the standalone-app hook):
-  // the `rvim --proxy` Go server GENERATES it with the real proxy config so
+  // the rvim Go server GENERATES it with the real proxy config so
   // visiting that server is the standalone app. This plain static dev server has
   // NO proxy, so serve a no-op 200 (not a 404) — the page then runs as the
   // ordinary no-proxy demo (window.__NVIM_PROXY stays undefined).

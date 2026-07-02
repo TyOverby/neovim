@@ -7,6 +7,15 @@ process) plus a **headless-Chrome e2e** (`e2e/`, the full browser→engine→ser
 loop). It was developed against a stage-4 Node reference server; that prototype
 has since been removed, and the conformance scenarios remain as the spec.
 
+**The filesystem model:** the IO host's filesystem is exposed WHOLE, mounted at
+the in-browser editor's root — editor paths ARE server paths (no jail, no
+`/host` mount prefix; both were removed after stage 5's phase 8). The editor
+lands in the io-proxy's working dir (rvim's cwd locally; the ssh login dir with
+`--remote`), reported in the hello along with the host's user + home. What stays
+browser-local is the MEMFS **shadow overlays**: the packaged nvim runtime
+(`/usr/share/nvim`), `/dev` + `/proc`, and the `--rc`-dependent home/config
+subtrees. Proxying is always on — visiting the page IS the standalone app.
+
 ## Layout
 
 ```
@@ -50,7 +59,7 @@ Two ways to serve the browser bundle:
 
   ```sh
   ../web/build-site.sh /tmp/rvim-site         # assemble the flat bundle
-  ./rvim --assets-dir /tmp/rvim-site --root ~/project --proxy
+  (cd ~/project && rvim --assets-dir /tmp/rvim-site)   # editor lands in rvim's cwd
   ```
 
 - **Embedded (release):** bake the bundle into the binary so it's a single
@@ -65,7 +74,7 @@ Two ways to serve the browser bundle:
   ../web/build-site.sh server/site
   # 3. build with the tag — server/site/ is embedded via //go:embed:
   go build -tags embed_assets -o rvim ./cmd/rvim
-  ./rvim --root ~/project --proxy            # serves the baked-in bundle
+  (cd ~/project && rvim)                     # serves the baked-in bundle
   ```
 
   Step 1 is the prerequisite for a *real* bundle: `build-site.sh` needs

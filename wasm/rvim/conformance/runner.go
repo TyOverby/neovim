@@ -14,9 +14,10 @@ type ScenarioResult struct {
 	Err  error
 }
 
-// RunScenario starts a fresh target jailed to a fresh temp root, completes the
+// RunScenario starts a fresh target working in a fresh temp root, completes the
 // hello handshake, and runs one scenario under a timeout. A fresh target per
-// scenario keeps handle/child/socket id state and the filesystem isolated.
+// scenario keeps handle/child/socket id state and the filesystem isolated (the
+// scenarios keep their file activity under `root`, their scratch dir).
 func RunScenario(ctx context.Context, target Target, sc Scenario) error {
 	root, err := os.MkdirTemp("", "rvim-conf-")
 	if err != nil {
@@ -39,7 +40,7 @@ func RunScenario(ctx context.Context, target Target, sc Scenario) error {
 	}
 	defer c.Close()
 
-	if _, err := c.Hello(dctx, map[string]any{"mount": "/host"}); err != nil {
+	if _, err := c.Hello(dctx, map[string]any{}); err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
 	return sc.Run(dctx, c, root)

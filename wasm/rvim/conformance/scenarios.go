@@ -27,7 +27,8 @@ func expectedProxyUser() string {
 }
 
 // Scenario is one conformance check. Run executes against a client that has
-// already completed the hello handshake, jailed to `root` (a fresh temp dir).
+// already completed the hello handshake; `root` is a fresh temp dir the target
+// was started in (its working dir — scenarios keep their file activity there).
 // Return an error to fail. The SAME set runs against every Target.
 //
 // Cap tags the capability the scenario exercises ("base"/"fs"/"proc"/"sock"/
@@ -124,8 +125,8 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"hello acks with mount + server-forced root + version", "base", func(ctx context.Context, c *Client, root string) error {
-			r, err := c.Hello(ctx, map[string]any{"mount": "/host", "root": "/tmp/attacker-controlled"})
+		{"hello acks with identity (user/home/cwd) + version", "base", func(ctx context.Context, c *Client, root string) error {
+			r, err := c.Hello(ctx, map[string]any{"dir": "/tmp/client-supplied"})
 			if err != nil {
 				return err
 			}
@@ -135,43 +136,37 @@ func Scenarios() []Scenario {
 			var out struct {
 				Hello  bool `json:"hello"`
 				Config struct {
-					Mount string `json:"mount"`
-					Root  string `json:"root"`
+					Dir string `json:"dir"`
 				} `json:"config"`
-				User    string `json:"user"`
-				Home    string `json:"home"`
-				HomeDir string `json:"homeDir"`
+				User string `json:"user"`
+				Home string `json:"home"`
+				Cwd  string `json:"cwd"`
 			}
 			if err := r.Into(&out); err != nil {
 				return err
-			}
-			if out.Config.Mount != "/host" {
-				return fmt.Errorf("mount not echoed: %s", r.Result)
 			}
 			// The hello reports the io-proxy process's user (browser -> $USER).
 			if want := expectedProxyUser(); out.User != want {
 				return fmt.Errorf("hello user = %q, want %q", out.User, want)
 			}
-			// ...and its home dir. The jail root here is a fresh temp dir that does
-			// NOT contain the home, so the in-editor homeDir must be empty (home is
-			// outside the mount, so --rc remote can't reach it).
+			// ...its home dir (browser -> $HOME for --rc remote/local)...
 			if out.Home == "" {
 				return fmt.Errorf("hello reported no home dir")
 			}
-			if out.HomeDir != "" {
-				return fmt.Errorf("homeDir = %q, want empty (home is outside the temp jail root)", out.HomeDir)
+			// ...and its working dir — the server's, NOT a client-supplied one (the
+			// browser chdirs into it; the server's Dir is authoritative).
+			if out.Cwd != root {
+				return fmt.Errorf("hello cwd = %q, want the server working dir %q", out.Cwd, root)
 			}
-			// SECURITY: a client-supplied root must NOT widen the jail; the server
-			// forces its own --root back.
-			if out.Config.Root == "/tmp/attacker-controlled" {
-				return fmt.Errorf("client-supplied root overrode the jail (got %q)", out.Config.Root)
+			if out.Config.Dir != root {
+				return fmt.Errorf("config.dir = %q, want %q (client-supplied dir must not override)", out.Config.Dir, root)
 			}
 			return nil
 		}},
 		{"hello: version mismatch + malformed params still ack", "base", func(ctx context.Context, c *Client, root string) error {
 			// A future/mismatched protocol version must still ack ok (the server
 			// logs a warning but does not reject — refusing would break clients).
-			r, err := c.HelloVersion(ctx, map[string]any{"mount": "/host"}, 999)
+			r, err := c.HelloVersion(ctx, map[string]any{}, 999)
 			if err != nil {
 				return err
 			}
@@ -209,7 +204,7 @@ func Scenarios() []Scenario {
 		// ---- filesystem ----
 		{"fs: open/write/close/stat/read round-trip", "fs", func(ctx context.Context, c *Client, root string) error {
 			content := []byte("hello world\nsecond line\n")
-			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/a.txt", "flags": oCREAT | oWRONLY | oTRUNC, "mode": 0o644}, nil)
+			r, err := req(ctx, c, "fs.open", map[string]any{"path": root + "/a.txt", "flags": oCREAT | oWRONLY | oTRUNC, "mode": 0o644}, nil)
 			if err != nil {
 				return err
 			}
@@ -238,7 +233,7 @@ func Scenarios() []Scenario {
 				return err
 			}
 			// stat sees the new size.
-			r, err = req(ctx, c, "fs.stat", map[string]any{"path": "/a.txt"}, nil)
+			r, err = req(ctx, c, "fs.stat", map[string]any{"path": root + "/a.txt"}, nil)
 			if err != nil {
 				return err
 			}
@@ -252,7 +247,7 @@ func Scenarios() []Scenario {
 				return fmt.Errorf("stat wrong: %s", r.Result)
 			}
 			// read it back.
-			r, err = req(ctx, c, "fs.open", map[string]any{"path": "/a.txt", "flags": oRDONLY}, nil)
+			r, err = req(ctx, c, "fs.open", map[string]any{"path": root + "/a.txt", "flags": oRDONLY}, nil)
 			if err != nil {
 				return err
 			}
@@ -274,7 +269,7 @@ func Scenarios() []Scenario {
 		}},
 		{"fs: append open + write appends to EOF", "fs", func(ctx context.Context, c *Client, root string) error {
 			// Create the file with "AB".
-			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/app.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
+			r, err := req(ctx, c, "fs.open", map[string]any{"path": root + "/app.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
 			if err != nil {
 				return err
 			}
@@ -289,7 +284,7 @@ func Scenarios() []Scenario {
 				return err
 			}
 			// Re-open O_WRONLY|O_APPEND and write "CD"; it must append -> "ABCD".
-			r, err = req(ctx, c, "fs.open", map[string]any{"path": "/app.txt", "flags": oWRONLY | oAPPEND}, nil)
+			r, err = req(ctx, c, "fs.open", map[string]any{"path": root + "/app.txt", "flags": oWRONLY | oAPPEND}, nil)
 			if err != nil {
 				return err
 			}
@@ -343,10 +338,10 @@ func Scenarios() []Scenario {
 				return fmt.Errorf("unknown-handle read = {n:%d eof:%v %d bytes}", rd.N, rd.EOF, len(r.Payload))
 			}
 			// A DIRECTORY handle (no underlying file fd) writes as a no-op too.
-			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": "/dh", "mode": 0o755}, nil); err != nil {
+			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": root + "/dh", "mode": 0o755}, nil); err != nil {
 				return err
 			}
-			r, _ = req(ctx, c, "fs.open", map[string]any{"path": "/dh", "flags": oRDONLY}, nil)
+			r, _ = req(ctx, c, "fs.open", map[string]any{"path": root + "/dh", "flags": oRDONLY}, nil)
 			var op struct {
 				Handle int  `json:"handle"`
 				IsDir  bool `json:"isDir"`
@@ -366,7 +361,7 @@ func Scenarios() []Scenario {
 			return nil
 		}},
 		{"fs: stat missing -> exists:false (not error)", "fs", func(ctx context.Context, c *Client, root string) error {
-			r, err := req(ctx, c, "fs.stat", map[string]any{"path": "/nope.txt"}, nil)
+			r, err := req(ctx, c, "fs.stat", map[string]any{"path": root + "/nope.txt"}, nil)
 			if err != nil {
 				return err
 			}
@@ -380,13 +375,13 @@ func Scenarios() []Scenario {
 			return nil
 		}},
 		{"fs: mkdir + readdir + rename + unlink", "fs", func(ctx context.Context, c *Client, root string) error {
-			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": "/sub", "mode": 0o755}, nil); err != nil {
+			if _, err := req(ctx, c, "fs.mkdir", map[string]any{"path": root + "/sub", "mode": 0o755}, nil); err != nil {
 				return err
 			}
-			if _, err := req(ctx, c, "fs.open", map[string]any{"path": "/sub/x.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil); err != nil {
+			if _, err := req(ctx, c, "fs.open", map[string]any{"path": root + "/sub/x.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil); err != nil {
 				return err
 			}
-			r, err := req(ctx, c, "fs.readdir", map[string]any{"path": "/sub"}, nil)
+			r, err := req(ctx, c, "fs.readdir", map[string]any{"path": root + "/sub"}, nil)
 			if err != nil {
 				return err
 			}
@@ -406,13 +401,13 @@ func Scenarios() []Scenario {
 			if !found {
 				return fmt.Errorf("readdir missing x.txt: %s", r.Result)
 			}
-			if _, err := req(ctx, c, "fs.rename", map[string]any{"from": "/sub/x.txt", "to": "/sub/y.txt"}, nil); err != nil {
+			if _, err := req(ctx, c, "fs.rename", map[string]any{"from": root + "/sub/x.txt", "to": root + "/sub/y.txt"}, nil); err != nil {
 				return err
 			}
 			if _, err := os.Stat(filepath.Join(root, "sub", "y.txt")); err != nil {
 				return fmt.Errorf("rename did not land y.txt: %v", err)
 			}
-			if _, err := req(ctx, c, "fs.unlink", map[string]any{"path": "/sub/y.txt"}, nil); err != nil {
+			if _, err := req(ctx, c, "fs.unlink", map[string]any{"path": root + "/sub/y.txt"}, nil); err != nil {
 				return err
 			}
 			if _, err := os.Stat(filepath.Join(root, "sub", "y.txt")); !os.IsNotExist(err) {
@@ -420,35 +415,28 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"fs: by-path read/write (no handle) + jail", "fs", func(ctx context.Context, c *Client, root string) error {
+		{"fs: by-path read/write (no handle) + path cleaning", "fs", func(ctx context.Context, c *Client, root string) error {
 			// Write a NEW file by path (no handle): exercises the stateless branch
-			// (open O_RDWR, fall back to create) + its jail check.
-			if _, err := req(ctx, c, "fs.write", map[string]any{"path": "/byp.txt", "pos": 0}, []byte("by-path")); err != nil {
+			// (open O_RDWR, fall back to create).
+			if _, err := req(ctx, c, "fs.write", map[string]any{"path": root + "/byp.txt", "pos": 0}, []byte("by-path")); err != nil {
 				return err
 			}
 			if onDisk, _ := os.ReadFile(filepath.Join(root, "byp.txt")); string(onDisk) != "by-path" {
 				return fmt.Errorf("by-path write = %q on disk", string(onDisk))
 			}
-			// Read it back by path (no handle).
-			r, err := req(ctx, c, "fs.read", map[string]any{"path": "/byp.txt", "pos": 0, "len": 64}, nil)
+			// Read it back by path (no handle) — through an uncleaned `a/../` spelling,
+			// pinning resolvePath's normalization.
+			r, err := req(ctx, c, "fs.read", map[string]any{"path": root + "/sub/../byp.txt", "pos": 0, "len": 64}, nil)
 			if err != nil {
 				return err
 			}
 			if !bytes.Equal(r.Payload, []byte("by-path")) {
 				return fmt.Errorf("by-path read = %q", r.Payload)
 			}
-			// The by-path branch must also be jailed.
-			esc, err := c.Request(ctx, "fs.write", map[string]any{"path": "/../../escape-by-path", "pos": 0}, []byte("x"))
-			if err != nil {
-				return err
-			}
-			if esc.OK {
-				return fmt.Errorf("SECURITY: by-path write escaped the jail")
-			}
 			return nil
 		}},
 		{"fs: partial read / EOF / past-end", "fs", func(ctx context.Context, c *Client, root string) error {
-			r, err := req(ctx, c, "fs.open", map[string]any{"path": "/ten.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
+			r, err := req(ctx, c, "fs.open", map[string]any{"path": root + "/ten.txt", "flags": oCREAT | oWRONLY | oTRUNC}, nil)
 			if err != nil {
 				return err
 			}
@@ -460,7 +448,7 @@ func Scenarios() []Scenario {
 				return err
 			}
 			_, _ = req(ctx, c, "fs.close", map[string]any{"handle": op.Handle}, nil)
-			r, _ = req(ctx, c, "fs.open", map[string]any{"path": "/ten.txt", "flags": oRDONLY}, nil)
+			r, _ = req(ctx, c, "fs.open", map[string]any{"path": root + "/ten.txt", "flags": oRDONLY}, nil)
 			_ = r.Into(&op)
 
 			type rd struct {
@@ -503,25 +491,24 @@ func Scenarios() []Scenario {
 			_ = os.Symlink(filepath.Join(root, "f.txt"), filepath.Join(root, "link-f"))
 			_ = os.Symlink(filepath.Join(root, "d"), filepath.Join(root, "link-d"))
 
-			// lstat a symlink. NOTE: the security jail realpaths every path
-			// (resolveJailed) to defend against symlink escapes, so a leaf symlink
-			// to an IN-JAIL target is resolved before lstat — lstat therefore reports
-			// the TARGET (isLink:false), not the link. Known consequence of the
-			// realpath-based jail (inherited from the Node prototype); pinned here.
-			r, err := req(ctx, c, "fs.lstat", map[string]any{"path": "/link-f"}, nil)
+			// lstat a symlink: reports the LINK ITSELF (isLink:true). (The old
+			// realpath-based jail resolved leaf symlinks before lstat; with the jail
+			// gone, paths go to the OS as-is and lstat behaves like lstat(2).)
+			r, err := req(ctx, c, "fs.lstat", map[string]any{"path": root + "/link-f"}, nil)
 			if err != nil {
 				return err
 			}
 			var ls struct {
 				Exists bool `json:"exists"`
+				IsLink bool `json:"isLink"`
 				IsDir  bool `json:"isDir"`
 			}
 			_ = r.Into(&ls)
-			if !ls.Exists || ls.IsDir {
-				return fmt.Errorf("lstat link-f = %+v, want exists (resolved to the file target)", ls)
+			if !ls.Exists || !ls.IsLink || ls.IsDir {
+				return fmt.Errorf("lstat link-f = %+v, want the link itself (exists, isLink)", ls)
 			}
 			// stat follows the symlink: not a link.
-			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": "/link-f"}, nil)
+			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": root + "/link-f"}, nil)
 			var st struct {
 				Exists bool   `json:"exists"`
 				IsLink bool   `json:"isLink"`
@@ -533,13 +520,13 @@ func Scenarios() []Scenario {
 				return fmt.Errorf("stat link-f = %+v, want followed (not a link)", st)
 			}
 			// mode carries the type bits: S_IFREG (0x8000) for the regular file.
-			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": "/f.txt"}, nil)
+			r, _ = req(ctx, c, "fs.stat", map[string]any{"path": root + "/f.txt"}, nil)
 			_ = r.Into(&st)
 			if st.Mode&0x8000 == 0 {
 				return fmt.Errorf("f.txt mode 0%o missing S_IFREG", st.Mode)
 			}
 			// readdir resolves a symlink-to-dir to isDir:true.
-			r, _ = req(ctx, c, "fs.readdir", map[string]any{"path": "/"}, nil)
+			r, _ = req(ctx, c, "fs.readdir", map[string]any{"path": root + "/"}, nil)
 			var dir struct {
 				Entries []struct {
 					Name  string `json:"name"`
@@ -561,17 +548,6 @@ func Scenarios() []Scenario {
 			}
 			return nil
 		}},
-		{"fs: jail rejects ../ escape", "fs", func(ctx context.Context, c *Client, root string) error {
-			r, err := c.Request(ctx, "fs.open", map[string]any{"path": "/../../../../etc/passwd", "flags": oRDONLY}, nil)
-			if err != nil {
-				return err
-			}
-			if r.OK {
-				return fmt.Errorf("jail escape was NOT rejected (security failure)")
-			}
-			return nil
-		}},
-
 		// ---- processes ----
 		{"proc: spawn echo streams stdout + exit 0", "proc", func(ctx context.Context, c *Client, root string) error {
 			id, err := spawnProc(ctx, c, []string{"echo", "conformance"}, map[string]any{"wantOut": true})
@@ -652,7 +628,7 @@ func Scenarios() []Scenario {
 			}
 			return waitExit(ctx, c, "proc.exit", id, 0, -1)
 		}},
-		{"proc: empty argv + jail-escaping cwd are errors", "proc", func(ctx context.Context, c *Client, root string) error {
+		{"proc: empty argv errors; cwd used when real, else falls back", "proc", func(ctx context.Context, c *Client, root string) error {
 			r, err := c.Request(ctx, "proc.spawn", map[string]any{"argv": []string{}}, nil)
 			if err != nil {
 				return err
@@ -660,13 +636,35 @@ func Scenarios() []Scenario {
 			if r.OK {
 				return fmt.Errorf("empty argv was accepted")
 			}
-			// A cwd under the mount that climbs out of the jail must be rejected.
-			r, err = c.Request(ctx, "proc.spawn", map[string]any{"argv": []string{"true"}, "cwd": "/host/../../../../etc"}, nil)
+			// An engine cwd that exists on the server is used as-is (engine paths
+			// ARE server paths).
+			sub := filepath.Join(root, "sub")
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				return err
+			}
+			id, err := spawnProc(ctx, c, []string{"sh", "-c", "pwd"}, map[string]any{"wantOut": true, "cwd": sub})
 			if err != nil {
 				return err
 			}
-			if r.OK {
-				return fmt.Errorf("SECURITY: jail-escaping cwd was accepted")
+			out, err := c.WaitPush(ctx, pushForID("proc.stdout", id))
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(out.Payload, []byte(sub)) {
+				return fmt.Errorf("spawn cwd: pwd = %q, want %q", out.Payload, sub)
+			}
+			// A MEMFS-only engine cwd (no server twin) falls back to the server's
+			// working dir — the spawn must succeed, not fail.
+			id, err = spawnProc(ctx, c, []string{"sh", "-c", "pwd"}, map[string]any{"wantOut": true, "cwd": "/root/memfs-only-dir"})
+			if err != nil {
+				return err
+			}
+			out, err = c.WaitPush(ctx, pushForID("proc.stdout", id))
+			if err != nil {
+				return err
+			}
+			if !bytes.Contains(out.Payload, []byte(root)) {
+				return fmt.Errorf("fallback cwd: pwd = %q, want the server working dir %q", out.Payload, root)
 			}
 			return nil
 		}},

@@ -1,7 +1,7 @@
 // Package e2e is the headless-browser integration test for the rvim standalone
 // app: it boots the REAL wasm Neovim engine in headless Chrome against the REAL
-// in-process Go server (--proxy) and asserts real filesystem + process effects
-// on disk. This is the durable verification that replaces the Node conformance
+// in-process Go server and asserts real filesystem + process effects on disk.
+// This is the durable verification that replaces the Node conformance
 // oracle — once the Node prototype is removed, this is the safety net proving the
 // full browser -> wasm engine -> Go server loop actually works.
 //
@@ -44,17 +44,18 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		t.Skip("no Chrome/Chromium on PATH; skipping browser e2e")
 	}
 
-	// A hermetic jail root with one pre-existing file (to test FS read).
+	// A hermetic working dir with one pre-existing file (to test FS read). The
+	// server's filesystem is mounted at the editor's root, so the browser reaches
+	// these files at their REAL paths; `root` is just the advertised working dir
+	// the editor lands in.
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "preexisting.txt"), "disk content 42\n")
 
-	// The real Go server, in-process, with the proxy config generated so the page
-	// connects back to it.
+	// The real Go server, in-process (visiting the page IS the standalone app).
 	srv := server.New(server.Config{
-		Root:        root,
-		Port:        0,
-		Assets:      server.NewAssetServer(os.DirFS(bundle)),
-		ProxyConfig: true,
+		Dir:    root,
+		Port:   0,
+		Assets: server.NewAssetServer(os.DirFS(bundle)),
 	}, server.NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
@@ -83,7 +84,7 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 
 	// 1) FS read: the editor reads a file that exists only on the server's disk.
 	t.Run("fs read", func(t *testing.T) {
-		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("/host/preexisting.txt"), "\\n")'])`)
+		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("`+root+`/preexisting.txt"), "\\n")'])`)
 		if !strings.Contains(got, "disk content 42") {
 			t.Fatalf("editor read wrong content: %q", got)
 		}
@@ -108,7 +109,7 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 
 	// 2) FS write via writefile(): fs.open(O_WRONLY|O_CREAT)+write+close.
 	t.Run("fs write (writefile)", func(t *testing.T) {
-		evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['writefile(["written via","writefile"], "/host/wf.txt")'])`)
+		evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['writefile(["written via","writefile"], "`+root+`/wf.txt")'])`)
 		time.Sleep(300 * time.Millisecond)
 		assertDisk(t, filepath.Join(root, "wf.txt"), "written via\nwritefile\n")
 	})
@@ -119,7 +120,7 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 	t.Run("fs write (editor :w!)", func(t *testing.T) {
 		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'enew'}, {}])`)
 		evalRPC(t, ctx, `window.nvim.request('nvim_buf_set_lines', [0, 0, -1, false, ['written via', 'the editor']])`)
-		evalRPC(t, ctx, `window.nvim.request('nvim_buf_set_name', [0, '/host/from-editor.txt'])`)
+		evalRPC(t, ctx, `window.nvim.request('nvim_buf_set_name', [0, '`+root+`/from-editor.txt'])`)
 		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'write', bang:true}, {}])`)
 		time.Sleep(400 * time.Millisecond)
 		assertDisk(t, filepath.Join(root, "from-editor.txt"), "written via\nthe editor\n")
@@ -130,7 +131,7 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 	//     emscripten ENOENT(44) for a missing file, so nvim's "[New file]" check
 	//     failed and the buffer was spuriously 'readonly' -> :w errored E45.
 	t.Run("fs write (:w on a new file, no bang)", func(t *testing.T) {
-		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'edit', args:['/host/new-file.txt']}, {}])`)
+		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'edit', args:['`+root+`/new-file.txt']}, {}])`)
 		ro := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['&readonly'])`)
 		if ro != "0" {
 			t.Fatalf("new file buffer is readonly (%s) — the E45 papercut", ro)
@@ -149,9 +150,10 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		}
 	})
 
-	// 5) readdir: glob /host sees the server's files (including ones just written).
+	// 5) readdir: glob of the working dir sees the server's files (including ones
+	//    just written).
 	t.Run("fs readdir (glob)", func(t *testing.T) {
-		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(map(glob("/host/*", 0, 1), "fnamemodify(v:val, \\":t\\")"), ",")'])`)
+		got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(map(glob("`+root+`/*", 0, 1), "fnamemodify(v:val, \\":t\\")"), ",")'])`)
 		for _, want := range []string{"preexisting.txt", "wf.txt", "from-editor.txt"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("glob missing %q (got %q)", want, got)
@@ -159,11 +161,9 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		}
 	})
 
-	// 6) PTY: :terminal runs a real shell ON THE SERVER; a command typed into it
-	//    creates a file on the server's disk. NOTE: inside the terminal the shell
-	//    sees REAL server paths, not the engine-side '/host' mount — its cwd is the
-	//    jail root (resolveCwd maps the engine's /host cwd -> root) — so the command
-	//    uses a RELATIVE path that lands in root.
+	// 6) PTY: :terminal runs a real shell ON THE SERVER, in the editor's cwd —
+	//    which is the server's working dir (`root`; the browser chdir'd into it
+	//    from the hello) — so a RELATIVE path lands in root.
 	t.Run("pty terminal", func(t *testing.T) {
 		termBuf := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['bufnr("%")'])`)
 		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'terminal'}, {}])`)
@@ -203,8 +203,9 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 			t.Fatal("nvim RPC server never started (v:servername empty)")
 		}
 		// A tiny Node msgpack-RPC client: connect to $NVIM, send the notification
-		// [2, "nvim_command", ["call writefile([...], '/host/rpc-out.txt')"]] — nvim
-		// runs it, writing through the FS proxy to the server's disk.
+		// [2, "nvim_command", ["call writefile([...], 'rpc-out.txt')"]] — nvim
+		// runs it, writing through the FS proxy to the server's disk (relative to
+		// the editor's cwd, i.e. `root`).
 		writeFile(t, filepath.Join(root, "rpc-client.js"), rpcClientJS)
 		// jobstart (async) — NOT system(): a blocking system() would deadlock, since
 		// nvim must keep servicing its event loop to accept the child's RPC.
@@ -231,8 +232,8 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		writeFile(t, filepath.Join(root, "rpc-client.js"), rpcClientJS) // self-contained (subtest 7 may be filtered out)
 		srv.DropConnections()                                           // abruptly close the proxy ws; the client reconnects
 
-		target := "/host/rpc-after-reconnect.txt"
-		onDisk := filepath.Join(root, "rpc-after-reconnect.txt")
+		target := filepath.Join(root, "rpc-after-reconnect.txt")
+		onDisk := target
 		_ = os.Remove(onDisk)
 		// Keep asking a child to drive nvim until it succeeds — this naturally spans
 		// the reconnect + re-serverstart window (early attempts fail while the proxy
@@ -256,7 +257,7 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 const rpcClientJS = `const net = require('net');
 const sock = process.env.NVIM;
 if (!sock) { console.error('no $NVIM'); process.exit(2); }
-const out = process.argv[2] || '/host/rpc-out.txt';
+const out = process.argv[2] || 'rpc-out.txt';
 const method = 'nvim_command';
 const cmd = "call writefile(['from-child-rpc'], '" + out + "')";
 const msg = Buffer.concat([

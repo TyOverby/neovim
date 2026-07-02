@@ -1,7 +1,7 @@
 # rvim browser e2e
 
 The headless-Chrome integration test: it boots the **real** wasm Neovim engine in
-headless Chrome against the **real** in-process Go server (`--proxy`) and asserts
+headless Chrome against the **real** in-process Go server and asserts
 real filesystem + process effects on the server's disk. This is the durable
 verification that the full **browser → wasm engine → Go server** loop works — the
 safety net that replaces the Node conformance oracle once the Node prototype is

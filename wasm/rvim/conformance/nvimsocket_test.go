@@ -28,7 +28,7 @@ func TestNvimSocketExportedToChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sock = "/tmp/rvim-nvim-conformance.sock"
-	if _, err := c.Hello(ctx, map[string]any{"mount": "/host", "nvimSocket": sock}); err != nil {
+	if _, err := c.Hello(ctx, map[string]any{"nvimSocket": sock}); err != nil {
 		t.Fatal(err)
 	}
 

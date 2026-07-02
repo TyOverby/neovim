@@ -1,12 +1,14 @@
 // Command rvim is the stage-5 standalone-app server (remote vim). It serves the
 // static browser bundle and the /proxy WebSocket, performing the engine's real IO
 // (filesystem, processes, PTYs, sockets) either LOCALLY or — with --remote — on a
-// remote host over SSH. It binds 127.0.0.1 by default (the load-bearing security
-// default carried over from stage 4).
+// remote host over SSH. The IO host's filesystem is exposed WHOLE, mounted at the
+// in-browser editor's root (the editor sees the box's real paths; site/rc files
+// are MEMFS overlays on top). It binds 127.0.0.1 by default (the load-bearing
+// security default carried over from stage 4).
 //
-//	rvim --assets-dir <bundle> [--root DIR] [--port N] [--bind ADDR] [--proxy]
-//	rvim --remote user@host --root /remote/project --assets-dir <bundle> --proxy
-//	rvim --serve-stdio --root DIR        (internal: the remote end of --remote)
+//	rvim --assets-dir <bundle> [--port N] [--bind ADDR]
+//	rvim --remote user@host --assets-dir <bundle>
+//	rvim --serve-stdio                   (internal: the remote end of --remote)
 package main
 
 import (
@@ -16,7 +18,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"rvim/server"
@@ -26,10 +27,7 @@ func main() {
 	var (
 		port        = flag.Int("port", 8001, "listen port (0 = ephemeral)")
 		bind        = flag.String("bind", "127.0.0.1", "listen address (non-loopback requires a token + TLS — Phase 9)")
-		root        = flag.String("root", "", "filesystem jail root (default: cwd; with --remote, the path ON the remote host)")
-		mount       = flag.String("mount", "/host", "in-editor mount prefix mapped to --root")
 		assetsDir   = flag.String("assets-dir", "", "serve the browser bundle from this dir (the build-site.sh output)")
-		proxy       = flag.Bool("proxy", false, "generate /proxy-config.js so visiting the page is the standalone app")
 		rc          = flag.String("rc", "", "where the in-browser nvim's config/$HOME comes from: remote|local|builtin (default: remote with --remote, else builtin)")
 		remote      = flag.String("remote", "", "ssh destination (user@host): proxy all IO to `ssh -T <dest> <remote-rvim> --serve-stdio`")
 		remoteRvim  = flag.String("remote-rvim", "rvim", "path to rvim ON the remote host (like rsync's --rsync-path). `ssh host cmd` does NOT source ~/.bashrc, so the remote PATH usually excludes ~/bin — pass an absolute or ~/ path (the remote shell expands ~) if rvim isn't in the default PATH")
@@ -72,31 +70,12 @@ func main() {
 		return
 	}
 
-	rootGiven := *root != ""
-	jailRoot := *root
-	if jailRoot == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			log.Fatalf("rvim: cannot determine cwd: %v", err)
-		}
-		jailRoot = cwd
-	}
-	// In --remote mode the root is a path on the REMOTE host, so don't Abs() it
-	// against the LOCAL filesystem; otherwise resolve it locally.
-	if *remote == "" {
-		abs, err := filepath.Abs(jailRoot)
-		if err != nil {
-			log.Fatalf("rvim: bad --root: %v", err)
-		}
-		jailRoot = abs
-	}
-
 	// --serve-stdio: the remote endpoint. Speak the proxy protocol over stdin/
-	// stdout; NOTHING goes to stdout except frames (logs go to stderr).
+	// stdout; NOTHING goes to stdout except frames (logs go to stderr). Its cwd
+	// (the ssh login dir, i.e. the remote home) is the working dir it advertises.
 	if *serveStdio {
 		selfExe, _ := os.Executable()
 		srv := server.New(server.Config{
-			Root: jailRoot, Mount: *mount,
 			Session: *session, DaemonSock: *daemonSock, SelfExe: selfExe,
 		}, server.NewRegistry())
 		if err := srv.ServeStdio(os.Stdin, os.Stdout); err != nil {
@@ -106,33 +85,20 @@ func main() {
 	}
 
 	cfg := server.Config{
-		Bind:        *bind,
-		Port:        *port,
-		Root:        jailRoot,
-		Mount:       *mount,
-		ProxyConfig: *proxy,
-		RC:          rcMode,
+		Bind: *bind,
+		Port: *port,
+		RC:   rcMode,
 	}
 	if *remote != "" {
-		// Relay mode: each /proxy connection runs `ssh -T <dest> rvim --serve-stdio
-		// [--root <remote-root>]`. -T = no pseudo-tty (a tty would mangle the binary
-		// frame protocol); BatchMode = never prompt (fail instead). The jail root is
-		// a path on the REMOTE — so only forward --root when the user gave one. With
-		// no --root, OMIT it and let the remote `--serve-stdio` default to the
-		// remote's own cwd (your home dir over ssh). Passing the app-server's local
-		// cwd here would name a directory that doesn't exist on the remote, leaving
-		// the jail rooted at a missing path (every :e/:term then fails).
-		cmd := []string{
+		// Relay mode: each /proxy connection runs `ssh -T <dest> rvim --serve-stdio`.
+		// -T = no pseudo-tty (a tty would mangle the binary frame protocol);
+		// BatchMode = never prompt (fail instead). All IO happens on the remote,
+		// rooted at ITS filesystem; the working dir the editor lands in is the
+		// remote process's cwd (your home dir over ssh).
+		cfg.RemoteCommand = []string{
 			"ssh", "-T", "-o", "BatchMode=yes", *remote,
-			*remoteRvim, "--serve-stdio", "--mount", *mount,
+			*remoteRvim, "--serve-stdio",
 		}
-		if rootGiven {
-			cmd = append(cmd, "--root", *root)
-		}
-		cfg.RemoteCommand = cmd
-		// The advisory root in /proxy-config.js describes the REMOTE; don't advertise
-		// a local path. Empty when unspecified (the browser routes by --mount).
-		cfg.Root = *root
 	}
 	// Static assets: an explicit --assets-dir (dev) wins; otherwise fall back to a
 	// bundle embedded at build time (`-tags embed_assets`), so a release binary is
@@ -155,34 +121,25 @@ func main() {
 	fmt.Printf("rvim standalone-app server on %s\n", url)
 	fmt.Printf("  proxy WebSocket : %sproxy\n", "ws://"+srv.Addr()+"/")
 	if *remote != "" {
-		if rootGiven {
-			fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio --root %s)\n", *remote, *remote, *remoteRvim, *root)
-			fmt.Printf("  remote root    : %s  (jail enforced ON the remote; mount %s)\n", *root, *mount)
-		} else {
-			fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio)\n", *remote, *remote, *remoteRvim)
-			fmt.Printf("  remote root    : <the remote's working dir>  (pass --root to choose; mount %s)\n", *mount)
-		}
+		fmt.Printf("  IO host        : %s  (ssh -T %s %s --serve-stdio)\n", *remote, *remote, *remoteRvim)
+		fmt.Printf("  filesystem     : the remote's, mounted at the editor's root; lands in the remote's working dir\n")
 	} else {
-		fmt.Printf("  filesystem root : %s  (jail root; mount %s)\n", jailRoot, *mount)
+		cwd, _ := os.Getwd()
+		fmt.Printf("  filesystem     : this machine's, mounted at the editor's root; lands in %s\n", cwd)
 	}
-	if *proxy {
-		switch rcMode {
-		case "remote":
-			fmt.Printf("  nvim config    : remote ($HOME from the IO host via %s, if under --root)\n", *mount)
-		case "local":
-			fmt.Printf("  nvim config    : local (this machine's ~/.config/nvim shadows the host's $HOME/.config/nvim)\n")
-		default:
-			fmt.Printf("  nvim config    : builtin (nvim defaults; no user config)\n")
-		}
+	switch rcMode {
+	case "remote":
+		fmt.Printf("  nvim config    : remote ($HOME is the IO host's home)\n")
+	case "local":
+		fmt.Printf("  nvim config    : local (this machine's ~/.config/nvim shadows the host's $HOME/.config/nvim)\n")
+	default:
+		fmt.Printf("  nvim config    : builtin (nvim defaults; no user config)\n")
 	}
 	fmt.Printf("  bound to %s (loopback default; no token — single-user model)\n", *bind)
 	if cfg.Assets == nil {
 		fmt.Printf("  NOTE: no static bundle (pass --assets-dir <build-site.sh output>, or build with -tags embed_assets)\n")
 	} else {
 		fmt.Printf("  static bundle   : %s\n", assetSource)
-	}
-	if !*proxy {
-		fmt.Printf("  NOTE: --proxy off; serving the no-proxy demo (Phase 2 has only base handlers)\n")
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.

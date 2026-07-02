@@ -103,9 +103,9 @@ func pumpFrames(src, dst frameRW) {
 }
 
 // relayToRemote forwards a browser WebSocket to a fresh remote io-proxy
-// subprocess (RemoteCommand, e.g. `ssh -T host rvim --serve-stdio --root …`) over
-// its stdin/stdout. No IO is handled locally — the remote does it all, jailed to
-// its own --root. The subprocess is per-connection, so its per-connection state
+// subprocess (RemoteCommand, e.g. `ssh -T host rvim --serve-stdio`) over its
+// stdin/stdout. No IO is handled locally — the remote does it all, on its own
+// filesystem. The subprocess is per-connection, so its per-connection state
 // (fds, child procs, sockets) is isolated and torn down when the browser
 // disconnects (stdin EOF -> remote exits -> remote cleanup). A remote death (ssh
 // drop) closes the WebSocket, and the client's ReconnectingProxy dials again —

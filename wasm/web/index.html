@@ -63,12 +63,13 @@
   <canvas id="screen" aria-label="Neovim screen"></canvas>
   <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <!-- Standalone app: when this page is served BY `rvim --proxy`,
-       /proxy-config.js sets window.__NVIM_PROXY = { url, mount, root } and app.js
-       opts into the IO proxy (real FS / :! / :terminal / LSP on the server). The
-       plain static demo (serve.js) does NOT serve this file -> it 404s, the global
-       stays undefined, and app.js behaves exactly as the no-proxy demo. onerror
-       swallows that 404 so the static demo's console stays clean. -->
+  <!-- Standalone app: when this page is served BY rvim, /proxy-config.js sets
+       window.__NVIM_PROXY = { url, nvimSocket, rc } and app.js opts into the IO
+       proxy: the server's filesystem is mounted at the editor's root (real FS /
+       :! / :terminal / LSP on the server). The plain static demo (serve.js) does
+       NOT serve this file -> it 404s, the global stays undefined, and app.js
+       behaves exactly as the no-proxy demo. onerror swallows that 404 so the
+       static demo's console stays clean. -->
   <script src="proxy-config.js" onerror="/* no proxy config (static demo): app.js runs no-proxy */"></script>
 
   <!-- Layered: MessagePack global, then the canvas grid renderer, then the

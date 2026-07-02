@@ -96,7 +96,7 @@ async function main() {
   const facade = createReconnectingProxy({
     ProxyClient,
     dial: () => wrapWS(url, dialed),
-    helloParams: { mount: '/host', root: process.cwd() },
+    helloParams: { nvimSocket: '' },
     onStatus: (ev) => statuses.push(ev.kind),
     baseBackoff: 50,        // fast backoff for the test
     maxBackoff: 200,

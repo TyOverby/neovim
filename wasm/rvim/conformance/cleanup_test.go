@@ -36,7 +36,7 @@ func TestDisconnectKillsChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Hello(ctx, map[string]any{"mount": "/host"}); err != nil {
+	if _, err := c.Hello(ctx, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,7 +75,7 @@ func TestDisconnectClosesListeners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Hello(ctx, map[string]any{"mount": "/host"}); err != nil {
+	if _, err := c.Hello(ctx, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -50,15 +50,14 @@ declare const NeovimUI: any;
 
   setStatus('starting engine worker…');
 
-  // Stage 4 (standalone app, opt-in): when this page is served BY
-  // `rvim --proxy`, /proxy-config.js has set window.__NVIM_PROXY =
-  // { url, mount, root }. We pass it to create({ proxy }) so the engine's real IO
-  // (filesystem under the mount prefix, :!, jobstart, :terminal, LSP) runs on the
-  // server, jailed to its --root. When it's ABSENT (the plain serve.js static
-  // demo, or the library used without a proxy) we behave EXACTLY as before --
-  // no server connection, MEMFS-only. The mechanism is documented in index.html.
+  // Stage 4 (standalone app, opt-in): when this page is served BY rvim,
+  // /proxy-config.js has set window.__NVIM_PROXY = { url, nvimSocket, rc }. We
+  // pass it to create({ proxy }) so the engine's real IO (the filesystem —
+  // mounted WHOLE at the editor's root — plus :!, jobstart, :terminal, LSP)
+  // runs on the server. When it's ABSENT (the plain serve.js static demo, or
+  // the library used without a proxy) we behave EXACTLY as before -- no server
+  // connection, MEMFS-only. The mechanism is documented in index.html.
   const proxy = (typeof win.__NVIM_PROXY === 'object' && win.__NVIM_PROXY) || null;
-  const mount = (proxy && typeof proxy.mount === 'string' && proxy.mount) || '/host';
 
   // --rc local: rvim's /proxy-config.js inlined the app-server's own ~/.config/nvim
   // as window.__NVIM_RC_FILES { '/abs/path': 'contents' }. Seed it into the engine's
@@ -144,7 +143,7 @@ declare const NeovimUI: any;
     if (!readyMsg) { return; }   // only after ready; pre-ready status is owned above
     let suffix = '';
     if (proxy) {
-      if (proxyState === 'connected') { suffix = ' — proxy connected (' + proxy.url + ', files at ' + mount + ')'; }
+      if (proxyState === 'connected') { suffix = ' — proxy connected (' + proxy.url + ')'; }
       else if (proxyState === 'error') { suffix = ' — proxy NOT connected (' + proxy.url + '); IO stays local'; }
       else { suffix = ' — connecting to proxy ' + proxy.url + '…'; }
     }
@@ -204,15 +203,14 @@ declare const NeovimUI: any;
       // refreshStatus() composes readyMsg with the current proxyState (the
       // proxy:connected/error status may have arrived before or after ready).
       refreshStatus();
-      // Standalone-app path: land the user in the SERVER's files. chdir into the
-      // mount and open it so the first thing they see is the server's project
-      // directory (the mount '/host' maps to the server's --root). Best-effort:
-      // if the proxy isn't actually connected the cd/edit fails soft and the user
-      // is simply left in the local MEMFS cwd. No effect on the no-proxy demo.
+      // Standalone-app path: the engine already BOOTED in the server's working
+      // dir (the engine worker set the cwd from the proxy hello; pre.js chdir'd
+      // before main()), so just open it — the first thing the user sees is the
+      // server's project directory listing. Best-effort: if the proxy isn't
+      // actually connected the edit fails soft. No effect on the no-proxy demo.
       if (proxy) {
         installTermAdoptHook(nvim);
-        nvim.request('nvim_cmd', [{ cmd: 'cd', args: [ mount ] }, {}]).catch(function () {});
-        nvim.request('nvim_cmd', [{ cmd: 'edit', args: [ mount ] }, {}]).catch(function () {});
+        nvim.request('nvim_cmd', [{ cmd: 'edit', args: [ '.' ] }, {}]).catch(function () {});
       }
     })
     .catch(function (err: any) { setStatus('failed to start: ' + (err && err.message || err), { error: true }); });

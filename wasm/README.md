@@ -470,7 +470,7 @@ cd wasm/rvim
 ../web/build-site.sh server/site                # assemble the bundle into the embed dir
 ./precompress.sh server/site                    # gzip the big assets in place (optional)
 go build -tags embed_assets -o rvim ./cmd/rvim  # self-contained binary (bundle baked in)
-./rvim --root /path/to/project --port 8001 --proxy
+cd /path/to/project && rvim --port 8001         # the editor lands in rvim's cwd
 ```
 
 `precompress.sh` gzips the large assets (`nvim.wasm`, the `nvim-*.data`
@@ -484,8 +484,8 @@ the rare client that can't, and serves raw (with Range support) when there is no
 `.gz`. (CI runs `precompress.sh` automatically before the embed build.)
 
 (For dev, skip the embed and serve the bundle off disk: `go build -o rvim
-./cmd/rvim` then `./rvim --assets-dir <build-site output> --root … --proxy`. The
-dev `--assets-dir` path is raw build-site.sh output, so it serves uncompressed
+./cmd/rvim` then `./rvim --assets-dir <build-site output>`. The dev
+`--assets-dir` path is raw build-site.sh output, so it serves uncompressed
 with Range — `precompress.sh` only touches the embed copy.)
 
 **Editing a remote host** (the three-tier mode): run `rvim` on a machine you can
@@ -494,37 +494,36 @@ over SSH — it serves the page locally and proxies all IO to
 `ssh -T user@host rvim --serve-stdio` (assumes `rvim` is on the remote's `PATH`):
 
 ```sh
-./rvim --remote user@host --root /remote/project --proxy   # + --assets-dir or embedded bundle
+./rvim --remote user@host   # + --assets-dir or embedded bundle
 ```
 
 Then open **`http://localhost:8001/`** in a JSPI-capable browser (Chrome ≥ 137).
-You land in `/path/to/project` (mounted in-editor at `/host`) with a full editor:
+The IO host's filesystem is **mounted at the editor's root** — the editor sees
+the box's real paths — and you land in the server's working dir (`rvim`'s cwd
+locally; the ssh login dir, i.e. the remote home, with `--remote`):
 
-- **Files** — `:e /host/...`, `:w`, `:Explore /host`, globbing — all hit the
-  server's real disk, jailed to `--root`. (Paths outside the mount prefix stay in
-  the browser's fast local MEMFS — runtime, `/tmp`, scratch.)
+- **Files** — `:e`, `:w`, `:Explore`, globbing, `:cd` — all hit the server's real
+  disk at real paths. The only exceptions are the MEMFS **overlays** shadowed on
+  top: the packaged nvim runtime (`/usr/share/nvim`), `/dev` + `/proc`, and (per
+  `--rc`) a local `$HOME` or seeded config.
 - **Commands / jobs** — `:!make`, `:r !ls`, `system(...)`, `jobstart(...)` run as
-  real child processes on the server (cwd jailed to `--root`).
+  real child processes on the server, in the editor's cwd.
 - **`:terminal`** — a real PTY on the server (via `creack/pty`); resize propagates.
 - **LSP** — a language server configured as a stdio job is spawned on the server
   and "just works" (so does `vim.system` / `vim.lsp`).
 - **Config** — `$USER` always reflects the host user (reported in the hello). For
   config, `--rc` picks the source:
-  - **`remote`** (default with `--remote`): `$HOME` → the host's home via the mount,
-    so `~/.config/nvim` *and its plugins/shada* load live through the proxy.
+  - **`remote`** (default with `--remote`): `$HOME` → the host's home, so
+    `~/.config/nvim` *and its plugins/shada* load live through the proxy.
   - **`local`**: `$HOME` is still the host's home, but `$HOME/.config/nvim` is
     **shadowed** to the **app-server's own** `~/.config/nvim` (seeded into the
     browser, served from memory) — so you edit with *your laptop's* config while
     `~`, shada, and data still live on the host. Config dir only (no plugins).
-  - **`builtin`** (default without `--remote`): nvim's defaults.
+  - **`builtin`** (default without `--remote`): nvim's defaults ($HOME stays the
+    browser-local `/root`, shadowed from the server).
 
-  `remote`/`local` need the host's home to fall under `--root` (e.g. `--root /` or
-  `--root ~`); otherwise they warn and `$HOME` stays the in-browser default
-  (`local` still loads the seeded config).
-
-`--root` defaults to the server's cwd; `--port` defaults to `8001`. The server
-binds `127.0.0.1` only. `--proxy` makes visiting the page the standalone app
-(generates `/proxy-config.js`); without it `rvim` serves the plain no-proxy demo.
+`--port` defaults to `8001`. The server binds `127.0.0.1` only. Visiting the
+page IS the standalone app (`/proxy-config.js` is always generated).
 
 > **You must rebuild the engine?** No. The standalone app is the *same* `nvim.wasm`
 > as the library — the proxy is opt-in JS glue (`create({ proxy })`) plus the
@@ -541,16 +540,17 @@ binds `127.0.0.1` only. `--proxy` makes visiting the page the standalone app
 The proxy is **additive and opt-in**: nothing connects to a server unless a
 `proxy` config is present. Two layers provide it:
 
-- **For the demo page:** when `index.html` is served by `rvim --proxy`, the server
-  serves a generated `/proxy-config.js` that sets
-  `window.__NVIM_PROXY = { url, mount: '/host', root }`. The `url` is derived from
+- **For the demo page:** when `index.html` is served by `rvim`, the server serves
+  a generated `/proxy-config.js` that sets
+  `window.__NVIM_PROXY = { url, nvimSocket, rc }`. The `url` is derived from
   the request's `Host` header (`ws://<same-host>/proxy`), so it works whether you
   reach the page via `localhost`, `127.0.0.1`, or a forwarded port. `app.js` reads
-  that global, passes it as `create({ ..., proxy })`, and chdir/opens the mount so
-  you land in the server's files. **When the page is served by the plain static
-  dev server (`serve.js`), or by `rvim` without `--proxy`, `/proxy-config.js` is a
-  no-op, the global stays undefined, and `app.js` behaves exactly as the no-proxy
-  demo** — so the static demo and the embeddable widget are completely unaffected.
+  that global and passes it as `create({ ..., proxy })`; the engine boots in the
+  server's working dir (reported in the hello) so you land in the server's files.
+  **When the page is served by the plain static dev server (`serve.js`),
+  `/proxy-config.js` is a no-op, the global stays undefined, and `app.js` behaves
+  exactly as the no-proxy demo** — so the static demo and the embeddable widget
+  are completely unaffected.
 - **For embedders:** pass the proxy config to `create()` directly:
 
   ```js
@@ -558,15 +558,16 @@ The proxy is **additive and opt-in**: nothing connects to a server unless a
     args: ['-n'],
     proxy: {
       url: 'ws://my-server:8001/proxy', // the server's /proxy WebSocket
-      mount: '/host',                    // in-editor prefix that maps to --root
-      root: '/path/to/project',          // advisory; the server's --root is authoritative
     },
   });
   ```
 
-  The engine worker opens the WebSocket, runs the proxy client, and routes IO for
-  paths under `mount` (and all spawn/PTY) to the server. With **no `proxy`**, the
-  library is byte-for-byte the self-contained MEMFS build it has always been.
+  The engine worker opens the WebSocket, runs the proxy client, and mounts the
+  server's filesystem at the engine's root: every non-shadowed absolute path (and
+  all spawn/PTY) routes to the server, while the shadow overlays (the packaged
+  runtime, `/dev`, `/proc`, and the `--rc`-dependent home/config subtrees) stay
+  in the browser's MEMFS. With **no `proxy`**, the library is byte-for-byte the
+  self-contained MEMFS build it has always been.
 
 ### Reconnect + durable `:terminal`
 
@@ -612,9 +613,10 @@ process's privileges. The defaults reflect that:
   multi-tenant sandbox. Anyone who can reach the port can run commands as you. A
   shared-token handshake is a straightforward later addition; the loopback default
   is the load-bearing protection.
-- **FS proxy + child-process cwd are jailed to `--root`** — a stray
-  `/host/../../etc/passwd` open or a relative `cd` can't escape the project you
-  pointed the server at.
+- **The whole filesystem of the server user is exposed** — the server's
+  filesystem is mounted at the editor's root, with no jail: the editor (and
+  anything it spawns) can read and write whatever the `rvim` process can, exactly
+  like an ssh session as that user. The loopback bind is the boundary.
 
 ### Known gaps
 
@@ -829,9 +831,9 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `nvim_sock_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the full socket + DNS proxy backend — outbound connect (a virtual bidirectional pollable fd backing each `uv_tcp_t`/`uv_pipe_t`; the `--wrap=uv_tcp_connect`/`uv_pipe_connect` paths) AND inbound listen/accept (the listener table + `sock.listen`/`accept`/`incoming` routing; the `--wrap=uv_listen`/`uv_accept` paths), plus `sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo` and the server pushes. Pairs with the socket wraps in `uv_stubs.c`. Active only when a proxy is configured. |
 | `proxy-client.js` | Stage 4 proxy **client** + frame codec, shared by the engine worker (browser/Node) and the server. Defines the framed protocol (`hello`/`req`/`res`/`push` + binary trailer) and `createProxyClient(transport)`. The worker `importScripts` it next to `nvim.js` when `create({ proxy })` is used. |
 | `proxy-reconnect.js` | Stage 5 **ReconnectingProxy** (opt-in): a stable facade at `self.__nvimProxy` that delegates `request` to the live client (fast-rejecting during an outage so suspended syscalls return `-EIO`, never hang), `close()`s the dead client on drop, preserves the push router across reconnects, and re-dials with backoff. Wired by `web/engine-worker.js`. |
-| `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families, jailed to `--root`), `cmd/rvim` (the binary; `--root`/`--port`/`--proxy`/`--assets-dir`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `docs/history/stage5.md`. |
+| `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families; the server's filesystem is exposed whole, mounted at the editor's root), `cmd/rvim` (the binary; `--port`/`--assets-dir`/`--remote`/`--rc`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `docs/history/stage5.md`. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
-| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + canvas `mount_into` painting through `grid-renderer.js`; the legacy `<pre>` renderer lives on as the `neovim-ui-pre-testutil.js` test utility), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `rvim --proxy`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + canvas `mount_into` painting through `grid-renderer.js`; the legacy `<pre>` renderer lives on as the `neovim-ui-pre-testutil.js` test utility), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by rvim's generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
 | `docs/history/stage1.md` / `docs/history/stage2.md` / `docs/history/stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)

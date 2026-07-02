@@ -46,7 +46,7 @@ func newStdioBrowser(t *testing.T, sock, session, root string) *stdioBrowser {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(Config{Root: root, Session: session, DaemonSock: sock}, NewRegistry())
+	srv := New(Config{Dir: root, Session: session, DaemonSock: sock}, NewRegistry())
 	go func() {
 		_ = srv.ServeStdio(srvIn, srvOut)
 		srvOut.Close()

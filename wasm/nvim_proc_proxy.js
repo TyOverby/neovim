@@ -54,7 +54,7 @@ addToLibrary({
   // $ProcProxy: shared state + helpers. Read the proxy lazily off globalThis so
   // the library links cleanly with or without one.
   // --------------------------------------------------------------------------
-  $ProcProxy__deps: ['$FS', '$NvimIO'],
+  $ProcProxy__deps: ['$FS', '$NvimIO', '$PATH_FS'],
   $ProcProxy: {
     nextLocalId: 1,          // local child ids handed to C (used as proc->pid)
     nextFd: 200000,          // virtual stdio fds, above the fs-proxy host range
@@ -73,6 +73,19 @@ addToLibrary({
 
     proxy: function () {
       return (typeof globalThis !== 'undefined' && globalThis.__nvimProxy) || null;
+    },
+
+    // Read + normalize a spawn cwd: a RELATIVE cwd (nvim's :terminal passes "."
+    // via the term:// URI) is resolved against the ENGINE's cwd -- which IS a
+    // server path (the server's filesystem is mounted at the engine's root) --
+    // so the server always receives an absolute path. Empty stays empty (the
+    // server falls back to its own working dir).
+    readCwd: function (cwdPtr) {
+      var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
+      if (cwd && cwd[0] !== '/') {
+        try { cwd = PATH_FS.resolve(cwd); } catch (e) { cwd = ''; }
+      }
+      return cwd;
     },
 
     // Wake the JSPI-suspended __syscall_poll (the NvimIO.wake set during a wait).
@@ -372,7 +385,7 @@ addToLibrary({
 
       var argv = ProcProxy.readStrv(argvPtr);
       if (argv.length === 0) { return -1; }
-      var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
+      var cwd = ProcProxy.readCwd(cwdPtr);
       var envList = ProcProxy.readStrv(envPtr);
       var env = null;
       if (envList.length) {
@@ -477,7 +490,7 @@ addToLibrary({
 
       var argv = ProcProxy.readStrv(argvPtr);
       if (argv.length === 0) { return -1; }
-      var cwd = cwdPtr ? UTF8ToString(cwdPtr) : '';
+      var cwd = ProcProxy.readCwd(cwdPtr);
       var envList = ProcProxy.readStrv(envPtr);
       var env = null;
       if (envList.length) {

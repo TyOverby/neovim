@@ -223,11 +223,21 @@
       }
     }
 
-    // 3. cwd: chdir last, so a cwd that lives inside a seeded dir resolves. Fail
+    // 3. cwd: chdir last, so a cwd that lives inside a seeded dir resolves. In
+    //    the BROWSER the cwd is usually a SERVER path (the engine worker sets
+    //    __nvimCwd from the proxy hello's cwd) with no MEMFS node -- create the
+    //    stub directory chain first, exactly like the fs-proxy's chdir override
+    //    does for `:cd` (the stub only serves cwd bookkeeping; IO under it still
+    //    routes to the server). Under Node the host filesystem is NODEFS-mounted,
+    //    so creating directories would touch the real disk -- chdir only. Fail
     //    soft -- on a missing dir keep the default cwd rather than crashing.
     if (cfgCwd) {
-      try { FS.chdir(cfgCwd); }
-      catch (e) { dbg('nvim wasm: failed to chdir to ' + cfgCwd + ': ' + e); }
+      try {
+        if (!isNode) {
+          try { FS.mkdirTree(cfgCwd); } catch (e) { /* may already exist */ }
+        }
+        FS.chdir(cfgCwd);
+      } catch (e) { dbg('nvim wasm: failed to chdir to ' + cfgCwd + ': ' + e); }
     }
   });
 })();

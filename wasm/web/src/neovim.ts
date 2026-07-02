@@ -59,11 +59,10 @@ export interface ClipboardProvider {
 
 export type ClipboardOption = 'browser' | ClipboardProvider;
 
-// The optional Stage 4 IO-proxy config (standalone-app).
+// The optional Stage 4 IO-proxy config (standalone-app). The server's
+// filesystem is mounted at the engine's root.
 export interface ProxyConfig {
   url: string;
-  root?: string;
-  mount?: string;
   nvimSocket?: string;
   session?: string;
   rc?: string;
@@ -498,9 +497,10 @@ export function browserEngineTransport(engineUrl: string, config?: BrowserEngine
     // Runtime bundle variant. engine-worker.js loads nvim-<plugins>.data.js
     // before nvim.js. Default 'full'.
     plugins: config.plugins,
-    // Optional Stage 4 IO-proxy config ({ url, root, mount }). When present,
+    // Optional Stage 4 IO-proxy config ({ url, ... }). When present,
     // engine-worker.js opens a WebSocket to the server and wires the proxy
-    // client; when absent it opens no connection (additive/opt-in).
+    // client (the server's filesystem then appears at the engine's root);
+    // when absent it opens no connection (additive/opt-in).
     proxy: config.proxy,
   };
   const worker = new Worker(engineUrl);
@@ -562,23 +562,17 @@ export function resolveEngineUrl(opts: { engineUrl?: string; baseUrl?: string })
 const PLUGIN_VARIANTS: Record<string, number> = { full: 1, core: 1, minimal: 1 };
 
 // Validate the optional Stage 4 `proxy` config (the standalone-app IO proxy --
-// see wasm/docs/history/stage4.md). It is ADDITIVE and OPT-IN: absent => behave exactly as
-// today (no server connection). Shape: { url:<string>, root?:<string>,
-// mount?:<string> }. Throw a clear error on a bad shape, mirroring the
-// `plugins` validation. Returns the (possibly normalized) proxy config or null.
+// see wasm/docs/history/stage4.md). It is ADDITIVE and OPT-IN: absent => behave
+// exactly as today (no server connection). Shape: { url:<string>, ... }. Throw
+// a clear error on a bad shape, mirroring the `plugins` validation. Returns the
+// (possibly normalized) proxy config or null.
 function validateProxy(proxy: ProxyConfig | null | undefined): ProxyConfig | null {
   if (proxy == null) { return null; }
   if (typeof proxy !== 'object') {
-    throw new Error('Neovim.create: proxy must be an object { url, root?, mount? }');
+    throw new Error('Neovim.create: proxy must be an object { url, nvimSocket?, session?, rc? }');
   }
   if (typeof proxy.url !== 'string' || !proxy.url) {
     throw new Error("Neovim.create: proxy.url (the server WebSocket URL) is required and must be a string");
-  }
-  if (proxy.root != null && typeof proxy.root !== 'string') {
-    throw new Error('Neovim.create: proxy.root must be a string (the server-side jail root)');
-  }
-  if (proxy.mount != null && typeof proxy.mount !== 'string') {
-    throw new Error('Neovim.create: proxy.mount must be a string (the in-engine mount prefix)');
   }
   // nvimSocket (optional): the server-side path for nvim's RPC socket ($NVIM),
   // forwarded to the worker so it can be sent in the hello — the server then
@@ -601,7 +595,7 @@ function validateProxy(proxy: ProxyConfig | null | undefined): ProxyConfig | nul
   if (proxy.rc != null && typeof proxy.rc !== 'string') {
     throw new Error('Neovim.create: proxy.rc must be a string (remote|local|builtin)');
   }
-  return { url: proxy.url, root: proxy.root, mount: proxy.mount, nvimSocket: proxy.nvimSocket, session: proxy.session, rc: proxy.rc };
+  return { url: proxy.url, nvimSocket: proxy.nvimSocket, session: proxy.session, rc: proxy.rc };
 }
 
 // The README-facing entry point: build a browser engine transport and a core

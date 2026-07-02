@@ -95,11 +95,11 @@ func (h *SessionHost) allocPtyID() int { return int(atomic.AddInt64(&h.nextPtyID
 // use. It flushes any output buffered while the session was detached (so the
 // browser's terminal catches up), then routes new output live to sink. Returns
 // the session so the caller's read loop can dispatch its requests.
-func (h *SessionHost) attach(key, root string, sink frameSink) *ptySession {
+func (h *SessionHost) attach(key string, sink frameSink) *ptySession {
 	h.mu.Lock()
 	s := h.sessions[key]
 	if s == nil {
-		s = &ptySession{key: key, host: h, root: root, ptys: map[int]*daemonPty{}}
+		s = &ptySession{key: key, host: h, ptys: map[int]*daemonPty{}}
 		h.sessions[key] = s
 	}
 	h.mu.Unlock()
@@ -180,7 +180,6 @@ func (h *SessionHost) runGC() {
 type ptySession struct {
 	key  string
 	host *SessionHost
-	root string // jail root from the first attach (informational)
 
 	mu         sync.Mutex
 	ptys       map[int]*daemonPty
@@ -641,7 +640,7 @@ func (h *SessionHost) serveClient(c net.Conn) {
 	rw := &stdioFrameRW{r: bufio.NewReaderSize(c, 64*1024), w: c}
 	sink := &connSink{rw: rw}
 
-	// First frame is the attach handshake: THello with {session, root}.
+	// First frame is the attach handshake: THello with {session}.
 	raw, err := rw.readRaw()
 	if err != nil {
 		return
@@ -652,7 +651,6 @@ func (h *SessionHost) serveClient(c net.Conn) {
 	}
 	var ap struct {
 		Session string `json:"session"`
-		Root    string `json:"root"`
 	}
 	_ = json.Unmarshal(hh.Params, &ap)
 	if ap.Session == "" {
@@ -664,7 +662,7 @@ func (h *SessionHost) serveClient(c net.Conn) {
 	// and the client would read a pty.data where it expects the handshake reply.
 	ack, _ := json.Marshal(map[string]any{"attached": true, "session": ap.Session})
 	_ = sink.send(proxy.Header{T: proxy.TRes, ID: hh.ID, OK: boolp(true), Result: ack}, nil)
-	sess := h.attach(ap.Session, ap.Root, sink)
+	sess := h.attach(ap.Session, sink)
 	defer sess.detach(sink)
 
 	for {

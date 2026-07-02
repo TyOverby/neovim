@@ -71,7 +71,7 @@ export interface ReconnectingProxy {
 //   dial()       - returns a browser-WebSocket-shaped object: settable
 //                  binaryType/onopen/onmessage/onclose/onerror, send(data),
 //                  close(). onmessage receives { data }.
-//   helloParams  - the handshake params ({ mount, root, ... }); the client
+//   helloParams  - the handshake params ({ nvimSocket, ... }); the client
 //                  sends its protocol version automatically.
 //   onHello(res) - optional; called with the hello ack's `result` object on each
 //                  successful (re)connect (e.g. { config, serverVersion, user }).

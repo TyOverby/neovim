@@ -89,13 +89,15 @@ if (workerData.proxy && workerData.proxy.url) {
     };
     const client = createProxyClient(transport);
     G.__nvimProxy = client;
-    // Phase 2: the FS-proxy js-library reads the mount prefix here. Default it to
-    // '/host' when a proxy is configured but no mount was given (documented).
-    G.__nvimProxyMount = (typeof workerData.proxy.mount === 'string' &&
-      workerData.proxy.mount.length) ? workerData.proxy.mount : '/host';
+    // The FS-proxy js-library mounts the server's filesystem at the engine's
+    // root, except the shadow subtrees (its built-in default: the packaged
+    // runtime + /dev + /proc). A host may override the list via workerData.
+    if (Array.isArray(workerData.proxy.shadows)) {
+      G.__nvimProxyShadows = workerData.proxy.shadows;
+    }
     ws.on('message', function (d: any) { if (transport.onFrame) { transport.onFrame(d); } });
     ws.on('open', function () {
-      client.hello({ mount: G.__nvimProxyMount, root: workerData.proxy.root })
+      client.hello({ nvimSocket: workerData.proxy.nvimSocket })
         .catch(function () { /* ignore; engine keeps running */ });
     });
     ws.on('close', function () { if (client.onTransportClosed) { client.onTransportClosed(); } });
@@ -103,7 +105,7 @@ if (workerData.proxy && workerData.proxy.url) {
   } catch (e: any) {
     // proxy-client.js or ws missing -> skip the seam; the engine still boots
     // (MEMFS/NODEFS only). Surface it on stderr so a misconfigured proxy isn't
-    // a silent no-op (Phase 2: mount-path file ops would then fail to open).
+    // a silent no-op (proxied file ops would then fail to open).
     try { process.stderr.write('nvim worker: proxy setup failed: ' + (e && e.message || e) + '\n'); } catch (_e) {}
   }
 }

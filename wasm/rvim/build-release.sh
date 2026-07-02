@@ -4,7 +4,7 @@
 # Each binary embeds the browser bundle (`-tags embed_assets`) and is statically
 # linked (CGO_ENABLED=0), so it's a single file with no runtime dependencies —
 # scp it to a laptop (app-server) or a remote host and run it. The SAME binary
-# does every mode: `rvim --root … --proxy` (local), `rvim --remote user@host …`
+# does every mode: `rvim` (local), `rvim --remote user@host …`
 # (three-tier app-server), and `rvim --serve-stdio` (the remote endpoint).
 #
 # Prereq: the wasm engine is built (wasm/build-deps.sh && wasm/build-nvim.sh).

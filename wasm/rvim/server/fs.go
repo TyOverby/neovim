@@ -2,21 +2,19 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 )
 
 // FILESYSTEM PROXY (stage 5 — seam 1). The Go port of wasm/server/fs-handlers.js,
-// verified against the same conformance scenarios. Every `path` is MOUNT-RELATIVE
-// (a leading-slash, server-relative path); resolveJailed maps it under the jail
-// root and guarantees it cannot escape — rejecting `..` traversal AND symlink
-// escapes by realpath'ing the nearest existing ancestor and requiring it to stay
-// under the realpath'd root.
+// verified against the same conformance scenarios. The server's filesystem is
+// mounted at the ENGINE's root, so every `path` the engine sends IS a server
+// path; resolvePath just forces it absolute and cleans it. There is no jail:
+// rvim exposes the whole filesystem of the user it runs as (the loopback
+// single-user model — same access an ssh session would have).
 
 // open(2) flag bits (musl/Linux values, as nvim's wasm passes them).
 const (
@@ -30,79 +28,11 @@ const (
 	xAPPEND  = 0x400
 )
 
-// jailError carries an EACCES so a failed jail check is reported as a permission
-// error (the message is what crosses the wire; the wasm side maps the rejection
-// to an errno).
-type jailError struct{ msg string }
-
-func (e *jailError) Error() string { return e.msg }
-
-func jailErr(msg string) error { return &jailError{msg: msg} }
-
-// realpathExistingPrefix resolves symlinks on the nearest EXISTING ancestor of p
-// and re-appends the non-existent tail (so `:w newfile` works before the leaf
-// exists). Mirrors fs-handlers.js realpathExistingPrefix.
-func realpathExistingPrefix(p string) string {
-	cur := p
-	var tail []string
-	for i := 0; i < 4096; i++ {
-		if real, err := filepath.EvalSymlinks(cur); err == nil {
-			if len(tail) == 0 {
-				return real
-			}
-			parts := append([]string{real}, reversed(tail)...)
-			return filepath.Join(parts...)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p // reached the root with nothing resolvable
-		}
-		tail = append(tail, filepath.Base(cur))
-		cur = parent
-	}
-	return p
-}
-
-func reversed(s []string) []string {
-	out := make([]string, len(s))
-	for i, v := range s {
-		out[len(s)-1-i] = v
-	}
-	return out
-}
-
-// resolveJailed maps a mount-relative `rel` to a real server path under root and
-// verifies containment. Mirrors fs-handlers.js resolveJailed.
-func resolveJailed(root, rel string) (string, error) {
-	if root == "" {
-		return "", jailErr("fs proxy: no jail root configured")
-	}
-	if rel == "" {
-		rel = "/"
-	}
-	// Strip leading slashes so an absolute rel cannot replace root; Join cleans
-	// any `..`, and the containment check below catches an escape.
-	relClean := strings.TrimLeft(rel, "/\\")
-	candidate := filepath.Join(root, relClean)
-
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		if abs, aerr := filepath.Abs(root); aerr == nil {
-			realRoot = abs
-		} else {
-			realRoot = root
-		}
-	}
-	realCandidate := realpathExistingPrefix(candidate)
-
-	withSep := realRoot
-	if !strings.HasSuffix(withSep, string(os.PathSeparator)) {
-		withSep += string(os.PathSeparator)
-	}
-	if realCandidate != realRoot && !strings.HasPrefix(realCandidate, withSep) {
-		return "", jailErr(fmt.Sprintf("fs proxy: path '%s' escapes the jail root", rel))
-	}
-	return realCandidate, nil
+// resolvePath normalizes an engine-supplied path to an absolute, cleaned server
+// path ("" -> "/", relative -> rooted, "a/../b" collapsed). Symlinks are left to
+// the OS to follow naturally (lstat can therefore see real links).
+func resolvePath(p string) string {
+	return filepath.Clean("/" + p)
 }
 
 // ---- per-connection handle table -------------------------------------------
@@ -210,10 +140,7 @@ func fsOpen(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	tbl := fsTableOf(c)
 
 	// Stat first: a directory takes the no-fd path (nvim opens dirs to getdents
@@ -294,10 +221,7 @@ func fsRead(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 			}
 		}
 	} else {
-		path, jerr := resolveJailed(c.Config.Root, p.Path)
-		if jerr != nil {
-			return Response{}, jerr
-		}
+		path := resolvePath(p.Path)
 		f, oerr := os.Open(path)
 		if oerr != nil {
 			return Response{}, oerr
@@ -342,10 +266,7 @@ func fsWrite(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 			}
 		}
 	} else {
-		path, jerr := resolveJailed(c.Config.Root, p.Path)
-		if jerr != nil {
-			return Response{}, jerr
-		}
+		path := resolvePath(p.Path)
 		f, oerr := os.OpenFile(path, os.O_RDWR, 0o644)
 		if oerr != nil {
 			f, oerr = os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
@@ -380,10 +301,7 @@ func fsStat(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	fi, serr := os.Stat(path)
 	if serr != nil {
 		return Response{Result: map[string]any{"exists": false}}, nil
@@ -396,10 +314,7 @@ func fsLstat(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	fi, serr := os.Lstat(path)
 	if serr != nil {
 		return Response{Result: map[string]any{"exists": false}}, nil
@@ -412,10 +327,7 @@ func fsReaddir(c *Ctx, params json.RawMessage, payload []byte) (Response, error)
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	ents, rerr := os.ReadDir(path)
 	if rerr != nil {
 		return Response{}, rerr
@@ -441,10 +353,7 @@ func fsMkdir(c *Ctx, params json.RawMessage, payload []byte) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	mode := os.FileMode(0o755)
 	if p.Mode != nil && *p.Mode != 0 {
 		mode = os.FileMode(*p.Mode & 0o777)
@@ -460,10 +369,7 @@ func fsUnlink(c *Ctx, params json.RawMessage, payload []byte) (Response, error) 
 	if err != nil {
 		return Response{}, err
 	}
-	path, err := resolveJailed(c.Config.Root, p.Path)
-	if err != nil {
-		return Response{}, err
-	}
+	path := resolvePath(p.Path)
 	// dir:true -> rmdir; else unlink (use syscall so a file unlink can't rmdir a
 	// directory, matching the Node unlink/rmdir split).
 	if p.Dir {
@@ -483,14 +389,8 @@ func fsRename(c *Ctx, params json.RawMessage, payload []byte) (Response, error) 
 	if err != nil {
 		return Response{}, err
 	}
-	from, err := resolveJailed(c.Config.Root, p.From)
-	if err != nil {
-		return Response{}, err
-	}
-	to, err := resolveJailed(c.Config.Root, p.To)
-	if err != nil {
-		return Response{}, err
-	}
+	from := resolvePath(p.From)
+	to := resolvePath(p.To)
 	if rerr := os.Rename(from, to); rerr != nil {
 		return Response{}, rerr
 	}

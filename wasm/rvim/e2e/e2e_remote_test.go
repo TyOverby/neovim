@@ -17,7 +17,7 @@ import (
 
 // TestBrowserRemoteRelay drives the REAL browser engine through the THREE-TIER
 // path: browser -> app-server (relay mode) -> SSH-stdio -> `rvim --serve-stdio`
-// subprocess, which performs the IO jailed to its own --root. A local subprocess
+// subprocess, which performs all the IO on its own filesystem. A local subprocess
 // stands in for `ssh host …` (identical mechanics). Asserts FS + proc effects land
 // on the remote's disk.
 func TestBrowserRemoteRelay(t *testing.T) {
@@ -31,13 +31,14 @@ func TestBrowserRemoteRelay(t *testing.T) {
 	writeFile(t, filepath.Join(remoteRoot, "preexisting.txt"), "on the remote\n")
 
 	// App-server in RELAY mode: every /proxy connection runs the rvim subprocess
-	// over stdio (in place of ssh). ProxyConfig so the page connects back.
+	// over stdio (in place of ssh), started IN the remote project dir (the sh cd
+	// stands in for the ssh login dir) so that's the working dir the editor lands in.
 	srv := server.New(server.Config{
-		Root:          remoteRoot,
-		Port:          0,
-		Assets:        server.NewAssetServer(os.DirFS(bundle)),
-		ProxyConfig:   true,
-		RemoteCommand: []string{bin, "--serve-stdio", "--root", remoteRoot},
+		Port:   0,
+		Assets: server.NewAssetServer(os.DirFS(bundle)),
+		RemoteCommand: []string{
+			"sh", "-c", `cd '` + remoteRoot + `' && exec '` + bin + `' --serve-stdio "$@"`, "rvim",
+		},
 	}, server.NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
@@ -61,13 +62,13 @@ func TestBrowserRemoteRelay(t *testing.T) {
 		t.Fatalf("engine boot / relay connect: %v", err)
 	}
 
-	// FS read of a file that exists only on the remote's disk.
-	got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("/host/preexisting.txt"), "\\n")'])`)
+	// FS read of a file that exists only on the remote's disk (at its real path).
+	got := evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['join(readfile("`+remoteRoot+`/preexisting.txt"), "\\n")'])`)
 	if !strings.Contains(got, "on the remote") {
 		t.Fatalf("remote FS read = %q", got)
 	}
 	// FS write -> lands on the remote's disk (through the relay).
-	evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['writefile(["via the relay"], "/host/relay.txt")'])`)
+	evalRPC(t, ctx, `window.nvim.request('nvim_eval', ['writefile(["via the relay"], "`+remoteRoot+`/relay.txt")'])`)
 	time.Sleep(400 * time.Millisecond)
 	assertDisk(t, filepath.Join(remoteRoot, "relay.txt"), "via the relay\n")
 	// proc spawn on the remote.

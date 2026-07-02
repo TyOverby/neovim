@@ -9,7 +9,7 @@ import (
 // browser's durable-PTY session id to the remote command (and only then), without
 // mutating the shared base slice.
 func TestRemoteArgvThreadsSession(t *testing.T) {
-	base := []string{"ssh", "-T", "host", "rvim", "--serve-stdio", "--root", "/p"}
+	base := []string{"ssh", "-T", "host", "rvim", "--serve-stdio"}
 
 	got := remoteArgv(base, "tab-abc")
 	want := strings.Join(append(append([]string(nil), base...), "--session", "tab-abc"), " ")
@@ -23,7 +23,7 @@ func TestRemoteArgvThreadsSession(t *testing.T) {
 	}
 
 	// The base slice must be untouched (it is shared across connections).
-	if strings.Join(base, " ") != "ssh -T host rvim --serve-stdio --root /p" {
+	if strings.Join(base, " ") != "ssh -T host rvim --serve-stdio" {
 		t.Fatalf("base slice mutated: %q", strings.Join(base, " "))
 	}
 }

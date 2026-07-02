@@ -5,31 +5,35 @@
 // WHAT THIS DOES
 // ============================================================================
 // When the engine worker is configured with an IO-proxy (globalThis.__nvimProxy,
-// set by wasm/web/engine-worker.js / wasm/worker.js) AND a mount prefix
-// (globalThis.__nvimProxyMount, e.g. "/host"), Neovim's real file IO under that
-// prefix round-trips to the SERVER's real filesystem (jailed to the server's
-// --root). Every other path stays MEMFS/NODEFS exactly as today.
+// set by wasm/web/engine-worker.js / wasm/worker.js), the SERVER's real
+// filesystem is mounted at the ENGINE's root: every absolute path round-trips
+// to the server's disk (the editor sees the server's real paths), EXCEPT the
+// SHADOW subtrees (globalThis.__nvimProxyShadows) which stay MEMFS -- local
+// overlays served from the engine's own filesystem: the packaged nvim runtime
+// (/usr/share/nvim), the device/proc pseudo-files, and (per --rc mode) a local
+// $HOME or a seeded ~/.config/nvim.
 //
-// Concretely: `:e /host/foo.txt` opens a file that exists only on the server's
-// disk; editing + `:w` persists to that disk file; `:e /host/<subdir>/` lists the
-// real directory -- all by overriding the file-IO syscalls and routing the
-// mount-prefix ones over the proxy connection while the wasm frame suspends via
+// Concretely: `:e /home/you/foo.txt` opens the file on the server's disk;
+// editing + `:w` persists there; `:e <dir>` lists the real directory; `:cd`
+// works against server directories -- all by overriding the file-IO syscalls
+// and routing them over the proxy connection while the wasm frame suspends via
 // JSPI (the same `__async` mechanism wasm/nvim_io.js uses for __syscall_poll).
 //
-// This is the productionization of de-risking SPIKE A (see the scratchpad
-// SPIKE-FINDINGS.md): __async overrides of __syscall_openat / fd_read /
-// __syscall_fstat64 / __syscall_newfstatat / __syscall_close, plus fd_write /
-// fd_seek / __syscall_getdents64 / __syscall_unlinkat / __syscall_mkdirat /
-// __syscall_renameat for the full edit+save+dir-listing path.
+// This grew out of de-risking SPIKE A (see docs/history): __async overrides of
+// __syscall_openat / fd_read / __syscall_fstat64 / __syscall_newfstatat /
+// __syscall_close, plus fd_write / fd_seek / __syscall_getdents64 /
+// __syscall_unlinkat / __syscall_mkdirat / __syscall_renameat / __syscall_chdir
+// for the full edit+save+dir-listing+cwd path.
 //
 // ============================================================================
 // HARD INVARIANT (binding): ADDITIVE + OPT-IN
 // ============================================================================
-// With NO proxy mount configured, every override delegates to the current
-// default behavior, so MEMFS/NODEFS file IO is byte-for-byte unchanged and NEVER
-// suspends. In particular: fd 0/1 (the RPC channel), runtime loads, and all
-// non-mount paths behave exactly as today. ONLY a path under the mount prefix
-// (or a virtual host fd >= 100000) takes the async server path.
+// With NO proxy configured, every override delegates to the current default
+// behavior, so MEMFS/NODEFS file IO is byte-for-byte unchanged and NEVER
+// suspends. In particular: fd 0/1 (the RPC channel), runtime loads, and the
+// no-proxy library/demo path behave exactly as today. ONLY with a proxy present
+// does a non-shadowed path (or a virtual host fd >= 100000) take the async
+// server path.
 //
 // The sync fast paths return a PLAIN INTEGER (never a Promise) -- a Promise on
 // the fast path would needlessly suspend every MEMFS open. The async paths
@@ -48,8 +52,9 @@
 //   fs.mkdir   {path, mode}                   -> {ok}
 //   fs.unlink  {path, dir:bool}               -> {ok}
 //   fs.rename  {from, to}                     -> {ok}
-// All `path`s are MOUNT-RELATIVE (the mount prefix stripped); the server jails
-// them to its --root. Binary file bytes ride the frame's binary payload.
+// Every `path` is the editor's absolute path, which IS the server path (the
+// server's filesystem is mounted at the engine's root). Binary file bytes ride
+// the frame's binary payload.
 // ============================================================================
 
 addToLibrary({
@@ -71,43 +76,39 @@ addToLibrary({
       } catch (e) { /* ignore */ }
     },
 
-    // Resolve the proxy + mount from the globals the host sets. Returns null if
-    // either is absent -> ALL overrides delegate to default behavior.
+    // Resolve the proxy from the global the host sets. Returns null if absent
+    // -> ALL overrides delegate to default behavior.
     proxy: function () {
       return (typeof globalThis !== 'undefined' && globalThis.__nvimProxy) || null;
     },
-    mount: function () {
-      var m = (typeof globalThis !== 'undefined' && globalThis.__nvimProxyMount) || null;
-      return (typeof m === 'string' && m.length) ? m : null;
+    // The SHADOW subtrees: path prefixes served LOCALLY from MEMFS instead of
+    // being proxied to the server -- the overlays on top of the server-rooted
+    // filesystem. The host (engine worker) sets globalThis.__nvimProxyShadows
+    // before boot; the default covers what must always stay local: the packaged
+    // nvim runtime and the emscripten device/proc pseudo-files.
+    shadows: function () {
+      var s = (typeof globalThis !== 'undefined' && globalThis.__nvimProxyShadows) || null;
+      return Array.isArray(s) ? s : ['/usr/share/nvim', '/dev', '/proc'];
     },
-    // A subtree UNDER the mount that is served LOCALLY from MEMFS instead of being
-    // proxied to the remote (set by the engine worker for `--rc local`: the seeded
-    // laptop config at $HOME/.config/nvim, while the rest of $HOME stays remote).
-    localShadow: function () {
-      var s = (typeof globalThis !== 'undefined' && globalThis.__nvimLocalShadow) || null;
-      return (typeof s === 'string' && s.length) ? s : null;
-    },
-    // True when proxying is active AND `path` is under the mount prefix. A bare
-    // mount path ("/host") and any child ("/host/...") both count, so `:e /host/`
-    // (directory listing of the mount root) works. A locally-shadowed subtree is
-    // excluded, so those reads fall through to MEMFS (the seeded config).
+    // True when proxying is active AND `path` is a non-shadowed absolute path --
+    // i.e. it lives on the server (whose filesystem is mounted at our root). A
+    // shadow prefix matches itself and its children ("/dev" covers "/dev/tty"
+    // but not "/devices").
     isHostPath: function (path) {
       if (!HostFS.proxy()) { return false; }
-      var m = HostFS.mount();
-      if (!m || typeof path !== 'string') { return false; }
-      if (path !== m && path.indexOf(m + '/') !== 0) { return false; }
-      // "/host" matches "/host/..." and "/host/" but not "/hostile".
-      var sh = HostFS.localShadow();
-      if (sh && (path === sh || path.indexOf(sh + '/') === 0)) { return false; }
+      if (typeof path !== 'string' || path[0] !== '/') { return false; }
+      var sh = HostFS.shadows();
+      for (var i = 0; i < sh.length; i++) {
+        var s = sh[i];
+        if (s && (path === s || path.indexOf(s + '/') === 0)) { return false; }
+      }
       return true;
     },
-    // Strip the mount prefix -> the server-relative path (always leading-slash,
-    // server jails it to its root). "/host" -> "/", "/host/a/b" -> "/a/b".
+    // The path as the server sees it. Editor paths ARE server paths now (the
+    // server's filesystem is mounted at the engine's root); kept as a seam so
+    // the call sites read as "server path".
     rel: function (path) {
-      var m = HostFS.mount();
-      var r = path.slice(m.length);
-      if (r === '' || r[0] !== '/') { r = '/' + r; }
-      return r;
+      return path;
     },
     isHostFd: function (fd) {
       return fd >= 100000 && HostFS.open[fd] !== undefined;
@@ -167,10 +168,10 @@ addToLibrary({
           rdev: 0, size: size, blocks: Math.ceil(size / 4096),
           atime: mt, mtime: mt, ctime: mt,
         };
-      }, '/host', buf);
+      }, '/', buf);
     },
 
-    // Round-trip a server stat/lstat for a mount-RELATIVE path and fill `buf`.
+    // Round-trip a server stat/lstat for an absolute path and fill `buf`.
     // Returns a Promise<int> (0 on success, -ENOENT when the path is absent).
     // Shared by __syscall_stat64 / __syscall_lstat64 / __syscall_newfstatat.
     statHostPath: function (method, rel, buf) {
@@ -185,7 +186,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_openat (ASYNC): mount-prefix paths round-trip server fs.open and
+  // __syscall_openat (ASYNC): host paths round-trip server fs.open and
   // allocate a virtual host fd; everything else is the default synchronous open.
   // --------------------------------------------------------------------------
   __syscall_openat__deps: ['$HostFS', '$FS', '$SYSCALLS', '$syscallGetVarargI'],
@@ -373,7 +374,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_newfstatat (ASYNC): mount-prefix paths round-trip fs.stat/fs.lstat;
+  // __syscall_newfstatat (ASYNC): host paths round-trip fs.stat/fs.lstat;
   // a host dirfd + empty path (AT_EMPTY_PATH) round-trips fs.stat; else default.
   // nvim stats constantly, so the mode/size must be right.
   // --------------------------------------------------------------------------
@@ -625,7 +626,37 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_mkdirat (ASYNC): mount-prefix paths route to server fs.mkdir; else
+  // __syscall_chdir (ASYNC): a host path chdir round-trips server fs.stat to
+  // verify it is a real server directory, then mirrors it into MEMFS as a STUB
+  // directory chain (FS.mkdirTree) and FS.chdir's into it. The stub exists ONLY
+  // so the engine-side cwd bookkeeping works -- FS.cwd() (getcwd, calculateAt's
+  // relative-path resolution) needs a real MEMFS node -- while every IO under
+  // that cwd still routes to the server (host paths never consult MEMFS). This
+  // is what makes `:cd /server/dir` (and the boot-time chdir into the server's
+  // working dir) behave. Else default.
+  // --------------------------------------------------------------------------
+  __syscall_chdir__deps: ['$HostFS', '$FS', '$SYSCALLS', '$PATH_FS'],
+  __syscall_chdir__async: true,
+  __syscall_chdir: function (path) {
+    var p = SYSCALLS.getStr(path);
+    var full;
+    try { full = PATH_FS.resolve(p); }   // absolutize against FS.cwd()
+    catch (e) { full = p; }
+    if (!HostFS.isHostPath(full)) {
+      // SYNC fast path: the default chdir (errno -> -errno via guard).
+      return HostFS.guard(function () { FS.chdir(full); return 0; });
+    }
+    return HostFS.proxy().request('fs.stat', { path: HostFS.rel(full) }).then(function (resp) {
+      var r = resp.result || {};
+      if (!r.exists) { return -44; /* -ENOENT */ }
+      if (!r.isDir) { return -54; /* -ENOTDIR */ }
+      try { FS.mkdirTree(full); } catch (e) { /* may already exist */ }
+      return HostFS.guard(function () { FS.chdir(full); return 0; });
+    }, function () { return -29; /* -EIO */ });
+  },
+
+  // --------------------------------------------------------------------------
+  // __syscall_mkdirat (ASYNC): host paths route to server fs.mkdir; else
   // default. nvim's write path may mkdir backup/undo dirs.
   // --------------------------------------------------------------------------
   __syscall_mkdirat__deps: ['$HostFS', '$FS', '$SYSCALLS', '$PATH'],
@@ -649,7 +680,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_unlinkat (ASYNC): mount-prefix paths route to server fs.unlink
+  // __syscall_unlinkat (ASYNC): host paths route to server fs.unlink
   // (dir:true for rmdir); else default. nvim's backup/swap cleanup unlinks.
   // --------------------------------------------------------------------------
   __syscall_unlinkat__deps: ['$HostFS', '$FS', '$SYSCALLS'],
@@ -676,7 +707,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_renameat (ASYNC): if EITHER side is a mount-prefix path, route to
+  // __syscall_renameat (ASYNC): if EITHER side is a host path, route to
   // server fs.rename; else default. nvim's write path renames a temp/backup into
   // place (and `:saveas`/`:w` use rename). Cross-boundary renames (host<->memfs)
   // are rejected with EXDEV -- the server can't see MEMFS and vice versa.
@@ -704,7 +735,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_faccessat (ASYNC): mount-prefix paths round-trip fs.stat and answer
+  // __syscall_faccessat (ASYNC): host paths round-trip fs.stat and answer
   // the access() check from existence + the mode bits; else default. This is
   // LOAD-BEARING for `:w`: nvim calls os_file_is_writable() -> access(W_OK) when
   // loading a buffer, and on the default impl a host path isn't in MEMFS, so the
@@ -749,7 +780,7 @@ addToLibrary({
   },
 
   // --------------------------------------------------------------------------
-  // __syscall_utimensat (ASYNC): mount-prefix paths are a no-op (the server
+  // __syscall_utimensat (ASYNC): host paths are a no-op (the server
   // already stamps mtime on write; nvim calls this to preserve times across its
   // backup dance and an error would surface). Else default. We accept + ignore
   // for host paths rather than route a server call -- times are best-effort.

@@ -43,7 +43,7 @@ wasm/web/build-site.sh _site
 
 # 2d. OR the standalone server (real FS/procs/PTY/LSP)
 cd wasm/rvim && go build -o rvim ./cmd/rvim
-./rvim --assets-dir <build-site output> --root ~/project --proxy
+(cd ~/project && rvim --assets-dir <build-site output>)   # editor lands in rvim's cwd
 ```
 
 The page + library JS is **TypeScript** in `web/src/*.ts`, compiled by
@@ -131,17 +131,21 @@ packages are a browser-only concern.
 ## The `rvim` standalone server (runtime usage)
 
 Single Go binary, multiple modes (all from `wasm/rvim/cmd/rvim`). Binds
-`127.0.0.1` only; `--proxy` makes visiting the page the standalone app.
+`127.0.0.1` only; visiting the page IS the standalone app. The IO host's
+filesystem is mounted WHOLE at the editor's root (no jail, no mount prefix);
+the editor lands in the io-proxy's working dir (rvim's cwd locally; the ssh
+login dir with `--remote`). Site/rc files are MEMFS overlays shadowed on top
+(`/usr/share/nvim`, `/dev`, `/proc`, plus the `--rc`-dependent home/config).
 
 ```sh
-./rvim --root ~/project --port 8001 --proxy            # local (same machine)
-./rvim --remote user@host --root /remote/project --proxy   # three-tier over SSH stdio
+(cd ~/project && rvim --port 8001)      # local (same machine)
+./rvim --remote user@host               # three-tier over SSH stdio
 ```
 
-Key flags: `--root` (FS jail, default cwd), `--mount` (`/host`), `--port` (8001),
-`--assets-dir` (serve the bundle off disk for dev) vs. embedded (`-tags
-embed_assets`), `--rc remote|local|builtin` (where the in-browser nvim's config /
-`$HOME` comes from), `--remote-rvim` (path to `rvim` on the remote). **Internal**
+Key flags: `--port` (8001), `--assets-dir` (serve the bundle off disk for dev)
+vs. embedded (`-tags embed_assets`), `--rc remote|local|builtin` (where the
+in-browser nvim's config / `$HOME` comes from; default remote with `--remote`,
+else builtin), `--remote-rvim` (path to `rvim` on the remote). **Internal**
 (don't pass by hand): `--serve-stdio` (the remote endpoint), `--session-host` /
 `--session` / `--daemon-sock` (the durable-PTY daemon, auto-spawned by the
 io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
