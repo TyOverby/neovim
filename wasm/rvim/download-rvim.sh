@@ -29,18 +29,38 @@ ARTIFACT="rvim-${OS}-${ARCH}"
 
 command -v gh >/dev/null || { echo "error: gh CLI not found (https://cli.github.com)" >&2; exit 1; }
 
-# Latest successful run of the workflow on the branch.
-echo "==> Finding latest successful ${WORKFLOW} run on ${REPO}@${BRANCH} ..."
-run_id="$(gh run list -R "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
-  --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-[ -n "$run_id" ] || { echo "error: no successful run found" >&2; exit 1; }
+# Newest completed run that actually HAS our artifact. Deliberately NOT
+# `--status success`: the run-level conclusion conflates unrelated jobs — a
+# hung/cancelled/failed Pages `deploy` marks the whole run cancelled even
+# though every build-rvim job succeeded and uploaded fresh artifacts. Filtering
+# on run success then silently falls back to an OLDER run's binary (stale
+# bundle). So instead walk recent completed runs newest-first and take the
+# first one the artifact can be downloaded from.
+echo "==> Finding newest ${WORKFLOW} run on ${REPO}@${BRANCH} with ${ARTIFACT} ..."
+run_ids="$(gh run list -R "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
+  --limit 15 --json databaseId,status --jq '.[] | select(.status == "completed") | .databaseId')"
+[ -n "$run_ids" ] || { echo "error: no completed runs found" >&2; exit 1; }
 
-echo "==> Downloading ${ARTIFACT} from run ${run_id} into ${OUT}/ ..."
 mkdir -p "$OUT"
-gh run download "$run_id" -R "$REPO" -n "$ARTIFACT" -D "$OUT"
+# Download into a fresh temp subdir: gh's path-traversal guard rejects
+# `-D .` (and any pre-populated destination can confuse it), and this keeps a
+# failed download from leaving partial files in OUT.
+tmpdir="$(mktemp -d "${OUT%/}/.rvim-dl.XXXXXX")"
+trap 'rm -rf "$tmpdir"' EXIT
+
+run_id=""
+for id in $run_ids; do
+  echo "==> Trying run ${id} ..."
+  if gh run download "$id" -R "$REPO" -n "$ARTIFACT" -D "$tmpdir" 2>/dev/null; then
+    run_id="$id"
+    break
+  fi
+done
+[ -n "$run_id" ] || { echo "error: no recent run has artifact ${ARTIFACT} (expired, or the build-rvim jobs failed?)" >&2; exit 1; }
+echo "==> Downloaded ${ARTIFACT} from run ${run_id}"
 
 # The artifact extracts to a file named after the os/arch; land it at ./rvim.
-src="${OUT%/}/${ARTIFACT}"
+src="${tmpdir}/${ARTIFACT}"
 bin="${OUT%/}/rvim"
 [ -f "$src" ] || { echo "error: expected ${src} after download" >&2; exit 1; }
 mv -f "$src" "$bin"
