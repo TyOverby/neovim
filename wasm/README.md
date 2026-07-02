@@ -258,7 +258,9 @@ Like msgpack for the core, the renderer dependency resolves at runtime: load
 `grid-renderer.js` (UMD → `globalThis.GridRenderer`) before `neovim-ui.js`, or
 pass the module as `opts.grid_renderer`. (The legacy `<pre>` DOM renderer
 survives as a testing utility — `wasm/web/src/neovim-ui-pre-testutil.ts`, plain
-CommonJS in `web/dist/`, not shipped in the bundles.)
+CommonJS in `web/dist/`, not shipped in the bundles.) The full renderer design
+— glyph atlas, the ghostty sprite port, snapshot testing, the paint scheduler —
+is documented in `docs/history/stage6.md`.
 
 All opts are optional:
 

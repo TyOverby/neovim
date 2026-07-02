@@ -5,7 +5,9 @@ A fast, high-fidelity renderer for terminal-style character grids on an HTML
 knows nothing about Neovim — anything that models its screen as a grid of
 styled cells (a terminal emulator, Neovim's `ext_linegrid`, a TUI framework)
 can drive it. The Neovim wiring lives one package over, in
-`wasm/web/src/neovim-ui.ts`.
+`wasm/web/src/neovim-ui.ts`. Design history (why each piece is shaped the way
+it is, including the skia-canvas leak saga and the paint-scheduler evolution):
+`wasm/docs/history/stage6.md`.
 
 ## Rendering model
 

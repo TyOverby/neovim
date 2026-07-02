@@ -4,7 +4,7 @@ See **`README.md`** for the capability reference (what the port does, the
 embedding API, the standalone-app design) — it is large and user-facing, so it is
 **not** auto-included here; read it on demand. **This file is the operational
 companion**: every build, dev, and test script in `wasm/`, what it needs, and
-what it produces. Stage history lives in `docs/history/stage{1..5}.md`.
+what it produces. Stage history lives in `docs/history/stage{1..6}.md`.
 
 Everything is **additive and `EMSCRIPTEN`-guarded** — the normal native build is
 untouched. All shell scripts are `set -euo pipefail` and resolve paths relative
@@ -161,5 +161,5 @@ io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
 | `web/src/` | browser target **TypeScript source**: `neovim.ts` (RPC core), `neovim-ui.ts` (headless Screen + canvas UI via grid-renderer), `neovim-ui-pre-testutil.ts` (legacy `<pre>` renderer, test utility), `neovim-utils.ts` (helpers), `*.mts` (ESM entry points), `app.ts` (page glue), `engine-worker.ts` (Web Worker host). |
 | `web/` | build + run harness: `build-ts.sh` (+ `tsconfig.*.json`, `tools/umd-wrap.mjs`), `serve.js`, `build-site.sh`, `build-lib.sh`, `e2e.test.js`, `reconnect.test.js`. `dist/` = gitignored `tsc` output (the `.js`/`.mjs`/`.d.ts` everything else consumes). |
 | `rvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/rvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |
-| `docs/history/stage{1..5}.md` | design history per stage. |
+| `docs/history/stage{1..6}.md` | design history per stage (stage 6 = the canvas grid renderer). |
 | `*.log` | gitignored build logs from prior runs. |
