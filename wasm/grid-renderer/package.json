@@ -8,7 +8,9 @@
     "build": "./build-ts.sh",
     "pretest": "./build-ts.sh",
     "test": "node --test test/*.test.js",
-    "promote": "SNAPSHOT_PROMOTE=1 node --test test/*.test.js"
+    "promote": "SNAPSHOT_PROMOTE=1 node --test test/*.test.js",
+    "prebench": "./build-ts.sh",
+    "bench": "node bench/bench.js"
   },
   "license": "Apache-2.0",
   "type": "commonjs",

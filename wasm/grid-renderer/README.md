@@ -104,3 +104,19 @@ Two classes of snapshot:
 `renderer.test.js` unit-tests the cache (one rasterization per identity, LRU
 eviction), damage tracking (unchanged cells never re-blit), cursor
 paint/restore, and wide-cell blitting — no snapshots.
+
+## Benchmarks
+
+```sh
+npm run bench                     # all scenarios (builds first)
+node bench/bench.js scroll        # one scenario
+node bench/bench.js --cols 160 --rows 40 --dpr 2 --frames 120
+```
+
+`bench/bench.js` reports per-frame wall time (mean/p50/p95/max) for frame
+scenarios — `scroll` (100% damage, warm cache: the "scrolling through a file"
+workload), `scroll-cold`, `edit`, `noop`, `sprites` — plus microbenches sized
+to one screenful per frame: `cache-get`, `blit` (raw `putImageData`), and
+`rasterize`. Content is seeded-deterministic, so runs are comparable. Numbers
+are skia-on-CPU under Node, not Chrome-on-GPU: use them to compare a change
+against the previous run, not to predict absolute browser frame times.
