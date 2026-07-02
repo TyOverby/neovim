@@ -12,9 +12,10 @@
 //     a <canvas>: subscribes to redraw, attaches the UI, paints via the
 //     grid-renderer package (wasm/grid-renderer - a bitmap-glyph-cache canvas
 //     renderer with path-drawn box-drawing/legacy-computing glyphs), and maps
-//     keydown -> nvim_input. Painting is flush-gated AND coalesced to at most
-//     one render per animation frame (see the paint-coalescing comment), so a
-//     burst of redraw batches can't blow the frame budget.
+//     keydown -> nvim_input. Painting is flush-gated and ADAPTIVE: immediate
+//     while cheap (keystroke echo never waits for the next animation frame),
+//     coalescing into one rAF paint once a redraw flood exhausts an 8ms
+//     painting budget within the frame (see the adaptive-paint comment).
 //
 // We attach with ext_linegrid and paint grid 1 as a colored monospace cell
 // grid: the Screen decodes the highlight stream (default_colors_set,
@@ -72,6 +73,11 @@ export interface MountOptions {
   // (defaults: 0xd4d4d4 on 0x000000, matching the demo page).
   default_fg?: number;
   default_bg?: number;
+  // Painting time budget per ~frame window (ms, default 8): flushes paint
+  // immediately until painting has cost this much within the window, then
+  // the rest of the flood coalesces into one requestAnimationFrame paint.
+  // 0 = always coalesce (pure rAF batching).
+  paint_budget_ms?: number;
   // The grid-renderer module (see the header comment). Defaults to
   // globalThis.GridRenderer.
   grid_renderer?: any;
@@ -393,23 +399,51 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
 
   const screen = new Screen(cols, rows);
 
-  // ---- paint coalescing --------------------------------------------------
+  // ---- adaptive paint scheduling -----------------------------------------
   // Every redraw notification is decoded into the Screen SYNCHRONOUSLY (the
-  // model must stay current), but painting is coalesced to at most one
-  // renderer.render() per animation frame. During a fast scroll the engine
-  // can emit hundreds of redraw batches - each ending in its own `flush` -
-  // inside a single frame; painting on every one of them walks the whole
-  // grid (screenToCells + per-cell damage keys) hundreds of times and blows
-  // the frame budget. Only the LAST screen state per frame can end up on
-  // glass anyway, so intermediate flushes only mark dirty.
+  // model must stay current). PAINTING adapts to load:
+  //
+  //   * By default a flush paints IMMEDIATELY - a keystroke's echo reaches
+  //     the canvas in the same task, never deferred to the next animation
+  //     frame (the renderer damage-diffs, so interactive paints are cheap).
+  //   * Painting time is metered against a budget (paint_budget_ms, default
+  //     8ms) per ~frame window. When a redraw flood - a fast scroll can emit
+  //     hundreds of flush-terminated batches per frame - burns through the
+  //     budget, what's painted so far stands as "the frame", and the REST of
+  //     the flood coalesces: further flushes only mark state dirty and one
+  //     requestAnimationFrame paints the final screen. Only the last state
+  //     per frame can reach the glass anyway.
+  //
+  // So light traffic gets minimum latency, and a flood costs at most the
+  // budget plus one coalesced paint per frame. A hidden tab always takes the
+  // rAF path: Chrome parks rAF while hidden, so nothing paints until the tab
+  // is visible again, and then one paint catches up.
+  const budgetMs = (typeof opts.paint_budget_ms === 'number') ? opts.paint_budget_ms : 8;
+  const FRAME_WINDOW_MS = 17;
+  const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+    ? function () { return performance.now(); } : function () { return Date.now(); };
   let paintRafId: number | null = null;
-  function paint(): void {
-    paintRafId = null;
+  let windowStart = -Infinity;   // start of the current paint-budget window
+  let spentMs = 0;               // painting time burned inside that window
+
+  function paintNow(): void {
+    const t0 = now();
     renderer.render(screenToCells(screen, defFg, defBg), screen.cursor);
+    spentMs += now() - t0;
+  }
+  function paintCoalesced(): void {
+    paintRafId = null;
+    windowStart = now();
+    spentMs = 0;
+    paintNow();
   }
   screen.onFlush = function () {
-    if (paintRafId != null) { return; }     // a paint is already scheduled
-    paintRafId = scheduleRaf(paint);
+    if (paintRafId != null) { return; }     // flood mode: a paint is scheduled
+    const t = now();
+    if (t - windowStart > FRAME_WINDOW_MS) { windowStart = t; spentMs = 0; }
+    const hidden = (typeof document !== 'undefined' && document.hidden === true);
+    if (!hidden && spentMs < budgetMs) { paintNow(); return; }
+    paintRafId = scheduleRaf(paintCoalesced);
   };
   const off = instance.onNotification('redraw', function (params) { screen.handleRedraw(params); });
   installKeyboard(canvas, instance);
@@ -450,7 +484,7 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
       // whatever size we have while the engine reflows. We're already inside
       // a rAF callback, so paint synchronously (and drop any pending paint).
       if (paintRafId != null) { cancelRaf(paintRafId); }
-      paint();
+      paintCoalesced();
       if (fitted.cols === api.cols && fitted.rows === api.rows) { return; }
       api.cols = fitted.cols; api.rows = fitted.rows;
       instance.request('nvim_ui_try_resize', [fitted.cols, fitted.rows]);
