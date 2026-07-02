@@ -1,5 +1,6 @@
-// CellRasterizer - renders one cell (glyph + colors + decorations) into an
-// ImageData bitmap. The GridRenderer caches these and blits with putImageData.
+// CellRasterizer - renders one cell (glyph + colors + decorations) into a
+// scratch canvas. The GridRenderer copies the result into its GlyphAtlas and
+// blits cells from there with drawImage.
 //
 // Two rasterization paths:
 //   * Sprite glyphs (box drawing, block elements, braille, legacy computing,
@@ -14,7 +15,7 @@
 // Decorations (underline variants, strikethrough) are baked into the bitmap
 // on top of either path.
 
-import type { CanvasFactory, Ctx2D, ImageDataLike } from './canvas-types';
+import type { CanvasFactory, CanvasLike, Ctx2D, ImageDataLike } from './canvas-types';
 import type { Cell } from './cell';
 import { hex } from './cell';
 import { FontSpec, Metrics, cssFont } from './metrics';
@@ -34,8 +35,10 @@ export class CellRasterizer {
     this.metrics = metrics;
   }
 
-  // Render `cell` to a (width * cellWidth) x cellHeight bitmap.
-  rasterize(cell: Cell): ImageDataLike {
+  // Render `cell` to a (width * cellWidth) x cellHeight scratch canvas. The
+  // return value is valid only until the next rasterize() call (the scratch
+  // is reused) - copy it out (e.g. GlyphAtlas.insert) before rasterizing again.
+  rasterize(cell: Cell): CanvasLike {
     const m = this.metrics;
     const span = cell.width === 2 ? 2 : 1;
     const w = m.cellWidth * span;
@@ -74,14 +77,16 @@ export class CellRasterizer {
     }
 
     this.decorate(ctx, cell, w);
-    return ctx.getImageData(0, 0, w, h);
+    return ctx.canvas;
   }
 
   private scratchCtx(span: 1 | 2, w: number, h: number): Ctx2D {
     let ctx = this.scratch[span - 1];
     if (!ctx || ctx.canvas.width !== w || ctx.canvas.height !== h) {
       const c = this.createCanvas(w, h);
-      ctx = c.getContext('2d');
+      // The sprite path reads pixels back (colorize); hint the browser to
+      // keep this scratch surface CPU-side.
+      ctx = c.getContext('2d', { willReadFrequently: true });
       if (!ctx) { throw new Error('CellRasterizer: 2d context unavailable'); }
       this.scratch[span - 1] = ctx;
     }

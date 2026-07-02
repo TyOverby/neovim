@@ -11,33 +11,60 @@ function cell(text, fg, bg, extra) {
   return Object.assign({ text, fg, bg }, extra || {});
 }
 
-test('glyph cache: repeated cells rasterize once', () => {
+test('glyph atlas: repeated cells rasterize once', () => {
   const { renderer } = makeRenderer();
   renderer.resize(10, 2);
   const row = () => Array.from({ length: 10 }, () => cell('x', 0xffffff, 0x000000));
   renderer.render([row(), row()]);
-  // 20 identical cells -> exactly 1 rasterization (miss), 19 cache hits.
-  assert.equal(renderer.cache.misses, 1);
-  assert.equal(renderer.cache.hits, 19);
+  // 20 identical cells -> exactly 1 rasterization (miss), 19 atlas hits.
+  assert.equal(renderer.atlas.misses, 1);
+  assert.equal(renderer.atlas.hits, 19);
 });
 
-test('glyph cache: distinct colors are distinct entries (no alpha-compositing reuse)', () => {
+test('glyph atlas: distinct colors are distinct entries (no alpha-compositing reuse)', () => {
   const { renderer } = makeRenderer();
   renderer.resize(2, 1);
   renderer.render([[cell('x', 0xffffff, 0x000000), cell('x', 0xff0000, 0x000000)]]);
-  assert.equal(renderer.cache.misses, 2, 'same glyph, different fg -> separate bitmaps');
+  assert.equal(renderer.atlas.misses, 2, 'same glyph, different fg -> separate bitmaps');
 });
 
-test('glyph cache: LRU evicts oldest', () => {
-  const { GlyphCache } = gridRenderer();
-  const c = new GlyphCache(2);
-  c.set('a', { width: 1, height: 1, data: new Uint8ClampedArray(4) });
-  c.set('b', { width: 1, height: 1, data: new Uint8ClampedArray(4) });
-  c.get('a');                                                       // refresh 'a'
-  c.set('c', { width: 1, height: 1, data: new Uint8ClampedArray(4) }); // evicts 'b'
-  assert.ok(c.get('a'), "'a' survived (recently used)");
-  assert.equal(c.get('b'), undefined, "'b' evicted");
-  assert.ok(c.get('c'));
+test('glyph atlas: LRU evicts oldest and reuses its slot', () => {
+  const { GlyphAtlas } = gridRenderer();
+  const { createCanvas } = require('canvas');
+  const atlas = new GlyphAtlas((w, h) => createCanvas(w, h), 4, 8, 2);
+  const src = createCanvas(4, 8);
+  atlas.insert('a', src);
+  const slotB = atlas.insert('b', src);
+  const bX = slotB.x, bY = slotB.y;
+  atlas.get('a');                       // refresh 'a' -> 'b' is now oldest
+  const slotC = atlas.insert('c', src); // full: evicts 'b', reuses its slot
+  assert.ok(atlas.get('a'), "'a' survived (recently used)");
+  assert.equal(atlas.get('b'), undefined, "'b' evicted");
+  assert.ok(atlas.get('c'));
+  assert.equal(atlas.size, 2);
+  assert.equal(slotC.x, bX, "'c' reuses 'b's slot pixels");
+  assert.equal(slotC.y, bY);
+});
+
+test('glyph atlas: colorized pixels round-trip through the sheet', () => {
+  const { renderer, canvas } = makeRenderer();
+  renderer.resize(1, 1);
+  renderer.render([[cell('█', 0x123456, 0x000000)]]);
+  const px = canvas.getContext('2d').getImageData(3, 3, 1, 1).data;
+  assert.deepEqual(Array.from(px.slice(0, 3)), [0x12, 0x34, 0x56]);
+});
+
+// The browser fast path ('drawImage'): must produce byte-identical output
+// to the 'imageData' strategy.
+test("blit strategy 'drawImage' produces the same pixels", () => {
+  const strategies = ['imageData', 'drawImage'].map((blitStrategy) => {
+    const { renderer, canvas } = makeRenderer({ blitStrategy });
+    assert.equal(renderer.blitStrategy, blitStrategy);
+    renderer.resize(3, 1);
+    renderer.render([[cell('▚', 0xff8800, 0x000022), cell('A', 0xffffff, 0x123456), cell('░', 0x00ff00, 0x000000)]]);
+    return canvas.toBuffer('image/png');
+  });
+  assert.deepEqual(strategies[0], strategies[1]);
 });
 
 test('damage tracking: unchanged cells are not re-blitted', () => {

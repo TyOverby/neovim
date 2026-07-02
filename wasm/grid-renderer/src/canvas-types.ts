@@ -4,7 +4,7 @@
 // global. Everything that creates a canvas goes through a `CanvasFactory`
 // supplied by the embedder, so the same code runs against a browser
 // HTMLCanvasElement / OffscreenCanvas or a Node canvas implementation
-// (@napi-rs/canvas in the tests). These interfaces list only the members we
+// (node-canvas in the tests). These interfaces list only the members we
 // actually use, so any of those implementations satisfies them structurally.
 
 // A width x height RGBA pixel buffer (browser ImageData or a Node equivalent).
@@ -42,6 +42,8 @@ export interface Ctx2D {
   getImageData(x: number, y: number, w: number, h: number): ImageDataLike;
   putImageData(data: ImageDataLike, x: number, y: number): void;
   createImageData(w: number, h: number): ImageDataLike;
+  drawImage(image: CanvasLike, sx: number, sy: number, sw: number, sh: number,
+            dx: number, dy: number, dw: number, dh: number): void;
 }
 
 export interface TextMetricsLike {
@@ -62,5 +64,5 @@ export interface CanvasLike {
 // How the embedder hands us canvas creation (scratch surfaces for glyph
 // rasterization). E.g. in a browser: (w, h) => { const c =
 // document.createElement('canvas'); c.width = w; c.height = h; return c; },
-// or with @napi-rs/canvas: their createCanvas.
+// or with node-canvas: its createCanvas.
 export type CanvasFactory = (width: number, height: number) => CanvasLike;

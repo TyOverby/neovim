@@ -1,5 +1,5 @@
 // Test helpers: snapshot ("golden image") comparison with promotion, plus
-// renderer construction on @napi-rs/canvas.
+// renderer construction on node-canvas (cairo).
 //
 // Methodology:
 //   * Each test renders into a canvas and calls expectSnapshot(canvas, name).
@@ -12,15 +12,20 @@
 //     (equivalently SNAPSHOT_PROMOTE=1) - review the images before
 //     committing them.
 //
-// Baselines are rasterizer-dependent (skia via @napi-rs/canvas + the host's
+// Baselines are rasterizer-dependent (cairo via node-canvas + the host's
 // fonts for TEXT glyphs). Sprite-glyph tests draw pure geometry - stable
 // everywhere; text tests use DejaVu Sans Mono and may need a one-time
 // `npm run promote` on a machine with different fonts.
+//
+// Why node-canvas and not a skia binding: both @napi-rs/canvas and
+// skia-canvas RETAIN the pixel payload of every putImageData/drawImage call
+// (unbounded native growth under sustained rendering - it OOM'd the bench);
+// cairo is immediate-mode and stays flat.
 
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { createCanvas, loadImage } = require('canvas');
 
 const BASELINE_DIR = path.join(__dirname, 'baselines');
 const ARTIFACT_DIR = path.join(__dirname, '__artifacts__');
@@ -31,7 +36,7 @@ function gridRenderer() {
   return require('../dist/cjs/index.js');
 }
 
-// A GridRenderer drawing into a fresh napi canvas, with fixed metrics so
+// A GridRenderer drawing into a fresh node-canvas, with fixed metrics so
 // baselines don't depend on font-metric rounding. Returns { renderer, canvas }.
 function makeRenderer(opts) {
   const { GridRenderer } = gridRenderer();
@@ -56,8 +61,7 @@ function imageDataOf(canvas) {
   return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
 }
 
-// NOTE: async because @napi-rs/canvas only paints images decoded via
-// loadImage (the sync `img.src = buffer` path yields blank drawImage).
+// NOTE: async for loadImage (works identically across node canvases).
 async function pngToImageData(buf) {
   const img = await loadImage(buf);
   const c = createCanvas(img.width, img.height);

@@ -89,7 +89,8 @@ export class SpriteCanvas {
     this.width = width;
     this.height = height;
     this.surface = createCanvas(width, height);
-    const ctx = this.surface.getContext('2d');
+    // Coverage is read back with getImageData; keep the surface CPU-side.
+    const ctx = this.surface.getContext('2d', { willReadFrequently: true });
     if (!ctx) { throw new Error('SpriteCanvas: 2d context unavailable'); }
     this.ctx = ctx;
     // Black-fill so every pixel starts opaque (coverage 0) - keeps the

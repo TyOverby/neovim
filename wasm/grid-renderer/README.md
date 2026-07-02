@@ -9,18 +9,23 @@ can drive it. The Neovim wiring lives one package over, in
 
 ## Rendering model
 
-1. **Bitmap glyph cache.** Every distinct cell identity —
-   `(text, fg, bg, sp, style-flags, width)` — is rasterized **once** into an
-   `ImageData` bitmap and kept in a bounded LRU (`GlyphCache`, default 8192
-   entries). Bitmaps are cached **fully colorized**, keyed by the exact fg/bg
-   pair — *not* as alpha masks composited at draw time. Recreating fg-on-bg
-   via alpha compositing does not reproduce the pixels a font rasterizer
-   produces for that exact color pair at the subpixel-antialiasing level, so
-   we deliberately trade cache size for fidelity.
-2. **`putImageData` blits.** Cells are painted by blitting the cached bitmap
-   — no per-frame text shaping, no compositing, no canvas state changes.
-   `render(grid, cursor)` diffs against what's on screen and only blits cells
-   whose identity changed.
+1. **Glyph atlas.** Every distinct cell identity —
+   `(text, fg, bg, sp, style-flags, width)` — is rasterized **once** into a
+   slot of a sprite-sheet canvas (`GlyphAtlas`, default 4096 slots, intrusive
+   linked-list LRU: recency updates are pointer relinks, no Map churn).
+   Glyphs are cached **fully colorized**, keyed by the exact fg/bg pair —
+   *not* as alpha masks composited at draw time. Recreating fg-on-bg via
+   alpha compositing does not reproduce the pixels a font rasterizer produces
+   for that exact color pair at the subpixel-antialiasing level, so we
+   deliberately trade cache size for fidelity.
+2. **`drawImage` blits.** Cells are painted with `drawImage` from the sheet —
+   in browsers the sheets become GPU-cached textures, so a full-screen scroll
+   is texture copies, not `putImageData` pixel uploads. `render(grid, cursor)`
+   field-compares each cell against what was painted there last time (no
+   per-cell key strings for unchanged cells) and only blits changes. (Outside
+   the DOM the default flips to a per-slot `putImageData` strategy — the
+   skia-based Node canvases retain every `drawImage` payload; see
+   `BlitStrategy` in renderer.ts.)
 3. **Path-drawn sprite glyphs.** Box drawing, block elements, braille,
    powerline, branch-drawing, and the legacy-computing blocks are **drawn as
    paths/rects** (never font glyphs), so they fill the cell edge-to-edge,
@@ -73,7 +78,7 @@ cell's text `''` (the terminal / ext_linegrid convention).
 ## Build
 
 ```sh
-npm install        # typescript + @napi-rs/canvas (tests)
+npm install        # typescript + canvas (node-canvas, for tests/bench)
 ./build-ts.sh      # -> dist/cjs/** (CommonJS + d.ts) and dist/grid-renderer.js
                    #    (single-file UMD linked by tools/bundle-umd.mjs)
 ```
@@ -86,8 +91,8 @@ npm run promote    # accept current rendering as the new baselines
 ```
 
 Tests render scenes through the real renderer on
-[`@napi-rs/canvas`](https://github.com/Brooooooklyn/canvas) (a skia-backed
-Node canvas; no system dependencies) and compare **pixel-for-pixel** against
+[`node-canvas`](https://github.com/Automattic/node-canvas) (cairo-backed,
+prebuilt binaries) and compare **pixel-for-pixel** against
 committed PNGs in `test/baselines/`. On mismatch the test fails and writes
 `test/__artifacts__/<name>.actual.png` + a red-highlighted `<name>.diff.png`;
 inspect them, and if the change is intended run `npm run promote` and commit
@@ -116,7 +121,10 @@ node bench/bench.js --cols 160 --rows 40 --dpr 2 --frames 120
 `bench/bench.js` reports per-frame wall time (mean/p50/p95/max) for frame
 scenarios — `scroll` (100% damage, warm cache: the "scrolling through a file"
 workload), `scroll-cold`, `edit`, `noop`, `sprites` — plus microbenches sized
-to one screenful per frame: `cache-get`, `blit` (raw `putImageData`), and
+to one screenful per frame: `cache-get`, `blit`, and
 `rasterize`. Content is seeded-deterministic, so runs are comparable. Numbers
-are skia-on-CPU under Node, not Chrome-on-GPU: use them to compare a change
+are cairo-on-CPU under Node, not Chrome-on-GPU: use them to compare a change
 against the previous run, not to predict absolute browser frame times.
+(node-canvas, not a skia binding, deliberately: @napi-rs/canvas and
+skia-canvas both retain every putImageData/drawImage payload, which OOMs
+sustained rendering; cairo is immediate-mode and stays flat.)

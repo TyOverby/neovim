@@ -339,7 +339,7 @@ if command -v npm >/dev/null 2>&1; then
   # @napi-rs/canvas for its snapshot tests. Install + build so the dev server /
   # site bundle can serve dist/grid-renderer.js.
   if [ ! -x "${ROOT}/wasm/grid-renderer/node_modules/.bin/tsc" ]; then
-    echo "==> Installing wasm/grid-renderer npm deps (typescript, @napi-rs/canvas)"
+    echo "==> Installing wasm/grid-renderer npm deps (typescript, node-canvas)"
     ( cd "${ROOT}/wasm/grid-renderer" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
       || echo "    (npm install failed; run it manually in wasm/grid-renderer)"
   fi

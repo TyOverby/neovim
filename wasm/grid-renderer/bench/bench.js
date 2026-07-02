@@ -1,11 +1,11 @@
-// Benchmark runner for the grid renderer (Node, @napi-rs/canvas).
+// Benchmark runner for the grid renderer (Node, node-canvas/cairo).
 //
 //   npm run bench                     # all scenarios, default sizes
 //   node bench/bench.js scroll        # one scenario
 //   node bench/bench.js --cols 160 --rows 40 --frames 120 --dpr 2
 //
 // Reports per-frame wall time (mean / p50 / p95 / max) per scenario. The
-// numbers are skia-on-CPU, not Chrome-on-GPU, so treat them as RELATIVE: use
+// numbers are cairo-on-CPU, not Chrome-on-GPU, so treat them as RELATIVE: use
 // this to compare a change against the previous run, not to predict absolute
 // browser frame times. The frame scenarios reproduce the shape of the real
 // paint path (mount_into's per-flush render): a full Cell[][] walk with
@@ -23,12 +23,12 @@
 //                 building + key comparison, zero blits).
 //   sprites       scroll where ~1/3 of cells are box-drawing/braille/shade
 //                 sprites (path-drawn rasterization on misses, then warm).
-//   cache-get     microbench: GlyphCache.get hits/sec on a warm cache.
-//   blit          microbench: putImageData of one cached cell bitmap.
+//   cache-get     microbench: GlyphAtlas.get hits/sec on a warm atlas.
+//   blit          microbench: repeated blits of one cached atlas slot.
 //   rasterize     microbench: CellRasterizer.rasterize (text cells, no cache).
 'use strict';
 
-const { createCanvas } = require('@napi-rs/canvas');
+const { createCanvas } = require('canvas');
 const path = require('node:path');
 const GR = require(path.join(__dirname, '..', 'dist', 'cjs', 'index.js'));
 
@@ -162,7 +162,7 @@ scenario('scroll-cold', { note: 'cache cleared every frame' }, () => {
   const renderer = makeRenderer();
   const buffer = makeBuffer(42, opts.frames + 200, opts.cols, 0);
   return (i) => {
-    renderer.cache.clear();
+    renderer.atlas.clear();
     renderer.render(buffer.slice(i, i + opts.rows), { row: opts.rows - 1, col: 0 });
   };
 });
@@ -199,29 +199,29 @@ scenario('sprites', { note: 'scroll, ~1/3 sprite cells (box/braille/octant)' }, 
 // making them directly comparable to the frame scenarios above.
 
 scenario('cache-get', { note: `${CELLS} warm gets/frame` }, () => {
-  const cache = new GR.GlyphCache(8192);
+  const slotW = 19, slotH = 38;
+  const atlas = new GR.GlyphAtlas((w, h) => createCanvas(w, h), slotW, slotH, 8192);
+  const src = createCanvas(slotW, slotH);
   const keys = [];
   for (let i = 0; i < 512; i++) {
     keys.push('key-' + i);
-    cache.set(keys[i], { width: 1, height: 1, data: new Uint8ClampedArray(4) });
+    atlas.insert(keys[i], src);
   }
   return () => {
     let x = 0;
-    for (let i = 0; i < CELLS; i++) { x += cache.get(keys[i & 511]) ? 1 : 0; }
+    for (let i = 0; i < CELLS; i++) { x += atlas.get(keys[i & 511]) ? 1 : 0; }
     if (x !== CELLS) { throw new Error('cache miss in warm bench'); }
   };
 });
 
-scenario('blit', { note: `${CELLS} putImageData/frame` }, () => {
+scenario('blit', { note: `${CELLS} slot blits/frame (strategy: node default)` }, () => {
+  // Uses the renderer's own blit (atlas hit + strategy-appropriate copy);
+  // Node defaults to the 'imageData' strategy (see renderer.ts).
   const renderer = makeRenderer();
   const cell = { text: 'x', fg: 0xd4d4d4, bg: BG };
-  renderer.drawCell(0, 0, cell);            // warm the one bitmap
-  const img = renderer.cache.get(GR.cellKey(cell));
-  const ctx = renderer['ctx'] || renderer.ctx;
-  const m = renderer.metrics;
   return () => {
     for (let i = 0; i < CELLS; i++) {
-      ctx.putImageData(img, (i % opts.cols) * m.cellWidth, Math.floor(i / opts.cols) * m.cellHeight);
+      renderer.drawCell(Math.floor(i / opts.cols), i % opts.cols, cell);
     }
   };
 });

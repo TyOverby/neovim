@@ -15,7 +15,7 @@
   "license": "Apache-2.0",
   "type": "commonjs",
   "devDependencies": {
-    "@napi-rs/canvas": "^0.1.87",
+    "canvas": "^3.2.3",
     "typescript": "^6.0.3"
   }
 }

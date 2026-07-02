@@ -13,10 +13,11 @@ export { cellKey, styleBits, reverseCell, hex } from './cell';
 export type { FontSpec } from './metrics';
 export { computeMetrics, cssFont } from './metrics';
 export type { Metrics } from './metrics';
-export { GlyphCache } from './glyph-cache';
+export { GlyphAtlas } from './glyph-atlas';
+export type { AtlasSlot } from './glyph-atlas';
 export { CellRasterizer } from './rasterizer';
 export { GridRenderer } from './renderer';
-export type { GridRendererOptions, CursorPos } from './renderer';
+export type { GridRendererOptions, CursorPos, BlitStrategy } from './renderer';
 export {
   SpriteCanvas, PathBuilder,
   SHADE_OFF, SHADE_LIGHT, SHADE_MEDIUM, SHADE_DARK, SHADE_ON,
