@@ -24,7 +24,12 @@ declare const NeovimUI: any;
   // distinct style + a longer dwell. CSS for .toast lives in index.html.
   let lastToast = '';
   function setStatus(s: string, opts?: { error?: boolean }) {
-    if (!toastsEl || !s || s === lastToast) { return; }
+    if (!s) { return; }
+    // Mirror the latest status onto <body data-status> — toasts are transient
+    // (they remove themselves), so this is the persistent, machine-readable
+    // signal the e2e tests (wasm/rvim/e2e) poll for boot/proxy state.
+    document.body.setAttribute('data-status', s);
+    if (!toastsEl || s === lastToast) { return; }
     lastToast = s;
     const el = document.createElement('div');
     el.className = 'toast' + (opts && opts.error ? ' error' : '');

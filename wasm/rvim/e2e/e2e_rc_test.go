@@ -147,9 +147,9 @@ func bootRCServer(t *testing.T, bundle string, cfg server.Config) context.Contex
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(url),
-		chromedp.Poll(`!!window.nvim && /attached/.test((document.getElementById('status')||{}).textContent||"")`,
+		chromedp.Poll(`!!window.nvim && /attached/.test(document.body.dataset.status||"")`,
 			nil, chromedp.WithPollingTimeout(60*time.Second)),
-		chromedp.Poll(`/proxy connected/.test((document.getElementById('status')||{}).textContent||"")`,
+		chromedp.Poll(`/proxy connected/.test(document.body.dataset.status||"")`,
 			nil, chromedp.WithPollingTimeout(20*time.Second)),
 	); err != nil {
 		t.Fatalf("engine boot / proxy connect: %v", err)
