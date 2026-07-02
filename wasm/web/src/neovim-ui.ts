@@ -9,10 +9,12 @@
 //     uses, which is what validates the decode path).
 //
 //   * mount_into(instance, canvas) - wires a Screen to a neovim.js instance and
-//     a <canvas>: subscribes to redraw, attaches the UI, paints on flush via the
+//     a <canvas>: subscribes to redraw, attaches the UI, paints via the
 //     grid-renderer package (wasm/grid-renderer - a bitmap-glyph-cache canvas
 //     renderer with path-drawn box-drawing/legacy-computing glyphs), and maps
-//     keydown -> nvim_input.
+//     keydown -> nvim_input. Painting is flush-gated AND coalesced to at most
+//     one render per animation frame (see the paint-coalescing comment), so a
+//     burst of redraw batches can't blow the frame budget.
 //
 // We attach with ext_linegrid and paint grid 1 as a colored monospace cell
 // grid: the Screen decodes the highlight stream (default_colors_set,
@@ -384,9 +386,30 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
     }
   }
 
+  // rAF plumbing (shared by paint coalescing and the resize observer below).
+  const hasRaf = (typeof requestAnimationFrame === 'function');
+  function scheduleRaf(fn: () => void): number { return hasRaf ? requestAnimationFrame(fn) : (setTimeout(fn, 16) as any); }
+  function cancelRaf(id: number): void { if (hasRaf) { cancelAnimationFrame(id); } else { clearTimeout(id); } }
+
   const screen = new Screen(cols, rows);
-  screen.onFlush = function () {
+
+  // ---- paint coalescing --------------------------------------------------
+  // Every redraw notification is decoded into the Screen SYNCHRONOUSLY (the
+  // model must stay current), but painting is coalesced to at most one
+  // renderer.render() per animation frame. During a fast scroll the engine
+  // can emit hundreds of redraw batches - each ending in its own `flush` -
+  // inside a single frame; painting on every one of them walks the whole
+  // grid (screenToCells + per-cell damage keys) hundreds of times and blows
+  // the frame budget. Only the LAST screen state per frame can end up on
+  // glass anyway, so intermediate flushes only mark dirty.
+  let paintRafId: number | null = null;
+  function paint(): void {
+    paintRafId = null;
     renderer.render(screenToCells(screen, defFg, defBg), screen.cursor);
+  }
+  screen.onFlush = function () {
+    if (paintRafId != null) { return; }     // a paint is already scheduled
+    paintRafId = scheduleRaf(paint);
   };
   const off = instance.onNotification('redraw', function (params) { screen.handleRedraw(params); });
   installKeyboard(canvas, instance);
@@ -406,6 +429,7 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
       off();
       if (observer) { observer.disconnect(); observer = null; }
       if (rafId != null) { cancelRaf(rafId); rafId = null; }
+      if (paintRafId != null) { cancelRaf(paintRafId); paintRafId = null; }
     },
   };
 
@@ -415,9 +439,6 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
   // ask the engine to resize -- it answers with a grid_resize redraw the
   // Screen decode already handles. Coalesce bursts into one try_resize/frame.
   let observer: ResizeObserver | null = null, rafId: number | null = null;
-  const hasRaf = (typeof requestAnimationFrame === 'function');
-  function scheduleRaf(fn: () => void): number { return hasRaf ? requestAnimationFrame(fn) : (setTimeout(fn, 16) as any); }
-  function cancelRaf(id: number): void { if (hasRaf) { cancelAnimationFrame(id); } else { clearTimeout(id); } }
 
   if (!explicit && typeof ResizeObserver === 'function') {
     const recompute = function () {
@@ -426,8 +447,10 @@ export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts
       if (!box) { return; }                 // 0x0 (e.g. hidden): keep last grid
       const fitted = renderer.fit(box.w, box.h, defBg);
       // The refit cleared the canvas; repaint the current screen contents at
-      // whatever size we have while the engine reflows.
-      if (screen.onFlush) { screen.onFlush(); }
+      // whatever size we have while the engine reflows. We're already inside
+      // a rAF callback, so paint synchronously (and drop any pending paint).
+      if (paintRafId != null) { cancelRaf(paintRafId); }
+      paint();
       if (fitted.cols === api.cols && fitted.rows === api.rows) { return; }
       api.cols = fitted.cols; api.rows = fitted.rows;
       instance.request('nvim_ui_try_resize', [fitted.cols, fitted.rows]);
