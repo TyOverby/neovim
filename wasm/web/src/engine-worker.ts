@@ -177,6 +177,130 @@ onmessage = function (e: MessageEvent) {
   if (ch.notify) { ch.notify(); }
 };
 
+// ---------------------------------------------------------------------------
+// Performance-panel instrumentation for the IO proxy.
+//
+// Chrome's DevTools extensibility API renders performance entries carrying a
+// `detail.devtools` payload in the Performance panel: measures tagged
+// `dataType:'track-entry'` land on a named CUSTOM TRACK (ours: "IO proxy",
+// group "rvim", shown under this worker), and marks tagged `dataType:'marker'`
+// render in the Timings track (the API does not place marks on custom tracks).
+// So: request/response pairs (distinct start/end) -> measures on the track;
+// one-shot events (server pushes, connection status) -> marks.
+//
+// Everything is guarded so a browser without the options-object performance
+// API just skips the instrumentation; entries in a non-Chrome browser are
+// plain User Timing entries (still visible in its profiler, minus the track).
+// ---------------------------------------------------------------------------
+
+function ioPerfNow(): number {
+  return (S.performance && typeof S.performance.now === 'function') ? S.performance.now() : -1;
+}
+
+// A measure on the custom "IO proxy" track (an entry with a start + duration).
+function ioPerfMeasure(name: string, start: number, color: string, props: Array<[string, string]>): void {
+  try {
+    S.performance.measure(name, {
+      start: start,
+      end: S.performance.now(),
+      detail: { devtools: {
+        dataType: 'track-entry', track: 'IO proxy', trackGroup: 'rvim',
+        color: color, tooltipText: name, properties: props,
+      } },
+    });
+  } catch (_e) { /* no options-object measure / no perf API: skip */ }
+}
+
+// A mark for instantaneous events (renders in the Timings track).
+function ioPerfMark(name: string, color: string, props: Array<[string, string]>): void {
+  try {
+    S.performance.mark(name, {
+      detail: { devtools: { dataType: 'marker', color: color, tooltipText: name, properties: props } },
+    });
+  } catch (_e) { /* skip */ }
+}
+
+// Color per method family so the track reads at a glance; failures are red.
+function ioPerfColor(method: string, failed: boolean): string {
+  if (failed) { return 'error'; }
+  if (method.indexOf('fs.') === 0) { return 'primary'; }
+  if (method.indexOf('proc.') === 0) { return 'secondary'; }
+  if (method.indexOf('pty.') === 0) { return 'secondary-light'; }
+  if (method.indexOf('sock.') === 0) { return 'tertiary'; }
+  return 'primary-dark';
+}
+
+// One short line identifying the request's target: the path for fs ops,
+// argv[0] for spawns, host:service for DNS/connect, else the server-side id.
+function ioPerfTarget(params: any): string {
+  if (!params || typeof params !== 'object') { return ''; }
+  if (typeof params.path === 'string') { return params.path; }
+  if (typeof params.from === 'string' && typeof params.to === 'string') {
+    return params.from + ' -> ' + params.to;
+  }
+  if (params.argv && params.argv.length) { return String(params.argv[0]); }
+  if (typeof params.host === 'string') {
+    return params.host + (params.service != null ? ':' + params.service : '');
+  }
+  const id = params.id != null ? params.id
+    : params.handle != null ? params.handle
+    : params.connId != null ? params.connId
+    : params.listenerId != null ? params.listenerId : null;
+  return id != null ? ('#' + id) : '';
+}
+
+// Wrap the ReconnectingProxy facade so every proxied IO request/push emits a
+// performance entry. Returns the wrapped facade (or the original when the
+// performance API is unavailable); the js-libraries use it transparently —
+// request/onPush/isConnected/close is their whole surface (plus the
+// __nvimPushChain expando they keep on the facade object, which works the
+// same on the wrapper).
+function instrumentProxyPerf(facade: any): any {
+  if (ioPerfNow() < 0) { return facade; }
+  return {
+    request: function (method: string, params?: any, payload?: any) {
+      const start = ioPerfNow();
+      const sent = payload ? ((payload.byteLength != null ? payload.byteLength : payload.length) | 0) : 0;
+      const target = ioPerfTarget(params);
+      const p = facade.request(method, params, payload);
+      const props: Array<[string, string]> = [['method', method]];
+      if (target) { props.push(['target', target]); }
+      if (params && typeof params === 'object') {
+        try { props.push(['params', JSON.stringify(params).slice(0, 200)]); } catch (_e) {}
+      }
+      if (sent) { props.push(['sent bytes', String(sent)]); }
+      p.then(function (resp: any) {
+        const got = (resp && resp.payload) ? resp.payload.byteLength : 0;
+        if (got) { props.push(['received bytes', String(got)]); }
+        const bytes = sent || got;
+        ioPerfMeasure(
+          method + (target ? ' ' + target : '') + (bytes ? ' (' + bytes + 'B)' : ''),
+          start, ioPerfColor(method, false), props);
+      }, function (err: any) {
+        props.push(['error', String(err && err.message || err)]);
+        ioPerfMeasure(method + (target ? ' ' + target : '') + ' FAILED',
+          start, ioPerfColor(method, true), props);
+      });
+      return p;
+    },
+    onPush: function (fn: any) {
+      facade.onPush(function (method: string, params: any, payload: Uint8Array) {
+        const bytes = payload ? payload.byteLength : 0;
+        const props: Array<[string, string]> = [['method', method]];
+        if (params && typeof params === 'object') {
+          try { props.push(['params', JSON.stringify(params).slice(0, 200)]); } catch (_e) {}
+        }
+        if (bytes) { props.push(['bytes', String(bytes)]); }
+        ioPerfMark('push ' + method + (bytes ? ' (' + bytes + 'B)' : ''),
+          ioPerfColor(method, false), props);
+        fn(method, params, payload);
+      });
+    },
+    isConnected: function () { return facade.isConnected(); },
+    close: function () { return facade.close(); },
+  };
+}
+
 // Stage 4: open the IO-proxy WebSocket and wire the shared proxy client. The
 // client lives in wasm/proxy-client.js, importScripted into this worker (it sets
 // self.ProxyClient). build-site.sh / build-lib.sh copy it next to nvim.js so it
@@ -216,7 +340,7 @@ function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
   // -EIO instead of hanging), preserves the push router across reconnects, and
   // re-dials with backoff after a drop. The engine itself never restarts — only
   // the wire reconnects, so buffers/undo survive a blip (see docs/history/stage5.md §6).
-  S.__nvimProxy = S.ProxyReconnect.createReconnectingProxy({
+  S.__nvimProxy = instrumentProxyPerf(S.ProxyReconnect.createReconnectingProxy({
     ProxyClient: S.ProxyClient,
     dial: function () {
       const url = proxy.url + (proxy.url.indexOf('?') >= 0 ? '&' : '?') +
@@ -232,6 +356,9 @@ function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
     // deferred-boot logic above on every successful (re)connect.
     onHello: function (result: any) { try { bootSignal!(result); } catch (_e) {} },
     onStatus: function (ev: any) {
+      // Connection lifecycle is instantaneous (no start/end pair) -> marks.
+      ioPerfMark('proxy ' + ev.kind, ev.kind === 'connected' ? 'primary' : 'error',
+        [['kind', ev.kind]].concat(ev.delay != null ? [['delay ms', String(ev.delay)]] : []) as Array<[string, string]>);
       try {
         if (ev.kind === 'connected') {
           postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url });
@@ -245,5 +372,5 @@ function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
         }
       } catch (_e) {}
     },
-  });
+  }));
 }
