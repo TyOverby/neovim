@@ -8,17 +8,27 @@
 //     end-to-end test in e2e.test.js renders into the very same Screen the page
 //     uses, which is what validates the decode path).
 //
-//   * mount_into(instance, el) - wires a Screen to a neovim.js instance and a
-//     DOM <pre>: subscribes to redraw, attaches the UI, renders on flush, and
-//     maps keydown -> nvim_input.
+//   * mount_into(instance, canvas) - wires a Screen to a neovim.js instance and
+//     a <canvas>: subscribes to redraw, attaches the UI, paints on flush via the
+//     grid-renderer package (wasm/grid-renderer - a bitmap-glyph-cache canvas
+//     renderer with path-drawn box-drawing/legacy-computing glyphs), and maps
+//     keydown -> nvim_input.
 //
-// We attach with ext_linegrid and render grid 1 as a coloured monospace
-// character grid: the Screen decodes the highlight stream (default_colors_set,
-// hl_attr_define, and the per-cell hl ids in grid_line) and render() emits
-// grouped colour spans (fg/bg/bold/italic/underline/undercurl/strikethrough/
-// reverse). The command line and messages are drawn by Neovim into the bottom
-// rows of that same grid (we don't request ext_cmdline/ext_messages), so `:w`,
-// `:q`, etc. are visible.
+// We attach with ext_linegrid and paint grid 1 as a colored monospace cell
+// grid: the Screen decodes the highlight stream (default_colors_set,
+// hl_attr_define, and the per-cell hl ids in grid_line) and the renderer
+// paints fg/bg/bold/italic/underline/undercurl/strikethrough/reverse per
+// cell. The command line and messages are drawn by Neovim into the bottom
+// rows of that same grid (we don't request ext_cmdline/ext_messages), so
+// `:w`, `:q`, etc. are visible.
+//
+// DEPENDENCY: mount_into needs the grid-renderer module. Like the msgpack
+// dependency in neovim.ts, it is resolved at runtime - pass it via
+// opts.grid_renderer, or load dist/grid-renderer.js (UMD) before this module
+// so globalThis.GridRenderer is set. The headless Screen has no dependency.
+//
+// The legacy "render into a <pre>" DOM renderer lives on as a TESTING UTILITY
+// in neovim-ui-pre-testutil.ts (plain CommonJS, not shipped in the bundles).
 //
 // This module is the TypeScript SOURCE OF TRUTH; the build emits a UMD
 // `neovim-ui.js` (globalThis.NeovimUI / require()), an ESM `neovim-ui.mjs`, and a
@@ -51,20 +61,29 @@ export interface HlAttrs {
 
 export interface MountOptions {
   font_family?: string;
-  font_size?: number | string;
+  // Font size in CSS px (a number; the HiDPI backing-store scale is handled
+  // internally via devicePixelRatio).
+  font_size?: number;
   cols?: number;
   rows?: number;
+  // Base colors used when Neovim says "use the default terminal color"
+  // (defaults: 0xd4d4d4 on 0x000000, matching the demo page).
+  default_fg?: number;
+  default_bg?: number;
+  // The grid-renderer module (see the header comment). Defaults to
+  // globalThis.GridRenderer.
+  grid_renderer?: any;
 }
 
 export interface MountHandle {
   screen: Screen;
   cols: number;
   rows: number;
+  // The underlying grid-renderer instance (glyph cache, metrics, ...).
+  renderer: any;
   resize(c: number, r: number): Promise<any>;
   dispose(): void;
 }
-
-interface FontMetrics { fontFamily: string; fontSize: string; lineHeight: number; }
 
 // ---- Screen: headless grid model + redraw decode ------------------------
 export class Screen {
@@ -79,7 +98,7 @@ export class Screen {
   // when present, plus boolean style flags). id 0 is always the default.
   hlAttrs: Record<number, HlAttrs>;
   // Default colours from default_colors_set (24-bit ints, or null for "use the
-  // terminal default", which we leave to the page's base colours).
+  // terminal default", which we leave to the embedder's base colours).
   defaultFg: number | null;
   defaultBg: number | null;
   defaultSp: number | null;
@@ -213,95 +232,41 @@ export class Screen {
   }
 }
 
-// ---- DOM rendering ------------------------------------------------------
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>]/g, function (c) {
-    return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
-  });
-}
-// 24-bit int -> '#rrggbb'.
-function hex(n: number): string {
-  const s = (n & 0xffffff).toString(16);
-  return '#' + '000000'.slice(s.length) + s;
-}
-// Resolve an hl id to the concrete fg/bg/style we paint a span with. Returns
-// null when the cell needs no per-span styling (default id 0 with no attrs);
-// such cells inherit the container's base colours.
-function resolveStyle(screen: Screen, id: number): string | null {
-  if (!id) { return null; }
-  const attrs = screen.hlAttrs[id];
-  if (!attrs) { return null; }
-  let fg = (typeof attrs.foreground === 'number') ? attrs.foreground : screen.defaultFg;
-  let bg = (typeof attrs.background === 'number') ? attrs.background : screen.defaultBg;
-  if (attrs.reverse) { const t = fg; fg = (bg === null ? screen.defaultBg : bg); bg = (t === null ? screen.defaultFg : t); }
-  let css = '';
-  if (fg !== null) { css += 'color:' + hex(fg) + ';'; }
-  // Only paint a background when it differs from the default (reverse forces it).
-  if (bg !== null && (bg !== screen.defaultBg || attrs.reverse)) { css += 'background-color:' + hex(bg) + ';'; }
-  if (attrs.bold) { css += 'font-weight:bold;'; }
-  if (attrs.italic) { css += 'font-style:italic;'; }
-  let deco = '';
-  if (attrs.underline || attrs.underdouble || attrs.underdotted || attrs.underdashed) { deco += ' underline'; }
-  if (attrs.undercurl) { deco += ' underline wavy'; }
-  if (attrs.strikethrough) { deco += ' line-through'; }
-  if (deco) {
-    css += 'text-decoration:' + deco.trim() + ';';
-    const sp = (typeof attrs.special === 'number') ? attrs.special : screen.defaultSp;
-    if ((attrs.undercurl || attrs.underdotted || attrs.underdashed) && sp !== null) {
-      css += 'text-decoration-color:' + hex(sp) + ';';
-    }
-  }
-  return css || null;
-}
-// Style for the cursor cell: a solid block (swap to the default bg/fg) so it
-// stays visible over any coloured cell. Built on top of the cell's own attrs.
-function cursorStyle(screen: Screen, id: number): string {
-  const attrs = screen.hlAttrs[id] || {};
-  let fg = (typeof attrs.foreground === 'number') ? attrs.foreground : screen.defaultFg;
-  let bg = (typeof attrs.background === 'number') ? attrs.background : screen.defaultBg;
-  if (attrs.reverse) { const t = fg; fg = bg; bg = t; }
-  // Cursor block: paint the cell's fg as the background and the cell's bg (or
-  // the default bg) as the text colour, so it reads as a solid block.
-  const blockBg = (fg !== null) ? fg : screen.defaultFg;
-  const blockFg = (bg !== null) ? bg : screen.defaultBg;
-  let css = '';
-  if (blockBg !== null) { css += 'background-color:' + hex(blockBg) + ';'; }
-  if (blockFg !== null) { css += 'color:' + hex(blockFg) + ';'; }
-  return css;
-}
-function render(el: HTMLElement, screen: Screen): void {
-  // Apply the default colours to the container so default cells need no span.
-  if (screen.defaultFg !== null) { el.style.color = hex(screen.defaultFg); }
-  if (screen.defaultBg !== null) { el.style.backgroundColor = hex(screen.defaultBg); }
-
-  const out: string[] = [];
-  const cur = screen.cursor;
+// ---- Screen -> renderer cells --------------------------------------------
+// Resolve one row of the Screen into grid-renderer Cells: apply the hl attrs
+// over the default colors, apply reverse video, and mark wide glyphs (a wide
+// char is followed by a '' continuation cell in ext_linegrid).
+export function screenToCells(screen: Screen, defFg: number, defBg: number): any[][] {
+  const out: any[][] = new Array(screen.rows);
+  const baseFg = (screen.defaultFg !== null) ? screen.defaultFg : defFg;
+  const baseBg = (screen.defaultBg !== null) ? screen.defaultBg : defBg;
+  const baseSp = (screen.defaultSp !== null) ? screen.defaultSp : null;
   for (let r = 0; r < screen.rows; r++) {
     const line = screen.grid[r], hlLine = screen.hlGrid[r];
-    const curCol = (r === cur.row && cur.col < screen.cols) ? cur.col : -1;
-    let rowHtml = '';
-    let c = 0;
-    while (c < screen.cols) {
-      if (c === curCol) {
-        // The cursor cell is its own span (a solid block); never grouped.
-        const cs = cursorStyle(screen, hlLine[c]);
-        rowHtml += '<span class="cursor" style="' + cs + '">' +
-                   escapeHtml(line[c] || ' ') + '</span>';
-        c++;
-        continue;
-      }
-      // Group a run of consecutive cells that share the same hl id (and don't
-      // contain the cursor) into one span.
-      const id = hlLine[c];
-      const start = c;
-      while (c < screen.cols && hlLine[c] === id && c !== curCol) { c++; }
-      const text = escapeHtml(line.slice(start, c).join(''));
-      const style = resolveStyle(screen, id);
-      rowHtml += style ? ('<span style="' + style + '">' + text + '</span>') : text;
+    const row: any[] = new Array(screen.cols);
+    for (let c = 0; c < screen.cols; c++) {
+      const attrs = screen.hlAttrs[hlLine[c]] || {};
+      let fg = (typeof attrs.foreground === 'number') ? attrs.foreground : baseFg;
+      let bg = (typeof attrs.background === 'number') ? attrs.background : baseBg;
+      if (attrs.reverse) { const t = fg; fg = bg; bg = t; }
+      const cell: any = { text: line[c] || '', fg: fg, bg: bg };
+      const sp = (typeof attrs.special === 'number') ? attrs.special : baseSp;
+      if (sp !== null) { cell.sp = sp; }
+      if (attrs.bold) { cell.bold = true; }
+      if (attrs.italic) { cell.italic = true; }
+      if (attrs.underline) { cell.underline = true; }
+      if (attrs.undercurl) { cell.undercurl = true; }
+      if (attrs.underdouble) { cell.underdouble = true; }
+      if (attrs.underdotted) { cell.underdotted = true; }
+      if (attrs.underdashed) { cell.underdashed = true; }
+      if (attrs.strikethrough) { cell.strikethrough = true; }
+      // Wide glyph: ext_linegrid puts '' in the following cell.
+      if (cell.text && c + 1 < screen.cols && line[c + 1] === '') { cell.width = 2; }
+      row[c] = cell;
     }
-    out.push(rowHtml);
+    out[r] = row;
   }
-  el.innerHTML = out.join('\n');
+  return out;
 }
 
 // ---- keyboard -----------------------------------------------------------
@@ -348,140 +313,93 @@ function installKeyboard(el: HTMLElement, instance: UIInstance): void {
   el.focus();
 }
 
-// ---- font + sizing ------------------------------------------------------
-// We keep the grid math stable by pinning a deterministic line-height: rows
-// are an exact integer number of px so floor(contentHeight / cellH) doesn't
-// wobble on sub-pixel font metrics. 1.2 is the conventional terminal ratio.
-const DEFAULT_FONT_FAMILY = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace';
-const LINE_HEIGHT_RATIO = 1.2;
-
-// Apply opts.font_family / opts.font_size to `el` (only when given, so an
-// unset option leaves the page CSS alone), and pin a deterministic integer-px
-// line-height. `font_size` is a number (-> px) or a string (used as-is).
-// Returns the resolved { fontFamily, fontSize (css), lineHeight (px) } that the
-// probe must mirror so its cell metrics match the live element.
-function applyFont(el: HTMLElement, opts: MountOptions): FontMetrics {
-  if (opts.font_family) { el.style.fontFamily = opts.font_family; }
-  if (opts.font_size != null) {
-    el.style.fontSize = (typeof opts.font_size === 'number')
-      ? (opts.font_size + 'px') : opts.font_size;
-  }
-  const cs = (typeof getComputedStyle === 'function') ? getComputedStyle(el) : null;
-  const fontFamily = (cs && cs.fontFamily) || el.style.fontFamily || DEFAULT_FONT_FAMILY;
-  const fontSizeCss = (cs && cs.fontSize) || el.style.fontSize || '16px';
-  const fontSizePx = parseFloat(fontSizeCss) || 16;
-  // Pin line-height to an exact integer px so row math is stable.
-  const lineHeightPx = Math.max(1, Math.round(fontSizePx * LINE_HEIGHT_RATIO));
-  el.style.lineHeight = lineHeightPx + 'px';
-  return { fontFamily: fontFamily, fontSize: fontSizeCss, lineHeight: lineHeightPx };
-}
-
-// Measure one monospace cell (width x height in px) for the given resolved
-// font, using a hidden off-screen probe with the SAME font metrics as the live
-// element. Uses getBoundingClientRect() for sub-pixel accuracy: a long run of a
-// fixed glyph divided by its length gives a per-cell width that isn't skewed by
-// a single glyph's rounding.
-function measureCell(font: FontMetrics): { w: number; h: number } {
-  const probe = document.createElement('span');
-  probe.style.position = 'absolute';
-  probe.style.visibility = 'hidden';
-  probe.style.left = '-9999px';
-  probe.style.top = '0';
-  probe.style.whiteSpace = 'pre';
-  probe.style.fontFamily = font.fontFamily;
-  probe.style.fontSize = font.fontSize;
-  probe.style.lineHeight = font.lineHeight + 'px';
-  probe.style.padding = '0';
-  probe.style.margin = '0';
-  probe.style.border = '0';
-  const N = 50;
-  probe.textContent = '0'.repeat(N);
-  document.body.appendChild(probe);
-  const rect = probe.getBoundingClientRect();
-  const cellW = rect.width / N;
-  document.body.removeChild(probe);
-  // Height comes from the pinned (integer) line-height, which is what the live
-  // <pre> uses per row -- the probe rect height can be the same but we trust the
-  // pinned value so cellH is an exact integer.
-  return { w: cellW, h: font.lineHeight };
-}
-
-// `el`'s content-box size in px (clientWidth/Height already exclude border and
-// scrollbar; subtract padding to get the content box).
-function contentBox(el: HTMLElement): { w: number; h: number } {
-  const cs = (typeof getComputedStyle === 'function') ? getComputedStyle(el) : null;
-  const padL = cs ? (parseFloat(cs.paddingLeft) || 0) : 0;
-  const padR = cs ? (parseFloat(cs.paddingRight) || 0) : 0;
-  const padT = cs ? (parseFloat(cs.paddingTop) || 0) : 0;
-  const padB = cs ? (parseFloat(cs.paddingBottom) || 0) : 0;
-  return {
-    w: Math.max(0, el.clientWidth - padL - padR),
-    h: Math.max(0, el.clientHeight - padT - padB),
-  };
-}
-
-// Derive { cols, rows } from `el`'s content box and a measured cell. Returns
-// null when the element has no usable layout yet (0x0 or an unmeasurable cell),
-// so the caller can fall back to the fixed defaults instead of a degenerate grid.
-function deriveSize(el: HTMLElement, font: FontMetrics): { cols: number; rows: number } | null {
-  const box = contentBox(el);
-  const cell = measureCell(font);
-  if (!(cell.w > 0) || !(cell.h > 0) || box.w <= 0 || box.h <= 0) { return null; }
-  return {
-    cols: Math.max(1, Math.floor(box.w / cell.w)),
-    rows: Math.max(1, Math.floor(box.h / cell.h)),
-  };
-}
-
 // ---- mount_into ---------------------------------------------------------
-// Wire `instance` to render into the DOM element `el` (a <pre>) and forward
-// its keystrokes.
+// Wire `instance` to paint into `canvas` (a <canvas>) and forward its
+// keystrokes.
 //
 // opts:
-//   * font_family - CSS font-family applied to `el` (default: leave the page
-//     CSS as-is; a monospace stack is assumed). A monospace family is required
-//     for the grid to line up.
-//   * font_size   - number (-> px) or a CSS length string, applied to `el`.
-//   * cols, rows  - EXPLICIT grid size. Passing either disables auto-sizing:
-//     the grid is fixed at the given dimensions (missing one defaults 80/24).
+//   * font_family   - CSS font-family for the cell font (monospace expected).
+//   * font_size     - number, CSS px (default 16).
+//   * cols, rows    - EXPLICIT grid size. Passing either disables auto-sizing:
+//     the grid is fixed at the given dimensions (missing one defaults 80/24)
+//     and the canvas backing store is sized to exactly fit it.
+//   * default_fg/bg - base colors for "default terminal color" cells.
+//   * grid_renderer - the grid-renderer module (default: globalThis.GridRenderer).
 //
-// With neither cols nor rows given, the grid AUTO-SIZES: it measures the font's
-// cell metrics and `el`'s content box, attaches a grid that fills the element,
-// and tracks `el`'s size with a ResizeObserver (driving nvim_ui_try_resize on
-// change, debounced via requestAnimationFrame; the engine's grid_resize redraw
-// reflows the Screen, so we never resize it by hand). If `el` has no layout yet
-// (0x0), it falls back to 80x24 so it never attaches a degenerate grid.
+// With neither cols nor rows given, the grid AUTO-SIZES: the canvas backing
+// store tracks the element's CSS box (x devicePixelRatio for crisp HiDPI
+// output), the grid is as many whole cells as fit, and a ResizeObserver
+// drives nvim_ui_try_resize on change (debounced via requestAnimationFrame;
+// the engine's grid_resize redraw reflows the Screen, so we never resize it
+// by hand). If the canvas has no layout yet (0x0), it falls back to 80x24.
 //
-// Returns { screen, resize(c, r), dispose(), cols, rows } (cols/rows are the
-// derived-or-explicit dimensions it attached with).
-export function mount_into(instance: UIInstance, el: HTMLElement, opts?: MountOptions): MountHandle {
+// Returns { screen, renderer, resize(c, r), dispose(), cols, rows }.
+export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts?: MountOptions): MountHandle {
   opts = opts || {};
-  const explicit = (opts.cols != null) || (opts.rows != null);
+  const GR = opts.grid_renderer ||
+    (typeof globalThis !== 'undefined' && (globalThis as any).GridRenderer);
+  if (!GR || !GR.GridRenderer) {
+    throw new Error('mount_into: grid-renderer not available - load grid-renderer.js ' +
+      'before neovim-ui.js or pass opts.grid_renderer');
+  }
 
-  // Font styling + a pinned line-height so the grid math is deterministic.
-  const font = applyFont(el, opts);
+  const explicit = (opts.cols != null) || (opts.rows != null);
+  const defFg = (opts.default_fg != null) ? opts.default_fg : 0xd4d4d4;
+  const defBg = (opts.default_bg != null) ? opts.default_bg : 0x000000;
+  const dpr = (typeof devicePixelRatio === 'number' && devicePixelRatio > 0) ? devicePixelRatio : 1;
+  const fontSizeCss = (typeof opts.font_size === 'number') ? opts.font_size : 16;
+
+  // The renderer works in DEVICE pixels: the font is scaled by dpr and the
+  // canvas backing store matches; the element is scaled back down via CSS.
+  const renderer = new GR.GridRenderer(canvas, {
+    fontFamily: opts.font_family,
+    fontSizePx: Math.round(fontSizeCss * dpr),
+  });
+
+  // The canvas element's CSS box in device px, or null when it has no layout.
+  function deviceBox(): { w: number; h: number } | null {
+    if (typeof canvas.getBoundingClientRect !== 'function') { return null; }
+    const rect = canvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) { return null; }
+    return { w: Math.round(rect.width * dpr), h: Math.round(rect.height * dpr) };
+  }
 
   let cols: number, rows: number;
   if (explicit) {
     cols = opts.cols || 80; rows = opts.rows || 24;
+    renderer.resize(cols, rows);
+    // Style the element to its backing store's CSS size so it's crisp.
+    if (canvas.style) {
+      canvas.style.width = (renderer.pixelWidth / dpr) + 'px';
+      canvas.style.height = (renderer.pixelHeight / dpr) + 'px';
+    }
   } else {
-    const derived = deriveSize(el, font);
-    if (derived) { cols = derived.cols; rows = derived.rows; }
-    else { cols = 80; rows = 24; }   // no layout yet: never attach 0x0
+    const box = deviceBox();
+    if (box) {
+      const fitted = renderer.fit(box.w, box.h, defBg);
+      cols = fitted.cols; rows = fitted.rows;
+    } else {
+      cols = 80; rows = 24;              // no layout yet: never attach 0x0
+      renderer.resize(cols, rows);
+    }
   }
 
   const screen = new Screen(cols, rows);
-  screen.onFlush = function () { render(el, screen); };
+  screen.onFlush = function () {
+    renderer.render(screenToCells(screen, defFg, defBg), screen.cursor);
+  };
   const off = instance.onNotification('redraw', function (params) { screen.handleRedraw(params); });
-  installKeyboard(el, instance);
+  installKeyboard(canvas, instance);
   instance.request('nvim_ui_attach', [cols, rows, { rgb: true, ext_linegrid: true }]);
 
   const api: MountHandle = {
     screen: screen,
     cols: cols,
     rows: rows,
+    renderer: renderer,
     resize: function (c, r) {
       api.cols = c; api.rows = r;
+      if (renderer.cols !== c || renderer.rows !== r) { renderer.resize(c, r); }
       return instance.request('nvim_ui_try_resize', [c, r]);
     },
     dispose: function () {
@@ -491,12 +409,11 @@ export function mount_into(instance: UIInstance, el: HTMLElement, opts?: MountOp
     },
   };
 
-  // ---- auto-resize: track `el` and drive try_resize on change ----------
+  // ---- auto-resize: track the canvas box and drive try_resize on change --
   // Only when auto-sizing (explicit cols/rows keep a fixed grid). On each
-  // observed resize we recompute cols/rows and, if they changed, ask the engine
-  // to resize -- it answers with a grid_resize redraw the Screen decode already
-  // handles, so we don't touch the Screen here (avoids a double-resize race).
-  // Coalesce a burst of resizes (a window drag) into one try_resize per frame.
+  // observed resize we refit the backing store and, if the cell grid changed,
+  // ask the engine to resize -- it answers with a grid_resize redraw the
+  // Screen decode already handles. Coalesce bursts into one try_resize/frame.
   let observer: ResizeObserver | null = null, rafId: number | null = null;
   const hasRaf = (typeof requestAnimationFrame === 'function');
   function scheduleRaf(fn: () => void): number { return hasRaf ? requestAnimationFrame(fn) : (setTimeout(fn, 16) as any); }
@@ -505,17 +422,21 @@ export function mount_into(instance: UIInstance, el: HTMLElement, opts?: MountOp
   if (!explicit && typeof ResizeObserver === 'function') {
     const recompute = function () {
       rafId = null;
-      const derived = deriveSize(el, font);
-      if (!derived) { return; }                 // 0x0 (e.g. hidden): keep last grid
-      if (derived.cols === api.cols && derived.rows === api.rows) { return; }
-      api.cols = derived.cols; api.rows = derived.rows;
-      instance.request('nvim_ui_try_resize', [derived.cols, derived.rows]);
+      const box = deviceBox();
+      if (!box) { return; }                 // 0x0 (e.g. hidden): keep last grid
+      const fitted = renderer.fit(box.w, box.h, defBg);
+      // The refit cleared the canvas; repaint the current screen contents at
+      // whatever size we have while the engine reflows.
+      if (screen.onFlush) { screen.onFlush(); }
+      if (fitted.cols === api.cols && fitted.rows === api.rows) { return; }
+      api.cols = fitted.cols; api.rows = fitted.rows;
+      instance.request('nvim_ui_try_resize', [fitted.cols, fitted.rows]);
     };
     observer = new ResizeObserver(function () {
-      if (rafId != null) { return; }            // coalesce: one try_resize per frame
+      if (rafId != null) { return; }        // coalesce: one try_resize per frame
       rafId = scheduleRaf(recompute);
     });
-    observer.observe(el);
+    observer.observe(canvas);
   }
 
   return api;

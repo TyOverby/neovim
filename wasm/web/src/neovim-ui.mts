@@ -5,6 +5,9 @@
 // this thin ESM wrapper imports it for its side effect of populating the global,
 // then re-exports the same named surface plus a default. See neovim.mts for the
 // full explanation of why this is browser-correct with no bundler.
+//
+// NOTE: mount_into needs the grid-renderer module at runtime (load
+// grid-renderer.js first, or pass opts.grid_renderer); see neovim-ui.ts.
 import './neovim-ui.js';
 import type { Screen as ScreenType, MountHandle, MountOptions, UIInstance } from './neovim-ui.js';
 
@@ -14,8 +17,9 @@ const ns: any =
   {};
 
 export const Screen: typeof ScreenType = ns.Screen;
-export const mount_into: (instance: UIInstance, el: HTMLElement, opts?: MountOptions) => MountHandle = ns.mount_into;
+export const mount_into: (instance: UIInstance, canvas: HTMLCanvasElement, opts?: MountOptions) => MountHandle = ns.mount_into;
 export const keyToNvim: (e: KeyboardEvent) => string | null = ns.keyToNvim;
+export const screenToCells: (screen: ScreenType, defFg: number, defBg: number) => any[][] = ns.screenToCells;
 
 export type { MountHandle, MountOptions, UIInstance, HlAttrs } from './neovim-ui.js';
 

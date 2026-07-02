@@ -13,18 +13,15 @@
     background: #000; color: #dcdcdc;
     overflow: hidden;
   }
+  /* The canvas renderer (neovim-ui.js + grid-renderer.js) paints the whole
+     grid; the element just needs to fill the viewport. mount_into sizes the
+     backing store to this CSS box x devicePixelRatio (crisp on HiDPI) and its
+     ResizeObserver reflows the grid (try_resize -> grid_resize) whenever the
+     browser window changes size. The cursor is painted by the renderer as a
+     reverse-video block - no CSS involved. */
   #screen {
-    margin: 0;
-    font-family: inherit;
-    font-size: 16px;
-    line-height: 1.2;
-    letter-spacing: 0;
-    white-space: pre;
+    display: block;
     background: #000;
-    color: #d4d4d4;
-    padding: 8px;
-    /* Fill the whole viewport; mount_into's ResizeObserver reflows the grid
-       (try_resize -> grid_resize) whenever the browser window changes size. */
     box-sizing: border-box;
     position: fixed;
     inset: 0;
@@ -32,12 +29,7 @@
     height: 100%;
     overflow: hidden;
     outline: none;
-    tab-size: 8;
   }
-  /* Cursor: a solid block. render() sets inline bg/fg (swapped from the cell)
-     so it stays visible over a coloured cell; this outline is a fallback for the
-     default-colour case where no inline background is emitted. */
-  #screen .cursor { outline: 1px solid #d4d4d4; outline-offset: -1px; }
 
   /* Toast notifications: status updates stack in the bottom-right corner and
      fade out on their own (driven by app.js's toast()). */
@@ -68,7 +60,7 @@
 </style>
 </head>
 <body>
-  <pre id="screen" aria-label="Neovim screen"></pre>
+  <canvas id="screen" aria-label="Neovim screen"></canvas>
   <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 
   <!-- Standalone app: when this page is served BY `rvim --proxy`,
@@ -79,9 +71,12 @@
        swallows that 404 so the static demo's console stays clean. -->
   <script src="proxy-config.js" onerror="/* no proxy config (static demo): app.js runs no-proxy */"></script>
 
-  <!-- Layered: MessagePack global, then the core, then the renderer, then the
-       page glue that composes them. -->
+  <!-- Layered: MessagePack global, then the canvas grid renderer, then the
+       core, then the Neovim UI layer, then the page glue that composes them.
+       grid-renderer.js must precede neovim-ui.js (mount_into reads the
+       GridRenderer global, like neovim.js reads the MessagePack global). -->
   <script src="msgpack.min.js"></script>
+  <script src="grid-renderer.js"></script>
   <script src="neovim.js"></script>
   <script src="neovim-ui.js"></script>
   <script src="neovim-utils.js"></script>

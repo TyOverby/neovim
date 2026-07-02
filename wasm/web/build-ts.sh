@@ -52,6 +52,10 @@ node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim-utils.js" "${DIST}/neovim-ut
 echo "==> assemble dist/ (ESM entries, declarations, page glue, worker)"
 # ESM entry points
 cp "${TMP_LIB}/neovim.mjs" "${TMP_LIB}/neovim-ui.mjs" "${TMP_LIB}/neovim-utils.mjs" "${DIST}/"
+# The <pre>-renderer TESTING UTILITY: plain CommonJS (its require('./neovim-ui.js')
+# resolves to the UMD file, which stays require()-able), NOT umd-wrapped and NOT
+# shipped by build-site/build-lib -- Node tests require() it from dist/.
+cp "${TMP_LIB}/neovim-ui-pre-testutil.js" "${DIST}/"
 # type declarations (.d.ts for require()/UMD consumers, .d.mts for ESM consumers)
 cp "${TMP_LIB}"/*.d.ts "${TMP_LIB}"/*.d.mts "${DIST}/"
 # Declare the UMD <script> global on each core .d.ts (the `export as namespace`

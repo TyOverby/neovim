@@ -1,0 +1,19 @@
+{
+  "name": "grid-renderer",
+  "version": "1.0.0",
+  "description": "Canvas-based character-grid renderer with a bitmap glyph cache and path-drawn box/legacy-computing glyphs. Terminal-style and application-agnostic (not tied to Neovim).",
+  "main": "dist/grid-renderer.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "./build-ts.sh",
+    "pretest": "./build-ts.sh",
+    "test": "node --test test/*.test.js",
+    "promote": "SNAPSHOT_PROMOTE=1 node --test test/*.test.js"
+  },
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "devDependencies": {
+    "@napi-rs/canvas": "^0.1.87",
+    "typescript": "^6.0.3"
+  }
+}

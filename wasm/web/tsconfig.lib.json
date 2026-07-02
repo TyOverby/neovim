@@ -9,6 +9,7 @@
   "files": [
     "src/neovim.ts",
     "src/neovim-ui.ts",
+    "src/neovim-ui-pre-testutil.ts",
     "src/neovim-utils.ts",
     "src/neovim.mts",
     "src/neovim-ui.mts",

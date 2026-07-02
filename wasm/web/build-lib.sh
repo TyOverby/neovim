@@ -80,9 +80,12 @@ done
 
 # The page + library JS is compiled from TypeScript (wasm/web/src) into dist/ by
 # build-ts.sh; the proxy client (proxy-client.js / proxy-reconnect.js, copied
-# below) from wasm/src. Build both first so the bundle always ships fresh artifacts.
+# below) from wasm/src; the canvas grid renderer from wasm/grid-renderer/src.
+# Build all three first so the bundle always ships fresh artifacts.
 "${WEB}/build-ts.sh"
 "${ROOT}/wasm/build-ts.sh"
+"${ROOT}/wasm/grid-renderer/build-ts.sh"
+GRID_RENDERER_DIST="${ROOT}/wasm/grid-renderer/dist"
 
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
@@ -99,6 +102,10 @@ cp "${DIST}"/neovim.d.ts "${DIST}"/neovim-ui.d.ts "${DIST}"/neovim-utils.d.ts \
 # importScripts('proxy-client.js') at runtime when create({ proxy }) is used, so
 # it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.
 cp "${ROOT}/wasm/proxy-client.js" "${ROOT}/wasm/proxy-reconnect.js" "${OUT}/"
+# canvas grid renderer (UMD; sets globalThis.GridRenderer). mount_into (./ui)
+# needs it loaded first -- or passed in via opts.grid_renderer. Types come from
+# the renderer package's tsc output.
+cp "${GRID_RENDERER_DIST}/grid-renderer.js" "${OUT}/"
 # msgpack UMD dep (the <script> global path; also handed to engine-worker.js)
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
 # msgpack ESM build (the .mjs entry imports this so ESM `create()` works with NO
@@ -157,6 +164,7 @@ cat > "${OUT}/package.json" <<JSON
       "default": "./neovim-utils.mjs"
     },
     "./engine-worker.js": "./engine-worker.js",
+    "./grid-renderer.js": "./grid-renderer.js",
     "./nvim.js": "./nvim.js",
     "./nvim.wasm": "./nvim.wasm",${VARIANT_EXPORTS}
     "./msgpack.min.js": "./msgpack.min.js",
@@ -193,8 +201,13 @@ Import from the bundle (host it under any same-origin path, e.g. /lib/):
 
   // or UMD via <script> (sets globalThis.Neovim / globalThis.NeovimUI):
   // <script src="/lib/msgpack.min.js"></script>
+  // <script src="/lib/grid-renderer.js"></script>   <!-- before neovim-ui.js -->
   // <script src="/lib/neovim.js"></script>
   // <script src="/lib/neovim-ui.js"></script>
+
+  // mount_into paints into a <canvas> via grid-renderer.js (load it first, or
+  // pass opts.grid_renderer). ESM: import GridRenderer from the UMD global
+  // after a <script> load, or pass the module object explicitly.
 
 baseUrl makes engine-worker.js, nvim.js, nvim.wasm and the nvim-<variant>.data
 package all resolve under that path. NOTE: new Worker() is same-origin only, so

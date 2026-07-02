@@ -58,6 +58,11 @@ function resolveStaticPath(urlPath) {
     return path.join(BUILD, urlPath);
   }
   if (urlPath === '/msgpack.min.js') { return MSGPACK; }
+  // The canvas grid renderer: its own package (wasm/grid-renderer), built by
+  // wasm/grid-renderer/build-ts.sh into dist/grid-renderer.js (UMD).
+  if (urlPath === '/grid-renderer.js') {
+    return path.join(WASM, 'grid-renderer', 'dist', 'grid-renderer.js');
+  }
   // The proxy client + reconnect facade live one dir up (wasm/), not in wasm/web;
   // the engine worker importScripts them relative to its own URL, so they must
   // resolve at the bundle root.
@@ -113,6 +118,11 @@ function warnIfBuildStale() {
   if (!fs.existsSync(path.join(DIST, 'neovim.js'))) {
     console.warn('  WARNING: missing ' + path.join(DIST, 'neovim.js') +
       ' — run wasm/web/build-ts.sh (or `npm run build`) to compile the TypeScript page + library.');
+  }
+  // The canvas renderer is its own package.
+  if (!fs.existsSync(path.join(WASM, 'grid-renderer', 'dist', 'grid-renderer.js'))) {
+    console.warn('  WARNING: missing wasm/grid-renderer/dist/grid-renderer.js' +
+      ' — run wasm/grid-renderer/build-ts.sh (needs `npm install` there once).');
   }
 }
 

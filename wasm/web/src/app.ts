@@ -16,7 +16,7 @@ declare const NeovimUI: any;
 (function () {
   const win = window as any;
   const toastsEl = document.getElementById('toasts');
-  const screenEl = document.getElementById('screen') as HTMLElement;
+  const screenEl = document.getElementById('screen') as HTMLCanvasElement;
 
   // Status updates surface as toast notifications: a message slides into the
   // bottom-right corner and fades out on its own. Consecutive duplicates are
@@ -180,11 +180,12 @@ declare const NeovimUI: any;
     nvim.request('nvim_exec_lua', [ lua, [] ]).catch(function () {});
   }
 
-  // 2. Renderer: mount a default grid UI into the <pre> and forward keystrokes.
-  //    No fixed cols/rows -> mount_into auto-sizes the grid to fill #screen and
-  //    tracks its size (drag the resize handle / resize the window to reflow).
-  //    font_family / font_size are applied to the element (and pin a stable
-  //    line-height for the grid math).
+  // 2. Renderer: mount the canvas grid UI into the <canvas> and forward
+  //    keystrokes. No fixed cols/rows -> mount_into auto-sizes the grid to
+  //    fill #screen (backing store = CSS box x devicePixelRatio) and tracks
+  //    its size (resize the window to reflow). Cells are painted through
+  //    grid-renderer.js: a bitmap glyph cache + path-drawn box-drawing /
+  //    legacy-computing glyphs (see wasm/grid-renderer).
   const ui = NeovimUI.mount_into(nvim, screenEl, {
     font_family: 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
     font_size: 16,

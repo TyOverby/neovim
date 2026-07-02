@@ -49,10 +49,12 @@ points `import` at the `.mjs` and `main`/`require` at the UMD — so the bundle 
 be published to npm or hosted on any static path.
 
 ```html
-<pre id="screen"></pre>
+<canvas id="screen"></canvas>
 
-<!-- msgpack global, then the headless core, then the default renderer. -->
+<!-- msgpack global, the canvas grid renderer, the headless core, then the
+     default renderer (grid-renderer.js must precede neovim-ui.js). -->
 <script src="msgpack.min.js"></script>   <!-- @msgpack/msgpack UMD: globalThis.MessagePack -->
+<script src="grid-renderer.js"></script> <!-- globalThis.GridRenderer -->
 <script src="neovim.js"></script>        <!-- globalThis.Neovim -->
 <script src="neovim-ui.js"></script>     <!-- globalThis.NeovimUI -->
 <script>
@@ -71,13 +73,16 @@ be published to npm or hosted on any static path.
     if (s.kind === 'error') { console.error('engine error', s.error); }
   });
 
-  // 2. Renderer: mount the default grid UI into a <pre> and forward keystrokes.
-  //    Rendering is a COLOURED character grid: it decodes the ext_linegrid
-  //    highlight stream and emits colour spans (fg/bg/bold/italic/underline/
-  //    undercurl/strikethrough/reverse), with a solid cursor block.
-  //    Opts: { font_family, font_size, cols, rows } (all optional). Omit cols/rows
-  //    to AUTO-SIZE the grid to the element and track its resizes (see below);
-  //    pass cols/rows for a FIXED grid.
+  // 2. Renderer: mount the default grid UI into a <canvas> and forward
+  //    keystrokes. Painting goes through grid-renderer.js (a bitmap glyph
+  //    cache + putImageData blits, with box-drawing/braille/legacy-computing
+  //    glyphs drawn as PATHS so they connect seamlessly): it decodes the
+  //    ext_linegrid highlight stream into per-cell colors (fg/bg/bold/italic/
+  //    underline variants/strikethrough/reverse) with a solid cursor block.
+  //    Opts: { font_family, font_size, cols, rows, default_fg, default_bg,
+  //    grid_renderer } (all optional). Omit cols/rows to AUTO-SIZE the grid to
+  //    the element and track its resizes (see below); pass cols/rows for a
+  //    FIXED grid.
   const ui = NeovimUI.mount_into(nvim, document.getElementById('screen'), {
     font_family: 'ui-monospace, monospace',
     font_size: 16,
@@ -233,33 +238,48 @@ The returned **instance** (also reachable synchronously off the facade):
 | `ready` | A `Promise` that resolves to the instance once `nvim_get_api_info` round-trips (and `chan` is set). |
 | `dispose()` | Tear down the transport / engine and reject in-flight requests. |
 
-`NeovimUI.mount_into(instance, el, { font_family, font_size, cols, rows })` →
-`{ screen, resize(c, r), dispose(), cols, rows }`. Wires the instance to a
-`<pre>`, attaches the UI (`nvim_ui_attach` with `ext_linegrid`), renders on
-flush, and forwards keystrokes. `screen` is a `NeovimUI.Screen` (the headless
-grid model); `resize(c, r)` issues `nvim_ui_try_resize`; `dispose()` unsubscribes
-from `redraw` **and** disconnects the auto-resize observer; `cols`/`rows` are the
-dimensions it attached with. `NeovimUI.Screen` and `NeovimUI.keyToNvim` are also
+`NeovimUI.mount_into(instance, canvas, { font_family, font_size, cols, rows,
+default_fg, default_bg, grid_renderer })` → `{ screen, renderer, resize(c, r),
+dispose(), cols, rows }`. Wires the instance to a **`<canvas>`**, attaches the
+UI (`nvim_ui_attach` with `ext_linegrid`), paints on flush through the
+**grid-renderer** package (`wasm/grid-renderer` — a bitmap glyph cache blitted
+with `putImageData`, plus box-drawing / block-element / braille / powerline /
+legacy-computing glyphs drawn as **paths** so they fill cells exactly and
+connect seamlessly; see `wasm/grid-renderer/README.md`), and forwards
+keystrokes. `screen` is a `NeovimUI.Screen` (the headless grid model);
+`renderer` is the underlying `GridRenderer`; `resize(c, r)` issues
+`nvim_ui_try_resize`; `dispose()` unsubscribes from `redraw` **and**
+disconnects the auto-resize observer; `cols`/`rows` are the dimensions it
+attached with. `NeovimUI.Screen`, `NeovimUI.keyToNvim`, and
+`NeovimUI.screenToCells` (the Screen → renderer-cell resolution) are also
 exported for headless use.
+
+Like msgpack for the core, the renderer dependency resolves at runtime: load
+`grid-renderer.js` (UMD → `globalThis.GridRenderer`) before `neovim-ui.js`, or
+pass the module as `opts.grid_renderer`. (The legacy `<pre>` DOM renderer
+survives as a testing utility — `wasm/web/src/neovim-ui-pre-testutil.ts`, plain
+CommonJS in `web/dist/`, not shipped in the bundles.)
 
 All opts are optional:
 
 | Opt | Meaning |
 |---|---|
-| `font_family` | CSS `font-family` applied to `el` (default: leave the page CSS as-is). **Must be monospace** for the grid to line up. |
-| `font_size` | A number (→ `px`) or a CSS length string, applied to `el`. `mount_into` also pins a deterministic integer-px `line-height` (ratio 1.2) so the row math is stable. |
-| `cols`, `rows` | **Explicit, fixed** grid size. Passing *either* disables auto-sizing (a missing one defaults to 80/24). |
+| `font_family` | CSS `font-family` for the cell font. **Must be monospace** for the grid to line up. |
+| `font_size` | A number, CSS px (default 16). The canvas backing store renders at `font_size × devicePixelRatio` so HiDPI output is crisp. |
+| `cols`, `rows` | **Explicit, fixed** grid size. Passing *either* disables auto-sizing (a missing one defaults to 80/24); the canvas is sized to exactly fit the grid. |
+| `default_fg`, `default_bg` | Base colors for "default terminal color" cells (defaults `0xd4d4d4` / `0x000000`). |
+| `grid_renderer` | The grid-renderer module (default: `globalThis.GridRenderer`). |
 
 **Auto-size + resize tracking.** With *neither* `cols` nor `rows` given,
-`mount_into` measures the font's cell metrics (a hidden monospace probe) and
-`el`'s content box, attaches a grid that **fills the element**, and installs a
-`ResizeObserver` on `el`. On resize it recomputes cols/rows and — if they changed
-— issues `nvim_ui_try_resize` (coalesced to one call per animation frame so a
-drag doesn't spam the engine); the engine's `grid_resize` redraw reflows the
-`Screen`, so the grid follows the element. If `el` has no layout yet (0×0), it
-falls back to 80×24 rather than attaching a degenerate grid. `dispose()`
-disconnects the observer. Passing explicit `cols`/`rows` keeps a fixed grid with
-no observer.
+`mount_into` sizes the canvas backing store to the element's CSS box (×
+`devicePixelRatio`), fits as many whole cells as fit, and installs a
+`ResizeObserver` on the canvas. On resize it refits the backing store,
+repaints, and — if the cell grid changed — issues `nvim_ui_try_resize`
+(coalesced to one call per animation frame so a drag doesn't spam the engine);
+the engine's `grid_resize` redraw reflows the `Screen`, so the grid follows
+the element. If the canvas has no layout yet (0×0), it falls back to 80×24
+rather than attaching a degenerate grid. `dispose()` disconnects the observer.
+Passing explicit `cols`/`rows` keeps a fixed grid with no observer.
 
 #### The helper layer (`neovim-utils.js`)
 
@@ -750,7 +770,8 @@ node wasm/web/serve.js          # plain static server (default :8000)
 ```
 
 The page (`wasm/web/`) runs `nvim --embed` in a Web Worker and renders the
-`ext_linegrid` grid into a `<pre>` with a small msgpack-RPC client on the main
+`ext_linegrid` grid into a `<pre>` (since replaced by the canvas grid renderer)
+with a small msgpack-RPC client on the main
 thread — **no wasm and no JSPI on the page**, only in the Worker. Click the grid
 and type. See `docs/history/stage3.md` for the design and `wasm/web/` for the code.
 
@@ -808,7 +829,7 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `proxy-reconnect.js` | Stage 5 **ReconnectingProxy** (opt-in): a stable facade at `self.__nvimProxy` that delegates `request` to the live client (fast-rejecting during an outage so suspended syscalls return `-EIO`, never hang), `close()`s the dead client on drop, preserves the push router across reconnects, and re-dials with backoff. Wired by `web/engine-worker.js`. |
 | `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families, jailed to `--root`), `cmd/rvim` (the binary; `--root`/`--port`/`--proxy`/`--assets-dir`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `docs/history/stage5.md`. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
-| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + DOM `mount_into`), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `rvim --proxy`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + canvas `mount_into` painting through `grid-renderer.js`; the legacy `<pre>` renderer lives on as the `neovim-ui-pre-testutil.js` test utility), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by `rvim --proxy`'s generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
 | `docs/history/stage1.md` / `docs/history/stage2.md` / `docs/history/stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)
@@ -870,7 +891,7 @@ needs no cross-origin isolation.
    page main thread (neovim.js + neovim-ui.js)  Web Worker (engine-worker.js)
    ┌───────────────────────────────┐ postMessage ┌──────────────────────────┐
    │ keydown → nvim_input  ────────┼────────────▶│ nvim --embed (wasm)      │
-   │ redraw  → char grid → <pre> ◀─┼─────────────┤ editor + ext_linegrid    │
+   │ redraw → grid → <canvas>    ◀─┼─────────────┤ editor + ext_linegrid    │
    └───────────────────────────────┘             └──────────────────────────┘
        pure JS, no wasm, no JSPI                   poll() suspends via JSPI
 ```
@@ -886,9 +907,12 @@ needs no cross-origin isolation.
   1. `nvim_ui_attach`es with `{ ext_linegrid: true }`;
   2. decodes `redraw` notifications (`grid_resize`, `grid_line`, `grid_scroll`,
      `grid_cursor_goto`, `flush`) into a 2-D character grid;
-  3. renders that grid into a `<pre>` **in colour** — it decodes the highlight
-     stream (`default_colors_set`, `hl_attr_define`, per-cell hl ids) into grouped
-     colour spans (fg/bg/bold/italic/underline/undercurl/strikethrough/reverse).
+  3. paints that grid onto a `<canvas>` **in colour** through the grid-renderer
+     package — it decodes the highlight stream (`default_colors_set`,
+     `hl_attr_define`, per-cell hl ids) into per-cell colors
+     (fg/bg/bold/italic/underline variants/strikethrough/reverse), rasterizes
+     each distinct cell once into a cached bitmap, blits with `putImageData`,
+     and draws box-drawing/braille/legacy-computing glyphs as paths.
      The command line and messages are drawn by Neovim into the bottom grid rows
      (we don't request `ext_cmdline`/`ext_messages`), so `:`, `:w`, etc. show up;
   4. maps DOM `keydown` → `nvim_input`.
