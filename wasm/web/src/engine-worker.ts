@@ -163,7 +163,7 @@ onmessage = function (e: MessageEvent) {
           }
         }
         S.__nvimProxyShadows = shadows;
-        // Land the editor in the server's working dir (the project dir rvim was
+        // Land the editor in the server's working dir (the project dir tvim was
         // started in / the remote's login dir) unless the page supplied a cwd.
         // pre.js chdirs into it (creating the MEMFS stub chain) before main().
         if (!hasUserCwd && helloResult && typeof helloResult.cwd === 'string' && helloResult.cwd) {
@@ -196,7 +196,7 @@ onmessage = function (e: MessageEvent) {
 // Chrome's DevTools extensibility API renders performance entries carrying a
 // `detail.devtools` payload in the Performance panel: measures tagged
 // `dataType:'track-entry'` land on a named CUSTOM TRACK (ours: "IO proxy",
-// group "rvim", shown under this worker), and marks tagged `dataType:'marker'`
+// group "tvim", shown under this worker), and marks tagged `dataType:'marker'`
 // render in the Timings track (the API does not place marks on custom tracks).
 // So: request/response pairs (distinct start/end) -> measures on the track;
 // one-shot events (server pushes, connection status) -> marks.
@@ -217,7 +217,7 @@ function ioPerfMeasure(name: string, start: number, color: string, props: Array<
       start: start,
       end: S.performance.now(),
       detail: { devtools: {
-        dataType: 'track-entry', track: 'IO proxy', trackGroup: 'rvim',
+        dataType: 'track-entry', track: 'IO proxy', trackGroup: 'tvim',
         color: color, tooltipText: name, properties: props,
       } },
     });

@@ -11,7 +11,7 @@
 //     worker importScripts at runtime                     -> wasm/
 //
 // So you can edit the page JS and just reload — only pre.js/runtime changes need
-// a rebuild. The standalone-app server is the Go `rvim` binary (wasm/rvim/); this
+// a rebuild. The standalone-app server is the Go `tvim` binary (wasm/tvim/); this
 // is just the no-proxy dev server.  Usage:  node wasm/web/serve.js [port]
 'use strict';
 
@@ -92,7 +92,7 @@ function serveStaticFile(file, urlPath, res) {
 function handleRequest(req, res) {
   const urlPath = decodeURIComponent(req.url.split('?')[0]);
   // The page unconditionally loads /proxy-config.js (the standalone-app hook):
-  // the rvim Go server GENERATES it with the real proxy config so
+  // the tvim Go server GENERATES it with the real proxy config so
   // visiting that server is the standalone app. This plain static dev server has
   // NO proxy, so serve a no-op 200 (not a 404) — the page then runs as the
   // ordinary no-proxy demo (window.__NVIM_PROXY stays undefined).

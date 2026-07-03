@@ -18,9 +18,9 @@ to the repo root, so they run from anywhere.
 | `cmake` + `ninja` | the wasm engine | |
 | A **native** build in `build/` | cross-compile codegen | provides `build/lib/libnlua0.so` (`cmake --build build --target nlua0`) + host `luajit` at `.deps/usr/bin/luajit`. |
 | Node ≥ 24 (26 tested) | engine host, dev server, JS tests | Node 22 works with `--experimental-wasm-jspi`; ≤ 20 unsupported. The flag only goes on the top-level node — the engine worker inherits `process.execArgv`. |
-| `go` ≥ 1.24 | the `rvim` server + its tests | deps are fetched from the module proxy on first build (pinned by `go.sum`); needs network the first time, then cached. |
-| `gh` (authenticated) | `rvim/download-rvim.sh` only | |
-| Chrome/Chromium ≥ 137 | browser run + `rvim/e2e` | JSPI on by default. The e2e **skips** (not fails) without it. |
+| `go` ≥ 1.24 | the `tvim` server + its tests | deps are fetched from the module proxy on first build (pinned by `go.sum`); needs network the first time, then cached. |
+| `gh` (authenticated) | `tvim/download-tvim.sh` only | |
+| Chrome/Chromium ≥ 137 | browser run + `tvim/e2e` | JSPI on by default. The e2e **skips** (not fails) without it. |
 
 ## Canonical build order
 
@@ -42,8 +42,8 @@ wasm/web/build-lib.sh _lib                    # importable bundle in _lib/
 wasm/web/build-site.sh _site
 
 # 2d. OR the standalone server (real FS/procs/PTY/LSP)
-cd wasm/rvim && go build -o rvim ./cmd/rvim
-(cd ~/project && rvim --assets-dir <build-site output>)   # editor lands in rvim's cwd
+cd wasm/tvim && go build -o tvim ./cmd/tvim
+(cd ~/project && tvim --assets-dir <build-site output>)   # editor lands in tvim's cwd
 ```
 
 The page + library JS is **TypeScript** in `web/src/*.ts`, compiled by
@@ -77,9 +77,9 @@ not shipped in the site/lib bundles).
 | `build-nvim.sh [extra cmake args…]` | Cross-compiles `nvim` → `build-wasm/bin/nvim.{js,wasm}`; compiles the wasm/ host TS (`build-ts.sh`) and copies the Node engine host (`worker.js`, `proxy-client.js`, `proxy-reconnect.js`) next to it; stages + `file_packager`s the **three runtime variants** (`nvim-{full,core,minimal}.data` + `.data.js`); generates `doc/tags` for `full`; runs the **boot gate**; installs `wasm/` + `wasm/web` npm deps. Extra args pass through to the configure `cmake`. | Needs `build-deps.sh` done + `build/lib/libnlua0.so` + `.deps/usr/bin/luajit`. Runtime is **not** baked into `nvim.wasm` — it's packaged out-of-band per variant (see *Runtime variants* below). |
 | `web/build-site.sh [out=_site]` | Flat, relative-path **demo site** (all three variants, msgpack UMD, a no-op `proxy-config.js`, `.nojekyll`). For GitHub Pages / any static host. Runs `build-ts.sh` first, then ships `web/dist/`. | Needs `build-nvim.sh` + `npm install` in `wasm/web`. |
 | `web/build-lib.sh [out=_lib] [version] [--variant full\|core\|minimal\|all]` | Redistributable **npm library** bundle: UMD + ESM entry points + **`.d.ts`/`.d.mts` types**, engine worker, msgpack (UMD + ESM under `msgpack.esm/`), engine assets, generated `package.json` with an `exports` map (incl. `types`). Runs `build-ts.sh` first. `--variant` selects which runtime(s) to ship (default `full`; `all` = switchable at runtime). Version defaults from `CMakeLists.txt`. | Same prereqs as `build-site.sh`. |
-| `rvim/build-release.sh` | Cross-compiles **self-contained `rvim` binaries** (`CGO_ENABLED=0`, `-tags embed_assets`, bundle baked in) into `rvim/dist/` for a target set. | Needs the wasm engine built. `TARGETS="linux/amd64 darwin/arm64" ./build-release.sh` to override (default: linux/darwin × amd64/arm64). Embeds via `web/build-site.sh server/site` first. |
-| `rvim/precompress.sh [dir=server/site]` | Gzips embeddable assets in place (`.gz`, drops the raw) so the embedded binary serves `Content-Encoding: gzip`. Idempotent; ~47 MB → ~20 MB binary. **Only** run on the embed copy. CI runs it before the embed build. | Run between `build-site.sh server/site` and `go build -tags embed_assets`. |
-| `rvim/download-rvim.sh [os] [arch]` | Pulls the latest **CI-built** `rvim-<os>-<arch>` artifact (from `deploy-wasm-pages.yml`) → `./rvim`. Defaults to host os/arch. | Needs `gh`. Env: `REPO` (default `TyOverby/neovim`), `BRANCH` (default `wasm-build`), `OUT` (default `.`). |
+| `tvim/build-release.sh` | Cross-compiles **self-contained `tvim` binaries** (`CGO_ENABLED=0`, `-tags embed_assets`, bundle baked in) into `tvim/dist/` for a target set. | Needs the wasm engine built. `TARGETS="linux/amd64 darwin/arm64" ./build-release.sh` to override (default: linux/darwin × amd64/arm64). Embeds via `web/build-site.sh server/site` first. |
+| `tvim/precompress.sh [dir=server/site]` | Gzips embeddable assets in place (`.gz`, drops the raw) so the embedded binary serves `Content-Encoding: gzip`. Idempotent; ~47 MB → ~20 MB binary. **Only** run on the embed copy. CI runs it before the embed build. | Run between `build-site.sh server/site` and `go build -tags embed_assets`. |
+| `tvim/download-tvim.sh [os] [arch]` | Pulls the latest **CI-built** `tvim-<os>-<arch>` artifact (from `deploy-wasm-pages.yml`) → `./tvim`. Defaults to host os/arch. | Needs `gh`. Env: `REPO` (default `TyOverby/neovim`), `BRANCH` (default `wasm-build`), `OUT` (default `.`). |
 
 ## Running the engine directly (headless, Node)
 
@@ -101,9 +101,9 @@ packages are a browser-only concern.
 | `cd wasm/grid-renderer && npm run bench` | Renderer benchmark: per-frame wall time for scroll/edit/noop/sprites scenarios + cache-get/blit/rasterize microbenches (seeded-deterministic content; cairo-on-CPU — treat results as relative, run before/after a perf change). Flags: `--cols/--rows/--dpr/--frames`, or name specific scenarios. | Needs `npm install` in `wasm/grid-renderer`. |
 | `cd wasm/grid-renderer && npm test` | The canvas renderer's own suite: **snapshot (golden-image) tests** of every path-drawn Unicode block + text styles/decorations against committed PNGs in `test/baselines/` (on node-canvas/cairo, no browser; NOT a skia binding - those retain every blit payload and OOM sustained rendering), plus unit tests of the glyph cache/LRU, damage tracking, cursor, and wide cells. On failure inspect `test/__artifacts__/<name>.{actual,diff}.png`; accept intended changes with `npm run promote` (re-review the images, then commit the baselines). Text-scene baselines are font-dependent (DejaVu Sans Mono assumed); sprite scenes are pure geometry and machine-stable. | Needs `npm install` in `wasm/grid-renderer`. No engine build needed. |
 | `node wasm/web/reconnect.test.js` | The `ReconnectingProxy` fault-injection test: real facade + real `proxy-client` + a mock WS server, with a mid-flight drop → asserts in-flight fail-fast, during-outage fail-fast, auto-reconnect, pushes survive. Drives the compiled `wasm/proxy-{client,reconnect}.js`. | Needs `ws` + the wasm/ TS built (both via `build-nvim.sh`, or `cd wasm && npm install && ./build-ts.sh`). |
-| `cd wasm/rvim && go test ./...` | Frame codec unit tests + the **in-process conformance suite** (every IO seam: base/fs/proc/pty/sock, the jail, disconnect cleanup, the SSH-stdio relay, `--rc`, the session-host daemon). No Node, no network. | If `$HOME/go` is read-only, prefix `GOMODCACHE=/tmp/gomodcache`. Run under `-race` for the proc/pty/sock paths. |
-| `cd wasm/rvim && go run ./cmd/conformance` | The same conformance scenarios with a pass/fail summary (non-test entry point). | |
-| `cd wasm/rvim/e2e && go test -v` | **Headless-Chrome** browser→engine→Go-server e2e: real FS read/write, `system()` spawn, `glob`, a `:terminal` PTY, the `--remote` relay, `--rc` modes, durable-terminal rehydrate. | **Separate Go module** (keeps chromedp out of the production build). **Skips** without Chrome or a built bundle. Point at a prebuilt bundle with `RVIM_BUNDLE=<build-site output>`; else it runs `build-site.sh` itself. |
+| `cd wasm/tvim && go test ./...` | Frame codec unit tests + the **in-process conformance suite** (every IO seam: base/fs/proc/pty/sock, the jail, disconnect cleanup, the SSH-stdio relay, `--rc`, the session-host daemon). No Node, no network. | If `$HOME/go` is read-only, prefix `GOMODCACHE=/tmp/gomodcache`. Run under `-race` for the proc/pty/sock paths. |
+| `cd wasm/tvim && go run ./cmd/conformance` | The same conformance scenarios with a pass/fail summary (non-test entry point). | |
+| `cd wasm/tvim/e2e && go test -v` | **Headless-Chrome** browser→engine→Go-server e2e: real FS read/write, `system()` spawn, `glob`, a `:terminal` PTY, the `--remote` relay, `--rc` modes, durable-terminal rehydrate. | **Separate Go module** (keeps chromedp out of the production build). **Skips** without Chrome or a built bundle. Point at a prebuilt bundle with `TVIM_BUNDLE=<build-site output>`; else it runs `build-site.sh` itself. |
 
 ## What `build-nvim.sh` does internally (so changes don't break it)
 
@@ -128,27 +128,27 @@ packages are a browser-only concern.
   `proxy-client.js` / `proxy-reconnect.js` / `worker.js` before copying them next
   to `nvim.js` in `build-wasm/bin`.
 
-## The `rvim` standalone server (runtime usage)
+## The `tvim` standalone server (runtime usage)
 
-Single Go binary, multiple modes (all from `wasm/rvim/cmd/rvim`). Binds
+Single Go binary, multiple modes (all from `wasm/tvim/cmd/tvim`). Binds
 `127.0.0.1` only; visiting the page IS the standalone app. The IO host's
 filesystem is mounted WHOLE at the editor's root (no jail, no mount prefix);
-the editor lands in the io-proxy's working dir (rvim's cwd locally; the ssh
+the editor lands in the io-proxy's working dir (tvim's cwd locally; the ssh
 login dir with `--remote`). Site/rc files are MEMFS overlays shadowed on top
 (`/usr/share/nvim`, `/dev`, `/proc`, plus the `--rc`-dependent home/config).
 
 ```sh
-(cd ~/project && rvim --port 8001)      # local (same machine)
-./rvim --remote user@host               # three-tier over SSH stdio
+(cd ~/project && tvim --port 8001)      # local (same machine)
+./tvim --remote user@host               # three-tier over SSH stdio
 ```
 
 Key flags: `--port` (8001), `--assets-dir` (serve the bundle off disk for dev)
 vs. embedded (`-tags embed_assets`), `--rc remote|local|builtin` (where the
 in-browser nvim's config / `$HOME` comes from; default remote with `--remote`,
-else builtin), `--remote-rvim` (path to `rvim` on the remote). **Internal**
+else builtin), `--remote-tvim` (path to `tvim` on the remote). **Internal**
 (don't pass by hand): `--serve-stdio` (the remote endpoint), `--session-host` /
 `--session` / `--daemon-sock` (the durable-PTY daemon, auto-spawned by the
-io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
+io-proxy). See `tvim/README.md` and `docs/history/stage5.md`.
 
 ## Layout map
 
@@ -164,6 +164,6 @@ io-proxy). See `rvim/README.md` and `docs/history/stage5.md`.
 | `grid-renderer/` | the **canvas grid renderer** npm package (app-agnostic): `src/renderer.ts` (GridRenderer: glyph cache + putImageData), `src/rasterizer.ts`, `src/sprite-canvas.ts` (ghostty coverage-canvas port), `src/draw/*` (path-drawn box/block/braille/powerline/branch/legacy-computing glyphs, ported from ghostty `src/font/sprite/draw/*.zig`), `test/` (snapshot harness + baselines), `build-ts.sh` + `tools/bundle-umd.mjs`. See `grid-renderer/README.md`. |
 | `web/src/` | browser target **TypeScript source**: `neovim.ts` (RPC core), `neovim-ui.ts` (headless Screen + canvas UI via grid-renderer), `neovim-ui-pre-testutil.ts` (legacy `<pre>` renderer, test utility), `neovim-utils.ts` (helpers), `*.mts` (ESM entry points), `app.ts` (page glue), `engine-worker.ts` (Web Worker host). |
 | `web/` | build + run harness: `build-ts.sh` (+ `tsconfig.*.json`, `tools/umd-wrap.mjs`), `serve.js`, `build-site.sh`, `build-lib.sh`, `e2e.test.js`, `reconnect.test.js`. `dist/` = gitignored `tsc` output (the `.js`/`.mjs`/`.d.ts` everything else consumes). |
-| `rvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/rvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |
+| `tvim/` | the Go server: `server/` (HTTP + `/proxy` WS + handler families + session-host), `cmd/tvim` (binary), `cmd/conformance`, `proxy/` (codec), `conformance/` (in-process suite), `e2e/` (headless-Chrome, separate module). |
 | `docs/history/stage{1..6}.md` | design history per stage (stage 6 = the canvas grid renderer). |
 | `*.log` | gitignored build logs from prior runs. |

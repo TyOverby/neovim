@@ -1,8 +1,8 @@
-# Stage 5 — `rvim`: the productionized standalone app (three-tier + Go)
+# Stage 5 — `tvim`: the productionized standalone app (three-tier + Go)
 
 > **Status: design + spikes (not yet built).** Stage 4 shipped a working
 > single-machine standalone app (Node server, FS/proc/PTY/LSP/sockets proxied,
-> jailed to `--root`). Stage 5 productionizes it into `rvim` (remote vim): a
+> jailed to `--root`). Stage 5 productionizes it into `tvim` (tunneling vim): a
 > three-tier architecture that **separates the machine serving the web page from
 > the machine holding the files**, a native dependency-free server in Go, robust
 > reconnect/error handling, and end-to-end browser tests. The two riskiest
@@ -40,7 +40,7 @@ over SSH.
                  │  http + websocket   (the frame protocol over a WS message)
                  ▼
         ┌────────────────────┐        ssh (stdio)        ┌─────────────┐
-        │ rvim  (app/web)    │ ───────────────────────▶  │ rvim        │
+        │ tvim  (app/web)    │ ───────────────────────▶  │ tvim        │
         │ serves page,       │   or unix pipe / in-proc  │ --serve-    │
         │ routes IO, FS jail │ ◀───────────────────────  │ stdio       │
         └────────────────────┘    (the same frames)      └─────────────┘
@@ -55,7 +55,7 @@ Three transports, **one protocol** (stage 4's frame format, unchanged):
 | app server ↔ remote     | SSH stdio (default)  | length-prefix reassembly  |
 | app server ↔ remote (local case) | in-process / unix pipe | direct / length-prefix |
 
-When you run `rvim` **on the machine you want to edit**, there is no remote hop:
+When you run `tvim` **on the machine you want to edit**, there is no remote hop:
 the io-proxy runs **in-process** (no transport at all), so the local case stays
 exactly as simple as stage 4.
 
@@ -63,16 +63,16 @@ exactly as simple as stage 4.
 
 ## 2. One binary, three modes, io-proxy as a library
 
-`rvim` is a single Go binary. The io-proxy (all of stage 4's FS/proc/PTY/socket
+`tvim` is a single Go binary. The io-proxy (all of stage 4's FS/proc/PTY/socket
 handlers, reimplemented in Go) is a **library package**, wired to a transport by
 the binary:
 
-- **app-server mode** (`rvim …`): serves the page + WebSocket, owns the FS
+- **app-server mode** (`tvim …`): serves the page + WebSocket, owns the FS
   routing table, and either calls the io-proxy library **in-process** (local) or
   forwards frames to a remote over SSH (`--remote`).
-- **remote mode** (`rvim --serve-stdio`, internal): the io-proxy library reading
+- **remote mode** (`tvim --serve-stdio`, internal): the io-proxy library reading
   frames on **stdin** and writing on **stdout**. This is what the app server
-  launches via `ssh host rvim --serve-stdio`. It binds no ports.
+  launches via `ssh host tvim --serve-stdio`. It binds no ports.
 - the **local case** is just app-server mode driving the io-proxy library
   directly — no `--serve-stdio`, no SSH.
 
@@ -90,7 +90,7 @@ assets, goroutine-per-stream concurrency, and `creack/pty` to replace node-pty.
 
 ## 3. The remote transport: SSH stdio
 
-`rvim --remote user@host …` runs `ssh user@host rvim --serve-stdio` and uses the
+`tvim --remote user@host …` runs `ssh user@host tvim --serve-stdio` and uses the
 **ssh process's stdin/stdout as the pipe**. SSH handles encryption, auth, and
 host-key verification; the remote io-proxy never binds a port. Spike A confirmed
 the frame protocol round-trips over a child process's stdio (mechanically
@@ -98,7 +98,7 @@ identical — ssh just adds an encrypted hop in front of the same two pipes),
 including 64 KiB binary payloads, interleaved request demux, and prompt failure
 on hangup.
 
-- **v1 assumption:** the `rvim` binary is already on the remote's `PATH`. (A
+- **v1 assumption:** the `tvim` binary is already on the remote's `PATH`. (A
   later nicety: on `command not found`, scp the matching `GOOS/GOARCH` binary
   over the same SSH connection and retry — Go cross-compile makes this cheap.)
 - A raw byte pipe (unlike a WebSocket) has no message boundaries, so the read
@@ -171,12 +171,12 @@ the two machines that *have* a disk:
 So a flag value picks **which layer** owns a prefix:
 
 ```
-rvim --site bundled   # $VIMRUNTIME from the wasm bundle  (DEFAULT — version-matched)
-rvim --site local     # from the app-server machine's installed nvim
-rvim --site remote    # from the remote host's installed nvim
-rvim --rc   remote     # ~/.config/nvim from the remote (DEFAULT for --remote)
-rvim --rc   local      # from the app-server machine
-rvim --rc   bundled    # empty / none
+tvim --site bundled   # $VIMRUNTIME from the wasm bundle  (DEFAULT — version-matched)
+tvim --site local     # from the app-server machine's installed nvim
+tvim --site remote    # from the remote host's installed nvim
+tvim --rc   remote     # ~/.config/nvim from the remote (DEFAULT for --remote)
+tvim --rc   local      # from the app-server machine
+tvim --rc   bundled    # empty / none
 ```
 
 `--site bundled` is the strong default and the *safe* one: a runtime from a
@@ -250,8 +250,8 @@ the current client, on `ws.onclose` calls `close()` + re-dials with backoff, and
 running shell, an `ssh`/`top`/`vim` inside it, scrollback, cwd, history — that the
 user can't just "re-trigger." So PTYs get a deliberate exception.
 
-`rvim --session-host` is a persistent per-user daemon on the IO host (the remote,
-under `--remote`) listening on a unix socket (`$XDG_RUNTIME_DIR/rvim/host.sock`,
+`tvim --session-host` is a persistent per-user daemon on the IO host (the remote,
+under `--remote`) listening on a unix socket (`$XDG_RUNTIME_DIR/tvim/host.sock`,
 singleton via flock, auto-spawned `ssh-agent`-style and detached with `setsid`).
 It owns the PTY children **outside any single connection**, keyed by a stable
 per-tab session id the browser mints (carried in `?session=` on the `/proxy` URL;
@@ -284,7 +284,7 @@ the daemon already keeps the shells alive. The bridge:
   consistent on both sides; no persisted id, **no C change, no browser-engine
   change, no wasm recompile**.
 - **The restore hook.** A runtime-injected replacement for the `term://` restore
-  autocmd (only when a proxy is configured) adds `RVIM_ADOPT=1` to the env during a
+  autocmd (only when a proxy is configured) adds `TVIM_ADOPT=1` to the env during a
   `:mksession` restore (`g:SessionLoad`); the io-proxy turns that into `adopt:true`.
   It jobstarts a **list** (argv), not a string — `jobstart(string)` shell-wraps
   (`sh`→`{sh,-c,sh}`) and would never match the original `{sh}`.
@@ -313,7 +313,7 @@ fresh.
 
 - **App server binds `127.0.0.1` by default** (as stage 4). This covers the
   common prod path too: behind an nginx reverse proxy doing Kerberos auth, nginx
-  talks to `rvim` on loopback.
+  talks to `tvim` on loopback.
 - **Binding beyond loopback requires a token + TLS** — a deliberate, guarded
   mode, never the default. Without it, anyone who can reach the port gets a shell
   on the remote.
@@ -327,11 +327,11 @@ fresh.
 ## 8. CLI
 
 ```
-rvim [neovim args]                    # app+web server on this box; io-proxy in-process;
+tvim [neovim args]                    # app+web server on this box; io-proxy in-process;
                                       # prints (and opens) the URL. Local = stage-4 parity.
-rvim --remote user@host [nvim args]   # app server here; launches `rvim --serve-stdio` on
+tvim --remote user@host [nvim args]   # app server here; launches `tvim --serve-stdio` on
                                       # host over ssh; all IO runs on host.
-rvim --serve-stdio                    # (internal) remote io-proxy over stdin/stdout.
+tvim --serve-stdio                    # (internal) remote io-proxy over stdin/stdout.
 
   --site   bundled|local|remote   (default bundled)   # §5 routing
   --rc     bundled|local|remote   (default: remote when --remote, else local)
@@ -388,7 +388,7 @@ Three layers, the top one being the most important:
 
 Test the multi-host path explicitly:
 
-- **Pipe/subprocess remote** for fast hermetic e2e (drive `rvim --serve-stdio`
+- **Pipe/subprocess remote** for fast hermetic e2e (drive `tvim --serve-stdio`
   over a pipe — what Spike A does in miniature).
 - **At least one real ssh-to-localhost** test (sshd + a throwaway key in CI) so
   the actual SSH transport is exercised, not mocked.
@@ -403,7 +403,7 @@ Test the multi-host path explicitly:
 ## Spikes (done — both green)
 
 - **Spike A — SSH-stdio framing** (`wasm/spikes/stage5-ssh-stdio`, Go): the stage-4 frame
-  protocol round-trips over a child process's stdin/stdout (== `ssh host rvim
+  protocol round-trips over a child process's stdin/stdout (== `ssh host tvim
   --serve-stdio`). Confirms Go encode/decode matching the JS wire format
   byte-for-byte, stream reassembly from the length prefix, 64 KiB binary payload
   intact, interleaved-request demux by id, the new `cancel` frame aborting a slow
@@ -432,7 +432,7 @@ push**.
 |---|-------|-------------|------|
 | 0 | Design (this doc) + spikes | stage5.md, Spike A/B green | done |
 | 1 | Conformance harness | golden frame transcripts; Node reference passes | low |
-| 2 | Go skeleton | `rvim` binary, `embed.FS` assets, WS + static serving, `--assets-dir`, hello+`version`; serves the existing wasm page (no proxy yet) | low |
+| 2 | Go skeleton | `tvim` binary, `embed.FS` assets, WS + static serving, `--assets-dir`, hello+`version`; serves the existing wasm page (no proxy yet) | low |
 | 3 | Go io-proxy: FS | FS handler family in Go (jailed); passes conformance + a chromedp `:e`/`:w` test | med |
 | 4 | Go io-proxy: proc + PTY | spawn/`creack/pty`; `childEnv`/`resolveCwd` parity; chromedp `:!`/`:terminal` | med |
 | 5 | Go io-proxy: sockets | tcp/unix/dns + inbound listen/accept; conformance | med |
@@ -440,7 +440,7 @@ push**.
 | 7 | SSH-stdio remote (**done**) | `--remote`, `--serve-stdio`; relay = framing transcode; conformance + browser e2e over a subprocess stand-in; assume-on-PATH | med |
 | 8 | FS routing table | `--rc remote/local/builtin` **done** (via the `$HOME`/seed seam — §5); full two-layer `--site`/live-`--rc` table + version-skew warnings still future | med |
 | 9 | Auth/TLS guard + polish | `--bind`/`--token`/TLS gate; `--no-open`; unsaved-buffer safety net; docs | med |
-| D | Durable `:terminal` (**done**) | `rvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death | med |
+| D | Durable `:terminal` (**done**) | `tvim --session-host` daemon (§6.1); per-tab `?session=`; `pty.*` delegated + reattach replays buffered output; survives app-server restart / SSH death | med |
 | E | Cold restore (**done**) | `:mksession` rehydration (§6.2); stable localStorage session id + daemon adopt-on-spawn by (cwd,argv); close tab → reopen → `:source` reattaches live shells; no C change / no wasm recompile | med |
 
 Risk-ordered, the two things to watch are **Phase 6** (the reconnect/cancel

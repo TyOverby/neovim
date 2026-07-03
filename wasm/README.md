@@ -460,17 +460,17 @@ IO is far less latency-sensitive than per-keystroke redraw.)
 
 ### Quickstart
 
-The server is **`rvim`** — a single dependency-free Go binary (see `wasm/rvim/`).
-Build the wasm engine, assemble the browser bundle, and build `rvim` with the
+The server is **`tvim`** — a single dependency-free Go binary (see `wasm/tvim/`).
+Build the wasm engine, assemble the browser bundle, and build `tvim` with the
 bundle embedded, then point it at the project you want to edit:
 
 ```sh
 wasm/build-deps.sh && wasm/build-nvim.sh        # the wasm engine (once)
-cd wasm/rvim
+cd wasm/tvim
 ../web/build-site.sh server/site                # assemble the bundle into the embed dir
 ./precompress.sh server/site                    # gzip the big assets in place (optional)
-go build -tags embed_assets -o rvim ./cmd/rvim  # self-contained binary (bundle baked in)
-cd /path/to/project && rvim --port 8001         # the editor lands in rvim's cwd
+go build -tags embed_assets -o tvim ./cmd/tvim  # self-contained binary (bundle baked in)
+cd /path/to/project && tvim --port 8001         # the editor lands in tvim's cwd
 ```
 
 `precompress.sh` gzips the large assets (`nvim.wasm`, the `nvim-*.data`
@@ -483,23 +483,23 @@ bundle and serves it uncompressed, exactly as before. The `AssetServer` is gener
 the rare client that can't, and serves raw (with Range support) when there is no
 `.gz`. (CI runs `precompress.sh` automatically before the embed build.)
 
-(For dev, skip the embed and serve the bundle off disk: `go build -o rvim
-./cmd/rvim` then `./rvim --assets-dir <build-site output>`. The dev
+(For dev, skip the embed and serve the bundle off disk: `go build -o tvim
+./cmd/tvim` then `./tvim --assets-dir <build-site output>`. The dev
 `--assets-dir` path is raw build-site.sh output, so it serves uncompressed
 with Range — `precompress.sh` only touches the embed copy.)
 
-**Editing a remote host** (the three-tier mode): run `rvim` on a machine you can
+**Editing a remote host** (the three-tier mode): run `tvim` on a machine you can
 reach in a browser (e.g. your laptop) and point it at the box that holds the files
 over SSH — it serves the page locally and proxies all IO to
-`ssh -T user@host rvim --serve-stdio` (assumes `rvim` is on the remote's `PATH`):
+`ssh -T user@host tvim --serve-stdio` (assumes `tvim` is on the remote's `PATH`):
 
 ```sh
-./rvim --remote user@host   # + --assets-dir or embedded bundle
+./tvim --remote user@host   # + --assets-dir or embedded bundle
 ```
 
 Then open **`http://localhost:8001/`** in a JSPI-capable browser (Chrome ≥ 137).
 The IO host's filesystem is **mounted at the editor's root** — the editor sees
-the box's real paths — and you land in the server's working dir (`rvim`'s cwd
+the box's real paths — and you land in the server's working dir (`tvim`'s cwd
 locally; the ssh login dir, i.e. the remote home, with `--remote`):
 
 - **Files** — `:e`, `:w`, `:Explore`, globbing, `:cd` — all hit the server's real
@@ -527,12 +527,12 @@ page IS the standalone app (`/proxy-config.js` is always generated).
 
 > **You must rebuild the engine?** No. The standalone app is the *same* `nvim.wasm`
 > as the library — the proxy is opt-in JS glue (`create({ proxy })`) plus the
-> `rvim` server. Build the engine once; only `rvim` itself is a Go build.
+> `tvim` server. Build the engine once; only `tvim` itself is a Go build.
 
 > **History.** Stage 4 prototyped this server in Node (`wasm/server/*.js`); stage 5
-> reimplemented it as the `rvim` Go binary (`wasm/rvim/`) — a small static binary
+> reimplemented it as the `tvim` Go binary (`wasm/tvim/`) — a small static binary
 > with no runtime deps and easy cross-compilation — verified to behave identically
-> by the conformance suite + a headless-Chrome e2e (`wasm/rvim/e2e/`). The Node
+> by the conformance suite + a headless-Chrome e2e (`wasm/tvim/e2e/`). The Node
 > prototype has been removed; `wasm/docs/history/stage5.md` has the design.
 
 ### How "visit the server" wires up (the opt-in)
@@ -540,7 +540,7 @@ page IS the standalone app (`/proxy-config.js` is always generated).
 The proxy is **additive and opt-in**: nothing connects to a server unless a
 `proxy` config is present. Two layers provide it:
 
-- **For the demo page:** when `index.html` is served by `rvim`, the server serves
+- **For the demo page:** when `index.html` is served by `tvim`, the server serves
   a generated `/proxy-config.js` that sets
   `window.__NVIM_PROXY = { url, nvimSocket, rc }`. The `url` is derived from
   the request's `Host` header (`ws://<same-host>/proxy`), so it works whether you
@@ -572,7 +572,7 @@ The proxy is **additive and opt-in**: nothing connects to a server unless a
 ### Reconnect + durable `:terminal`
 
 > **Status: ✅ shipped (stage 5).** Design in `docs/history/stage5.md` §6; verified by
-> `wasm/web/reconnect.test.js` and `wasm/rvim/e2e/e2e_durable_term_test.go`.
+> `wasm/web/reconnect.test.js` and `wasm/tvim/e2e/e2e_durable_term_test.go`.
 
 The **browser engine is the only durable state.** On any transport drop, the
 `ReconnectingProxy` (`wasm/proxy-reconnect.js`, wired by `web/engine-worker.js`)
@@ -584,7 +584,7 @@ browser and are untouched by a blip.
 
 The one deliberate exception is **`:terminal`**, which is long-lived stateful
 session (a running shell, an `ssh`/`top` inside it, scrollback, cwd) that can't
-just be "re-triggered." A per-user **session-host daemon** (`rvim --session-host`,
+just be "re-triggered." A per-user **session-host daemon** (`tvim --session-host`,
 **auto-spawned** detached by the io-proxy — you don't run it by hand) owns the PTY
 children *outside any single connection*, keyed by a stable per-tab session id.
 On disconnect it **keeps the shells running** and buffers their output; on
@@ -615,7 +615,7 @@ process's privileges. The defaults reflect that:
   is the load-bearing protection.
 - **The whole filesystem of the server user is exposed** — the server's
   filesystem is mounted at the editor's root, with no jail: the editor (and
-  anything it spawns) can read and write whatever the `rvim` process can, exactly
+  anything it spawns) can read and write whatever the `tvim` process can, exactly
   like an ssh session as that user. The loopback bind is the boundary.
 
 ### Known gaps
@@ -638,17 +638,17 @@ process's privileges. The defaults reflect that:
   demo and the Node e2e suites; the `serve.js` static demo intentionally has no
   proxy.
 
-### The three-tier remote — `rvim` (stage 5)
+### The three-tier remote — `tvim` (stage 5)
 
 > **Status: ✅ shipped.** Full design and phase plan in `docs/history/stage5.md`. The binary,
 > the SSH-stdio remote, the reconnect contract, durable terminals, and `--rc` all
 > ship today; what's left is the full `--site` routing table, auth/TLS for
 > non-loopback binds, and the protocol `cancel` frame. Verified by the Go
-> conformance suite (`wasm/rvim/conformance/`) + headless-Chrome e2e
-> (`wasm/rvim/e2e/`). The `rvim --remote user@host` Quickstart above is this.
+> conformance suite (`wasm/tvim/conformance/`) + headless-Chrome e2e
+> (`wasm/tvim/e2e/`). The `tvim --remote user@host` Quickstart above is this.
 
 Stage 4 proxies IO to a server on **the same machine** that serves the page.
-Stage 5 (`rvim`, "remote vim") separates those roles, because the machine holding
+Stage 5 (`tvim`, "tunneling vim") separates those roles, because the machine holding
 your files may not be internet-exposed and may have no TLS certs — so it can't
 safely host the page itself. An **intermediary** (in practice your laptop on
 `127.0.0.1`, or a host behind your nginx/Kerberos proxy) terminates HTTP/TLS,
@@ -658,10 +658,10 @@ serves the page, and forwards all IO to the remote over SSH:
    browser (wasm engine + proxy client)
         │  http + websocket
         ▼
-   rvim  (app/web server, FS routing + jail)
+   tvim  (app/web server, FS routing + jail)
         │  ssh stdio   (or in-process when local — no remote hop)
         ▼
-   rvim --serve-stdio   (io-proxy on the remote: your files)
+   tvim --serve-stdio   (io-proxy on the remote: your files)
 ```
 
 The headline pieces (see `docs/history/stage5.md`):
@@ -672,7 +672,7 @@ The headline pieces (see `docs/history/stage5.md`):
   exactly Node's weak spots. The same stage-4 frame protocol rides every
   transport (WebSocket / SSH stdio / in-process), gaining a `version` field and a
   `cancel` frame.
-- **`rvim` / `rvim --remote user@host`** — SSH stdio is the remote transport
+- **`tvim` / `tvim --remote user@host`** — SSH stdio is the remote transport
   (ssh handles encryption + auth; the remote io-proxy binds no ports). `--rc`
   (`remote`|`local`|`builtin`) picks where the in-browser nvim's config / `$HOME`
   comes from (see the Quickstart's three-tier section); the full `--site` runtime
@@ -723,9 +723,9 @@ What works today (`node nvim.js -- <args>`):
 | **Browser: engine in a Web Worker + pure-JS grid UI** | ✅ (stage 3 — see `docs/history/stage3.md`, `wasm/web/`) |
 | Headless end-to-end test (engine in a Node worker) | ✅ (`wasm/web/e2e.test.js`) |
 | `:terminal`, `:!cmd`, jobs (process spawning) | ❌ stubbed in the standalone *library* (no spawn in wasm) · ✅ under the **standalone server** (proxied to the host — stage 4) |
-| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (the `rvim` Go server — `wasm/rvim/`; see `docs/history/stage5.md`) |
-| **Three-tier remote (`rvim --remote user@host` over SSH stdio)** | ✅ (stage 5 — `wasm/rvim/`; see `docs/history/stage5.md`) |
-| **Reconnect (fail-fast `-EIO` + auto re-dial) + durable `:terminal`** | ✅ (the session-host daemon + `:mksession` rehydrate — `wasm/proxy-reconnect.js`, `wasm/rvim/server/sessionhost.go`) |
+| **Standalone app: real FS / processes / PTY / LSP proxied to a server** | ✅ (the `tvim` Go server — `wasm/tvim/`; see `docs/history/stage5.md`) |
+| **Three-tier remote (`tvim --remote user@host` over SSH stdio)** | ✅ (stage 5 — `wasm/tvim/`; see `docs/history/stage5.md`) |
+| **Reconnect (fail-fast `-EIO` + auto re-dial) + durable `:terminal`** | ✅ (the session-host daemon + `:mksession` rehydrate — `wasm/proxy-reconnect.js`, `wasm/tvim/server/sessionhost.go`) |
 
 ## Prerequisites
 
@@ -794,9 +794,9 @@ wasm/web/build-site.sh _site   # gather the flat, relative-path bundle into _sit
 `wasm-build`. The expensive wasm compile + site assembly is factored into a shared
 composite action (`.github/actions/build-wasm`) and runs **once** in a `build` job;
 its assembled site then fans out to two downstream jobs: `deploy` (uploads it to
-Pages) and `build-rvim` (cross-compiles the `rvim` Go server — see "As a standalone
+Pages) and `build-tvim` (cross-compiles the `tvim` Go server — see "As a standalone
 application" — for linux/darwin amd64+arm64 with that bundle baked in via
-`-tags embed_assets`, and uploads each binary as a `rvim-<os>-<arch>` artifact).
+`-tags embed_assets`, and uploads each binary as a `tvim-<os>-<arch>` artifact).
 Enable Pages once under **Settings → Pages → Source: GitHub Actions**. (Windows is
 not built: the server uses Unix-only syscalls.)
 
@@ -831,9 +831,9 @@ pointing at a prebuilt host `nlua0` via `NLUA0_HOST_PRG` when
 | `nvim_sock_proxy.js` | Emscripten `--js-library` (stage 4, opt-in): the full socket + DNS proxy backend — outbound connect (a virtual bidirectional pollable fd backing each `uv_tcp_t`/`uv_pipe_t`; the `--wrap=uv_tcp_connect`/`uv_pipe_connect` paths) AND inbound listen/accept (the listener table + `sock.listen`/`accept`/`incoming` routing; the `--wrap=uv_listen`/`uv_accept` paths), plus `sock.connect{host,port}|{path}`/`write`/`close`/`getaddrinfo` and the server pushes. Pairs with the socket wraps in `uv_stubs.c`. Active only when a proxy is configured. |
 | `proxy-client.js` | Stage 4 proxy **client** + frame codec, shared by the engine worker (browser/Node) and the server. Defines the framed protocol (`hello`/`req`/`res`/`push` + binary trailer) and `createProxyClient(transport)`. The worker `importScripts` it next to `nvim.js` when `create({ proxy })` is used. |
 | `proxy-reconnect.js` | Stage 5 **ReconnectingProxy** (opt-in): a stable facade at `self.__nvimProxy` that delegates `request` to the live client (fast-rejecting during an outage so suspended syscalls return `-EIO`, never hang), `close()`s the dead client on drop, preserves the push router across reconnects, and re-dials with backoff. Wired by `web/engine-worker.js`. |
-| `rvim/` | Stage 5 **`rvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families; the server's filesystem is exposed whole, mounted at the editor's root), `cmd/rvim` (the binary; `--port`/`--assets-dir`/`--remote`/`--rc`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `rvim/README.md` and `docs/history/stage5.md`. |
+| `tvim/` | Stage 5 **`tvim` Go server** — the native, dependency-free reimplementation of the stage-4 Node IO-proxy server (since removed). `server/` (HTTP + `/proxy` WS + the FS/proc/PTY/socket handler families; the server's filesystem is exposed whole, mounted at the editor's root), `cmd/tvim` (the binary; `--port`/`--assets-dir`/`--remote`/`--rc`, `-tags embed_assets` to bake in the bundle), `proxy/` (the wire codec), `conformance/` (in-process protocol contract suite), `e2e/` (headless-Chrome integration test — a separate module). See `tvim/README.md` and `docs/history/stage5.md`. |
 | `worker.js` | Node engine host: runs `nvim --embed` wasm in a worker_thread, fd 0/1 carried over the worker's postMessage channel (the Node analogue of `web/engine-worker.js`; used by the e2e test). |
-| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + canvas `mount_into` painting through `grid-renderer.js`; the legacy `<pre>` renderer lives on as the `neovim-ui-pre-testutil.js` test utility), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by rvim's generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
+| `web/` | Browser target, split into the layers the goals call for: `neovim.js` (headless msgpack-RPC core — a transport-agnostic instance), `neovim-ui.js` (default renderer: a headless `Screen` grid-decode + canvas `mount_into` painting through `grid-renderer.js`; the legacy `<pre>` renderer lives on as the `neovim-ui-pre-testutil.js` test utility), `app.js` (page glue that composes them), `index.html`, `engine-worker.js` (Web Worker engine host; loads the `plugins` variant's data package before `nvim.js`, and wires the ReconnectingProxy when a `proxy` is configured), `serve.js` (plain static dev server), `build-site.sh` (assemble the static bundle, all three variants), `build-lib.sh` (redistributable bundle; `--variant` selects which runtime to ship), `e2e.test.js` (headless engine test over a Node worker), and `reconnect.test.js` (the ReconnectingProxy facade against a mock server). `app.js` opts into `create({ proxy })` when `window.__NVIM_PROXY` is present (set by tvim's generated `/proxy-config.js`); absent, it's the no-proxy demo. Uses `@msgpack/msgpack` + `ws` (npm). |
 | `docs/history/stage1.md` / `docs/history/stage2.md` / `docs/history/stage3.md` | History: stage 1 (cross-compile), stage 2 (interactive TUI — since removed), stage 3 (browser grid UI). |
 
 ## Changes to shared build files (all `EMSCRIPTEN`-guarded)

@@ -589,7 +589,7 @@ function validateProxy(proxy: ProxyConfig | null | undefined): ProxyConfig | nul
     throw new Error('Neovim.create: proxy.session must be a string (the durable-PTY session id)');
   }
   // rc (optional): where nvim's config/$HOME comes from — 'remote' | 'local' |
-  // 'builtin' (set by rvim's /proxy-config.js). 'remote' makes the engine worker
+  // 'builtin' (set by tvim's /proxy-config.js). 'remote' makes the engine worker
   // point $HOME at the IO host's home (reported in the hello). Unknown/absent is
   // treated as 'builtin' downstream.
   if (proxy.rc != null && typeof proxy.rc !== 'string') {

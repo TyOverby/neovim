@@ -36,7 +36,7 @@
 // nvim sees a clean "command exited 127", never a hang.
 //
 // ============================================================================
-// SERVER PROTOCOL (handled by the rvim Go server: wasm/rvim/server/proc.go)
+// SERVER PROTOCOL (handled by the tvim Go server: wasm/tvim/server/proc.go)
 // ============================================================================
 //   proc.spawn       {argv:[...], cwd, env:{...}, wantIn, wantOut, wantErr}
 //                       -> {id}            (server child id)

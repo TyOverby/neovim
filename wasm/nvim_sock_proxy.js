@@ -39,7 +39,7 @@
 //     later.
 //
 // ============================================================================
-// SERVER PROTOCOL (handled by the rvim Go server: wasm/rvim/server/sock.go)
+// SERVER PROTOCOL (handled by the tvim Go server: wasm/tvim/server/sock.go)
 // ============================================================================
 //   sock.connect     {host, port} | {path}   -> {id}        ({path} = unix socket)
 //   sock.write       {id} + payload<bytes>   -> {ok}        (write to the socket)

@@ -23,7 +23,7 @@ const { encodeFrame, decodeFrame } = ProxyClient;
 
 // A MINIMAL mock proxy server: just enough of the frame protocol to test the
 // ReconnectingProxy facade (hello ack, ping, proc.spawn + a proc.exit push). The
-// real IO proxy is the Go server (rvim) + its conformance/e2e suites; this test
+// real IO proxy is the Go server (tvim) + its conformance/e2e suites; this test
 // is about the transport facade (connect / drop / reconnect / request / push),
 // which needs no real IO. Returns { url, close }.
 function startMockServer(opts) {

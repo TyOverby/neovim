@@ -27,7 +27,7 @@ declare const NeovimUI: any;
     if (!s) { return; }
     // Mirror the latest status onto <body data-status> — toasts are transient
     // (they remove themselves), so this is the persistent, machine-readable
-    // signal the e2e tests (wasm/rvim/e2e) poll for boot/proxy state.
+    // signal the e2e tests (wasm/tvim/e2e) poll for boot/proxy state.
     document.body.setAttribute('data-status', s);
     if (!toastsEl || s === lastToast) { return; }
     lastToast = s;
@@ -50,7 +50,7 @@ declare const NeovimUI: any;
 
   setStatus('starting engine worker…');
 
-  // Stage 4 (standalone app, opt-in): when this page is served BY rvim,
+  // Stage 4 (standalone app, opt-in): when this page is served BY tvim,
   // /proxy-config.js has set window.__NVIM_PROXY = { url, nvimSocket, rc }. We
   // pass it to create({ proxy }) so the engine's real IO (the filesystem —
   // mounted WHOLE at the editor's root — plus :!, jobstart, :terminal, LSP)
@@ -59,7 +59,7 @@ declare const NeovimUI: any;
   // connection, MEMFS-only. The mechanism is documented in index.html.
   const proxy = (typeof win.__NVIM_PROXY === 'object' && win.__NVIM_PROXY) || null;
 
-  // --rc local: rvim's /proxy-config.js inlined the app-server's own ~/.config/nvim
+  // --rc local: tvim's /proxy-config.js inlined the app-server's own ~/.config/nvim
   // as window.__NVIM_RC_FILES { '/abs/path': 'contents' }. Seed it into the engine's
   // MEMFS at boot so nvim loads that config. (--rc remote instead redirects $HOME to
   // the IO host via the hello — no seed; handled in the engine worker / pre.js.)
@@ -114,9 +114,9 @@ declare const NeovimUI: any;
       'return a',
       [ proxy.nvimSocket ]
     ]).then(function (addr: any) {
-      console.log('[rvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
+      console.log('[tvim] nvim RPC server on ' + addr + ' — $NVIM exported to child processes');
     }, function (err: any) {
-      console.warn('[rvim] serverstart failed: ' + (err && err.message || err));
+      console.warn('[tvim] serverstart failed: ' + (err && err.message || err));
     });
   }
 
@@ -152,8 +152,8 @@ declare const NeovimUI: any;
 
   // Durable-PTY rehydration (standalone app only): replace the runtime's default
   // `term://` restore handler so that, DURING a :mksession restore (g:SessionLoad
-  // is set), restored terminals are spawned with RVIM_ADOPT=1 in their env. The
-  // rvim io-proxy sees that marker and asks the session-host daemon to REATTACH to
+  // is set), restored terminals are spawned with TVIM_ADOPT=1 in their env. The
+  // tvim io-proxy sees that marker and asks the session-host daemon to REATTACH to
   // the still-running shell whose (cwd, argv) match — repainting from its output
   // ring — instead of spawning a fresh one. Outside a restore it behaves exactly
   // like the default (fresh spawn), and a missing/expired daemon pty falls back to
@@ -165,14 +165,14 @@ declare const NeovimUI: any;
       "pcall(vim.api.nvim_clear_autocmds, { group = grp, event = 'BufReadCmd', pattern = 'term://*' })",
       "vim.api.nvim_create_autocmd('BufReadCmd', {",
       "  group = grp, pattern = 'term://*', nested = true,",
-      "  desc = 'rvim: term:// buffers; adopt durable daemon ptys on session restore',",
+      "  desc = 'tvim: term:// buffers; adopt durable daemon ptys on session restore',",
       "  callback = function(ev)",
       "    if vim.b[ev.buf].term_title ~= nil then return end",
       "    local m = ev.match",
       "    local cwd = m:match('^term://(.-)//') or ''",
       "    local cmd = m:match('^term://.-//%d+:(.*)$') or m:match('^term://.-//(.*)$') or m",
       "    local opts = { term = true, cwd = vim.fn.expand(cwd) }",
-      "    if vim.g.SessionLoad ~= nil then opts.env = { RVIM_ADOPT = '1' } end",
+      "    if vim.g.SessionLoad ~= nil then opts.env = { TVIM_ADOPT = '1' } end",
       // jobstart a LIST (argv) not a string: a string is shell-wrapped
       // (sh -> {sh,-c,sh}), which would never match the original terminal's argv
       // ({sh}) for adopt. The term-name cmd is the original argv space-joined, so

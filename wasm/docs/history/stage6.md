@@ -12,7 +12,7 @@
 Prereq reading: `stage3.md` (the browser UI split: headless `neovim.js` core +
 `neovim-ui.js` renderer over msgpack-RPC/`ext_linegrid`). This stage replaces
 only the **painting** half of `neovim-ui.js`; the `Screen` decode model, the
-RPC core, the engine, and the rvim server are untouched.
+RPC core, the engine, and the tvim server are untouched.
 
 ---
 
@@ -210,14 +210,14 @@ full-viewport repaint.
 
 ## 9. Operational gotchas fixed along the way
 
-- **`rvim` embeds a gitignored bundle.** `//go:embed all:site` bakes whatever
-  is in `wasm/rvim/server/site/` — a manual `go build -tags embed_assets`
+- **`tvim` embeds a gitignored bundle.** `//go:embed all:site` bakes whatever
+  is in `wasm/tvim/server/site/` — a manual `go build -tags embed_assets`
   after renderer changes shipped a stale `<pre>` UI until
   `web/build-site.sh server/site` was re-run (`build-release.sh` does this
   automatically).
-- **`download-rvim.sh` trusted run-level status.** A hung Pages `deploy` job,
+- **`download-tvim.sh` trusted run-level status.** A hung Pages `deploy` job,
   cancelled by hand, marked the whole CI run `cancelled` even though every
-  `build-rvim` job had uploaded fresh artifacts — and the script's
+  `build-tvim` job had uploaded fresh artifacts — and the script's
   `--status success` filter silently fell back to an older run's binary. It
   now walks recent completed runs newest-first and takes the first one the
   artifact actually downloads from (into a temp subdir: `gh run download -D .`

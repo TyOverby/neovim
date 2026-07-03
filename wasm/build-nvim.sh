@@ -325,7 +325,7 @@ rm -rf "${STAGE_ROOT}"
 # wasm/web/reconnect.test.js), and the typescript devDependency (build-site.sh /
 # build-lib.sh compile wasm/web/src/*.ts via build-ts.sh). All are declared in
 # wasm/web/package.json; a full `npm install` (devDeps included) runs if any is
-# missing. (The stage-5 IO-proxy server is the Go `rvim` binary in wasm/rvim/ —
+# missing. (The stage-5 IO-proxy server is the Go `tvim` binary in wasm/tvim/ —
 # no npm server deps.)
 if command -v npm >/dev/null 2>&1; then
   if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ] || \

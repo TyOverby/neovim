@@ -4,10 +4,10 @@
 # This is the heavy, shared half of the wasm pipeline — emscripten + the native
 # host helpers + the wasm cross-compile + the runtime variant packaging. It is
 # factored out of deploy-wasm-pages.yml so the SAME build feeds both the GitHub
-# Pages deploy and the `rvim` Go-binary cross-compile, running just once.
+# Pages deploy and the `tvim` Go-binary cross-compile, running just once.
 #
 # It leaves the assembled site in `site-dir` (default `_site/`); callers either
-# upload it to Pages or download it into wasm/rvim/server/site/ to embed in rvim.
+# upload it to Pages or download it into wasm/tvim/server/site/ to embed in tvim.
 name: Build wasm + assemble site
 description: Cross-compile Neovim to wasm and assemble the static browser bundle.
 
