@@ -75,7 +75,16 @@ end
 ---@return boolean? True if parser is loaded
 local function loadparser(path, lang, symbol_name)
   if vim.endswith(path, '.wasm') then
-    return vim._ts_add_language_from_wasm and vim._ts_add_language_from_wasm(path, lang)
+    if vim._ts_add_language_from_wasm then
+      return vim._ts_add_language_from_wasm(path, lang)
+    end
+    -- The wasm (emscripten) build has no wasmtime, but grammar .wasm files are
+    -- emscripten side modules that its dlopen loads natively; route them to
+    -- the object loader. (Only that build defines _ts_add_language_builtin.)
+    if vim._ts_add_language_builtin then
+      return vim._ts_add_language_from_object(path, lang, symbol_name)
+    end
+    return nil
   else
     return vim._ts_add_language_from_object(path, lang, symbol_name)
   end
@@ -136,7 +145,15 @@ function M.add(lang, opts)
     local fname = 'parser/' .. lang .. '.*'
     local paths = api.nvim_get_runtime_file(fname, false)
     if #paths == 0 then
-      return nil, string.format('No parser for language "%s"', lang)
+      -- The wasm build's last resort: ask the embedding host to fetch the
+      -- grammar (a browser page fetch()es the .wasm side module at runtime;
+      -- see src/nvim/lua/treesitter.c). Only that build defines the hook, and
+      -- it returns nil unless the host configured a parser source.
+      local fetched = vim._ts_fetch_parser and vim._ts_fetch_parser(lang)
+      if not fetched then
+        return nil, string.format('No parser for language "%s"', lang)
+      end
+      paths = { fetched }
     end
     path = paths[1]
   end

@@ -23,6 +23,13 @@
 # include "nvim/os/fs.h"
 #endif
 
+#ifdef __EMSCRIPTEN__
+# include <sys/stat.h>
+# include <unistd.h>
+
+# include "nvim/os/fs.h"
+#endif
+
 #include "nvim/api/private/helpers.h"
 #include "nvim/ascii_defs.h"
 #include "nvim/buffer_defs.h"
@@ -131,11 +138,81 @@ static int tslua_add_language_from_object(lua_State *L)
   return add_language(L, false);
 }
 
+#ifdef __EMSCRIPTEN__
+// Stage a parser file into MEMFS so emscripten's dlopen can read it.
+//
+// dlopen resolves the library file at the JS FS layer (FS.readFile), which
+// never routes through the IO-proxy's syscall overrides -- so dlopen'ing a
+// path on the proxied (tvim server/remote) filesystem would ENOENT even
+// though open()/read() on it succeed. Read the file through nvim's normal
+// C file IO (which the proxy DOES intercept) and write it below
+// /usr/share/nvim -- a MEMFS shadow in every configuration (plain MEMFS in
+// the browser, un-mounted MEMFS under Node's NODEFS roots, an explicit
+// shadow overlay under the IO proxy). The staged copy is unlinked by the
+// caller right after dlopen (the library is in memory by then); the
+// counter keeps names unique so emscripten's per-filename library cache
+// can never hand back a previously loaded grammar.
+static const char *stage_parser_for_dlopen(lua_State *L, const char *path)
+{
+  FILE *in = os_fopen(path, "r");
+  if (in == NULL) {
+    luaL_error(L, "Failed to load parser %s: cannot open file", path);
+  }
+  fseek(in, 0L, SEEK_END);
+  size_t len = (size_t)ftell(in);
+  fseek(in, 0L, SEEK_SET);
+  char *data = xmalloc(len);
+  if (len > 0 && fread(data, len, 1, in) != 1) {
+    xfree(data);
+    fclose(in);
+    luaL_error(L, "Failed to load parser %s: cannot read file", path);
+    return NULL;
+  }
+  fclose(in);
+
+  mkdir("/usr", 0755);
+  mkdir("/usr/share", 0755);
+  mkdir("/usr/share/nvim", 0755);
+  mkdir("/usr/share/nvim/parser-stage", 0755);
+
+  const char *base = strrchr(path, '/');
+  base = base != NULL ? base + 1 : path;
+  static unsigned stage_counter = 0;
+  static char staged[256];
+  snprintf(staged, sizeof(staged), "/usr/share/nvim/parser-stage/%u-%.128s",
+           stage_counter++, base);
+
+  FILE *out = os_fopen(staged, "w");
+  if (out == NULL || (len > 0 && fwrite(data, len, 1, out) != 1)) {
+    xfree(data);
+    if (out != NULL) {
+      fclose(out);
+    }
+    luaL_error(L, "Failed to load parser %s: cannot stage for dlopen", path);
+    return NULL;
+  }
+  fclose(out);
+  xfree(data);
+  return staged;
+}
+#endif
+
 static const TSLanguage *load_language_from_object(lua_State *L, const char *path,
                                                    const char *lang_name, const char *symbol)
 {
+#ifdef __EMSCRIPTEN__
+  const char *staged = stage_parser_for_dlopen(L, path);
+  const char *load_path = staged;
+#else
+  const char *load_path = path;
+#endif
   uv_lib_t lib;
-  if (uv_dlopen(path, &lib)) {
+  int dlopen_err = uv_dlopen(load_path, &lib);
+#ifdef __EMSCRIPTEN__
+  // The library (or its error) is resolved; drop the MEMFS copy either way.
+  unlink(staged);
+#endif
+  if (dlopen_err) {
     xstrlcpy(IObuff, uv_dlerror(&lib), sizeof(IObuff));
     uv_dlclose(&lib);
     luaL_error(L, "Failed to load parser for language '%s': uv_dlopen: %s", lang_name, IObuff);
@@ -275,6 +352,28 @@ static const struct {
   { "vim", tree_sitter_vim },
   { "vimdoc", tree_sitter_vimdoc },
 };
+
+// Implemented in wasm/nvim_ts_dl.js (--js-library): asks the embedding host
+// for the grammar's bytes (globalThis.__nvimParserFetch, installed by the
+// engine worker when create() is given a `parsers` config), writes them into
+// MEMFS, and fills `out` with the staged path. Returns 0 when no hook is
+// configured or the fetch fails. The wasm frame SUSPENDS via JSPI while the
+// host fetches (the import is __async), exactly like the proxied syscalls.
+extern int nvim_ts_parser_fetch(const char *lang, char *out, int outlen);
+
+// vim._ts_fetch_parser(lang) -> path of a host-fetched grammar file, or nil.
+// language.add() falls back to this after the 'runtimepath' search fails.
+static int tslua_fetch_parser(lua_State *L)
+{
+  const char *lang_name = luaL_checkstring(L, 1);
+  char buf[1024];
+  if (nvim_ts_parser_fetch(lang_name, buf, (int)sizeof(buf))) {
+    lua_pushstring(L, buf);
+  } else {
+    lua_pushnil(L);
+  }
+  return 1;
+}
 
 // vim._ts_add_language_builtin(lang) -> true if lang is a bundled grammar (now
 // registered in the language map), false if it is not bundled.
@@ -1899,6 +1998,9 @@ void nlua_treesitter_init(lua_State *const lstate) FUNC_ATTR_NONNULL_ALL
 #ifdef __EMSCRIPTEN__
   lua_pushcfunction(lstate, tslua_add_language_builtin);
   lua_setfield(lstate, -2, "_ts_add_language_builtin");
+
+  lua_pushcfunction(lstate, tslua_fetch_parser);
+  lua_setfield(lstate, -2, "_ts_fetch_parser");
 #endif
 
   lua_pushcfunction(lstate, tslua_has_language);

@@ -224,6 +224,57 @@ embedder can switch at runtime; the default is `full`.
 transport-supplied entry point used by the Node e2e test. It returns a **plain
 synchronous instance** — it is *not* awaitable; `await createNvim(...).ready`.)
 
+### Tree-sitter grammars
+
+The **bundled** grammars (`c`, `lua`, `markdown`, `markdown_inline`, `query`,
+`vim`, `vimdoc` — the same set native nvim ships as `parser/*.so`) are
+**statically linked into `nvim.wasm`** and registered by name (wasm has no
+default dlopen), so treesitter highlighting works out of the box: opening a
+`.lua`/markdown/help file starts the highlighter exactly like a native build.
+The `full` and `core` runtime bundles carry the matching highlight
+`queries/`.
+
+**Third-party grammars load dynamically.** The engine is linked as an
+emscripten **main module** (`-sMAIN_MODULE=2`, everything compiled `-fPIC`),
+so grammar **`.wasm` side modules — the artifact `tree-sitter build --wasm`
+publishes and many grammar repos attach to releases — are dlopen'd at
+runtime** through nvim's normal parser loader. Three ways in:
+
+1. **Explicit path** — `vim.treesitter.language.add('zig', { path = '/path/zig.wasm' })`.
+2. **`runtimepath` discovery** — drop `parser/zig.wasm` in any runtimepath dir
+   (e.g. `~/.local/share/nvim/site/parser/`), then `language.add('zig')`.
+   Under the **standalone server** those are the *IO host's* real
+   directories: the engine reads the grammar off the server/remote disk
+   through the proxied file IO and stages it into MEMFS for dlopen — no
+   server-side support needed.
+3. **Fetched at runtime (browser library)** — give `create()` a grammar
+   source and the engine will `fetch()` a missing grammar on first use:
+
+   ```js
+   const nvim = Neovim.create({
+     parsers: {
+       baseUrl: 'https://cdn.example.com/ts',      // <baseUrl>/<lang>.wasm
+       urls: { zig: 'https://example.com/zig.wasm' }, // per-lang override
+     },
+   });
+   // later: :lua vim.treesitter.language.add('zig') -- fetches, dlopens, done
+   ```
+
+   The hook only fires after the runtimepath search fails; without a
+   `parsers` config, behavior is unchanged ("No parser for language …").
+
+Highlighting also needs the grammar's **queries** (`queries/<lang>/*.scm`) on
+the runtimepath, same as native nvim — ship them next to the parser (a
+`filesystem:` seed, a site dir on the server, or your plugin manager).
+
+Caveats: grammars with **C++ scanners** cannot load (the engine exports no
+libc++); a side module's unresolved libc import surfaces at **first parse**
+(not at dlopen) as `TypeError: resolved is not a function` — the engine
+exports the allocator + `mem*`/`str*` + ctype/wctype families that scanners
+commonly use (see `EXPORTED_FUNCTIONS` in `src/nvim/CMakeLists.txt`; extend
+the list if a grammar reports a missing symbol). Grammar `.wasm` files built
+by very old emscripten releases may hit dylink-ABI drift.
+
 The returned **instance** (also reachable synchronously off the facade):
 
 | Member | Description |

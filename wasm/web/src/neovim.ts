@@ -70,6 +70,20 @@ export interface ProxyConfig {
 
 export type PluginsVariant = 'full' | 'core' | 'minimal';
 
+// Optional runtime source for tree-sitter grammars that are NOT bundled into
+// the engine. When vim.treesitter.language.add() finds no parser anywhere on
+// the runtimepath, the engine asks the worker, which fetch()es
+//   urls[lang]                  (if present), else
+//   baseUrl + '/' + lang + '.wasm'
+// and hands the bytes to the engine's dlopen (the .wasm grammar files
+// published by `tree-sitter build --wasm` are emscripten side modules the
+// engine loads natively). Absent => behavior unchanged ("No parser for
+// language" as today).
+export interface ParsersConfig {
+  baseUrl?: string;
+  urls?: Record<string, string>;
+}
+
 export interface CreateNvimOptions {
   transport?: Transport;
   MessagePack?: MessagePackModule;
@@ -82,6 +96,7 @@ export interface BrowserEngineConfig {
   filesystem?: Record<string, string>;
   plugins?: PluginsVariant;
   proxy?: ProxyConfig | null;
+  parsers?: ParsersConfig | null;
 }
 
 export interface CreateOptions extends BrowserEngineConfig {
@@ -502,6 +517,10 @@ export function browserEngineTransport(engineUrl: string, config?: BrowserEngine
     // client (the server's filesystem then appears at the engine's root);
     // when absent it opens no connection (additive/opt-in).
     proxy: config.proxy,
+    // Optional runtime-fetched tree-sitter grammars ({ baseUrl?, urls? }).
+    // engine-worker.js installs the fetch hook the engine falls back to when
+    // no parser file exists; absent => no hook (additive/opt-in).
+    parsers: config.parsers,
   };
   const worker = new Worker(engineUrl);
   const t: Transport = {
@@ -598,6 +617,26 @@ function validateProxy(proxy: ProxyConfig | null | undefined): ProxyConfig | nul
   return { url: proxy.url, nvimSocket: proxy.nvimSocket, session: proxy.session, rc: proxy.rc };
 }
 
+// Validate the optional `parsers` config (runtime-fetched tree-sitter
+// grammars). ADDITIVE and OPT-IN: absent => no hook is installed and a missing
+// grammar errors exactly as today. Returns the normalized config or null.
+function validateParsers(parsers: ParsersConfig | null | undefined): ParsersConfig | null {
+  if (parsers == null) { return null; }
+  if (typeof parsers !== 'object') {
+    throw new Error('Neovim.create: parsers must be an object { baseUrl?, urls? }');
+  }
+  if (parsers.baseUrl != null && typeof parsers.baseUrl !== 'string') {
+    throw new Error('Neovim.create: parsers.baseUrl must be a string URL prefix');
+  }
+  if (parsers.urls != null && typeof parsers.urls !== 'object') {
+    throw new Error('Neovim.create: parsers.urls must be a map of language name -> URL');
+  }
+  if (parsers.baseUrl == null && parsers.urls == null) {
+    throw new Error('Neovim.create: parsers needs baseUrl and/or urls');
+  }
+  return { baseUrl: parsers.baseUrl, urls: parsers.urls };
+}
+
 // The README-facing entry point: build a browser engine transport and a core
 // instance over it.
 //   opts: { args, baseUrl, engineUrl, transport, MessagePack,
@@ -636,6 +675,8 @@ export function create(opts?: CreateOptions): NeovimFacade {
   }
   // Validate the optional Stage 4 proxy config (opt-in; absent => unchanged).
   const proxy = validateProxy(opts.proxy);
+  // Validate the optional runtime-grammar config (opt-in; absent => unchanged).
+  const parsers = validateParsers(opts.parsers);
   const transport = opts.transport ||
     browserEngineTransport(resolveEngineUrl(opts), {
       args: opts.args || [],
@@ -646,6 +687,8 @@ export function create(opts?: CreateOptions): NeovimFacade {
       // Threaded into the engine-worker init message as init.proxy. When absent
       // engine-worker.js opens NO server connection (current behavior).
       proxy: proxy,
+      // Threaded as init.parsers; the worker installs the grammar fetch hook.
+      parsers: parsers,
     });
   const instance = createNvim({ transport: transport, MessagePack: opts.MessagePack });
 

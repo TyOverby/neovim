@@ -58,6 +58,23 @@ if (workerData.env) { G.__nvimEnv = workerData.env; }
 if (workerData.filesystem) { G.__nvimFiles = workerData.filesystem; }
 if (typeof workerData.cwd === 'string') { G.__nvimCwd = workerData.cwd; }
 
+// Runtime-fetched tree-sitter grammars ({ parsers: { baseUrl?, urls? } } on
+// workerData): the Node analogue of engine-worker.js's hook -- language.add()
+// falls back to it when no parser file exists on the runtimepath, and the
+// bytes are dlopen'd as an emscripten side module. Node >= 18 has global
+// fetch. Absent => no hook => current behavior (additive/opt-in).
+if (workerData.parsers && (workerData.parsers.baseUrl || workerData.parsers.urls)) {
+  const parsers = workerData.parsers;
+  G.__nvimParserFetch = async function (lang: string): Promise<Uint8Array | null> {
+    const url = (parsers.urls && parsers.urls[lang]) ||
+      (parsers.baseUrl ? parsers.baseUrl.replace(/\/+$/, '') + '/' + lang + '.wasm' : null);
+    if (!url) { return null; }
+    const resp = await fetch(url);
+    if (!resp.ok) { return null; }
+    return new Uint8Array(await resp.arrayBuffer());
+  };
+}
+
 // Stage 4 (additive/opt-in): if a proxy URL was supplied, open the IO-proxy
 // WebSocket and wire the shared proxy client, the Node analogue of
 // engine-worker.js's setupProxy. This is the minimal symmetric seam -- the goal

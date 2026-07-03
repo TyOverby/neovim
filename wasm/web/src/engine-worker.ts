@@ -56,6 +56,23 @@ onmessage = function (e: MessageEvent) {
     if (init.filesystem) { S.__nvimFiles = init.filesystem; }
     if (typeof init.cwd === 'string') { S.__nvimCwd = init.cwd; }
 
+    // Runtime-fetched tree-sitter grammars (create({parsers})): install the
+    // hook wasm/nvim_ts_dl.js consults when language.add() finds no parser
+    // file. Resolution: urls[lang] first, else baseUrl/<lang>.wasm. Returning
+    // null keeps nvim's usual "No parser for language" error. Absent config =>
+    // no hook => byte-for-byte current behavior (additive/opt-in).
+    if (init.parsers && (init.parsers.baseUrl || init.parsers.urls)) {
+      const parsers = init.parsers;
+      S.__nvimParserFetch = async function (lang: string): Promise<Uint8Array | null> {
+        const url = (parsers.urls && parsers.urls[lang]) ||
+          (parsers.baseUrl ? parsers.baseUrl.replace(/\/+$/, '') + '/' + lang + '.wasm' : null);
+        if (!url) { return null; }
+        const resp = await fetch(url);
+        if (!resp.ok) { return null; }
+        return new Uint8Array(await resp.arrayBuffer());
+      };
+    }
+
     // Surface engine stdout/stderr + exit back to the page. Set BEFORE boot so the
     // engine's own prints are captured even on the deferred-boot (proxy) path.
     S.Module = S.Module || {};

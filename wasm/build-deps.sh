@@ -43,20 +43,30 @@ vendor_libuv_internal_headers() {
 # reinstalled to a new temp dir. If the install is already present, there is
 # nothing to do; build-nvim.sh consumes only ${DEPS_USR}.
 if [ -f "${DEPS_USR}/lib/liblua.a" ] && [ -d "${DEPS_USR}/include" ]; then
-  # An install from before the vendoring step (e.g. a stale local .deps-wasm)
-  # lacks the internal headers; backfill them from the build tree if it survives,
-  # otherwise fall through to a full rebuild rather than leave nvim unable to
-  # find uv-common.h.
-  if [ ! -f "${LIBUV_INTERNAL_DST}/uv-common.h" ] && [ -f "${LIBUV_SRC}/uv-common.h" ]; then
-    echo "==> Backfilling libuv internal headers into existing install"
-    vendor_libuv_internal_headers
+  # The engine links -sMAIN_MODULE=2 (dynamic tree-sitter grammar loading), so
+  # every object in every archive must be PIC -- a non-PIC install fails the
+  # nvim link with "relocation R_WASM_MEMORY_ADDR_* ...; recompile with -fPIC".
+  # The marker distinguishes a PIC install from a stale pre-PIC one (which must
+  # be rebuilt, not reused).
+  if [ ! -f "${DEPS_USR}/.built-with-fpic" ]; then
+    echo "==> Existing install predates the -fPIC requirement (MAIN_MODULE); rebuilding"
+    rm -rf "${DEPS_BIN}"
+  else
+    # An install from before the vendoring step (e.g. a stale local .deps-wasm)
+    # lacks the internal headers; backfill them from the build tree if it survives,
+    # otherwise fall through to a full rebuild rather than leave nvim unable to
+    # find uv-common.h.
+    if [ ! -f "${LIBUV_INTERNAL_DST}/uv-common.h" ] && [ -f "${LIBUV_SRC}/uv-common.h" ]; then
+      echo "==> Backfilling libuv internal headers into existing install"
+      vendor_libuv_internal_headers
+    fi
+    if [ -f "${LIBUV_INTERNAL_DST}/uv-common.h" ]; then
+      echo "==> Reusing existing wasm deps under ${DEPS_USR} (skipping build)"
+      ls -la "${DEPS_USR}/lib" || true
+      exit 0
+    fi
+    echo "==> Existing install lacks libuv internal headers and the build tree is gone; rebuilding"
   fi
-  if [ -f "${LIBUV_INTERNAL_DST}/uv-common.h" ]; then
-    echo "==> Reusing existing wasm deps under ${DEPS_USR} (skipping build)"
-    ls -la "${DEPS_USR}/lib" || true
-    exit 0
-  fi
-  echo "==> Existing install lacks libuv internal headers and the build tree is gone; rebuilding"
 fi
 
 # Force-include the wasm shim into every emcc invocation, and use wasm-native
@@ -64,7 +74,10 @@ fi
 # setjmp/longjmp uses JS `invoke_*` trampolines, and those JS stack frames make
 # JSPI suspension fail with "trying to suspend JS frames". Lua (and nvim) use
 # longjmp for error handling, so deps must be built with the same model as nvim.
-export EMCC_CFLAGS="-include ${ROOT}/wasm/shim.h -sSUPPORT_LONGJMP=wasm ${EMCC_CFLAGS:-}"
+# -fPIC: the engine links -sMAIN_MODULE=2 (so third-party tree-sitter grammars
+# can be dlopen'd as emscripten side modules), which makes the main module
+# itself relocatable -- every object linked into it must be position-independent.
+export EMCC_CFLAGS="-include ${ROOT}/wasm/shim.h -sSUPPORT_LONGJMP=wasm -fPIC ${EMCC_CFLAGS:-}"
 
 echo "==> Seeding download cache (reuse native deps tarballs, no network needed)"
 mkdir -p "${DOWNLOADS}"
@@ -87,6 +100,9 @@ cmake --build "${DEPS_BIN}"
 
 echo "==> Vendoring libuv internal headers into the install (for uv_stubs.c)"
 vendor_libuv_internal_headers
+
+# Mark the install as PIC-built (see the fast-path check above).
+touch "${DEPS_USR}/.built-with-fpic"
 
 echo "==> Done. Wasm deps installed under ${DEPS_BIN}/usr"
 ls -la "${DEPS_BIN}/usr/lib" || true

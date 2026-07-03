@@ -789,6 +789,12 @@ if(EMSCRIPTEN)
   foreach(TS_PARSER c lua markdown markdown_inline query vim vimdoc)
     target_link_libraries(nvim_bin PRIVATE ${DEPS_PREFIX}/lib/${TS_PARSER}.a)
   endforeach()
+  # -fPIC: the engine is linked -sMAIN_MODULE=2 (below) so THIRD-PARTY
+  # tree-sitter grammars -- emscripten side modules, the artifact
+  # `tree-sitter build --wasm` publishes -- can be dlopen'd at runtime. A main
+  # module is itself relocatable, so every object linked into it must be PIC
+  # (the deps archives are too: wasm/build-deps.sh adds -fPIC to EMCC_CFLAGS).
+  target_compile_options(nvim_bin PRIVATE -fPIC)
   # Stage 4 / Phase 4: uv_stubs.c's __wrap_uv_spawn replicates real uv_spawn's
   # uv_process_t handle bookkeeping (uv__handle_init / uv__handle_start /
   # uv__queue_*), which lives in libuv's INTERNAL header uv-common.h. Scope that
@@ -888,16 +894,34 @@ if(EMSCRIPTEN)
     # sock.connect/write/close/getaddrinfo routing + server pushes. With no proxy
     # configured the C wraps fall through to __real_uv_*, so none of this runs.
     --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js
-    # The js-library delivers the server child's exit into C by calling
-    # Module._nvim_proxy_proc_on_exit. That C entry is marked EMSCRIPTEN_KEEPALIVE
-    # (in proxy_proc.c), which both keeps it from being DCE'd AND adds it to the
-    # module's exported functions -- so we do NOT restrict EXPORTED_FUNCTIONS here
-    # (that would replace emcc's default export set and risk dropping symbols nvim
-    # relies on). We only need a few runtime methods the js-library uses to pass
+    # Dynamic tree-sitter grammars (additive, opt-in): the host-fetch hook
+    # language.add() falls back to when no parser file exists anywhere --
+    # lets a browser page fetch() grammar .wasm side modules at runtime
+    # (create({parsers})). With no hook installed it returns 0 synchronously
+    # and the usual "No parser for language" error is unchanged. See file.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js
+    # Dynamic tree-sitter grammars: link as an emscripten MAIN MODULE so
+    # dlopen() (nvim's existing parser loader, load_language_from_object) can
+    # load grammar side modules at runtime. =2 keeps dead-code elimination (=1
+    # would export all of libc and grow the binary further); the cost is that
+    # symbols a side module imports must be EXPLICITLY kept alive via
+    # EXPORTED_FUNCTIONS below. Costs ~0.9MB (+13%) on nvim.wasm. Grammar
+    # parser.c only ever calls the allocator; external scanners may use the
+    # ctype/wctype/mem/str families -- the curated list below covers what
+    # scanners commonly need. An unresolved side-module import does NOT fail
+    # dlopen: it becomes a lazy stub that throws "TypeError: resolved is not a
+    # function" AT FIRST CALL -- if a grammar hits that, extend this list.
+    -sMAIN_MODULE=2
+    "SHELL:-sEXPORTED_FUNCTIONS=_main,_malloc,_calloc,_realloc,_free,_abort,_memcpy,_memmove,_memset,_memcmp,_memchr,_strlen,_strcmp,_strncmp,_strchr,_strcpy,_strncpy,_isalnum,_isalpha,_isdigit,_isspace,_isxdigit,_islower,_isupper,_ispunct,_tolower,_toupper,_iswalnum,_iswalpha,_iswdigit,_iswspace,_iswxdigit,_iswlower,_iswupper,_iswpunct,_iswblank,_towlower,_towupper"
+    # NB: EXPORTED_FUNCTIONS replaces emcc's default export set (hence _main),
+    # but EMSCRIPTEN_KEEPALIVE entries (e.g. proxy_proc.c's
+    # _nvim_proxy_proc_on_exit, which the proc-proxy js-library calls) are
+    # still exported independently of this list -- verified by the proxy e2e.
+    # We only need a few runtime methods the js-libraries use to pass
     # the handle pointer + read strings.
     -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)

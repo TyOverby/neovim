@@ -177,6 +177,39 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		}
 	})
 
+	// 5c) DYNAMIC tree-sitter grammar off the SERVER's disk: a grammar .wasm
+	//     (emscripten side module; the fixture is the lua grammar renamed
+	//     tree_sitter_luadyn) that exists only on the io-proxy host loads at
+	//     runtime -- the engine reads it through the proxied file IO, stages it
+	//     into MEMFS, and dlopens it (stage_parser_for_dlopen in treesitter.c).
+	//     Covers both an explicit path and 'runtimepath' discovery of
+	//     parser/<lang>.wasm in a server-side dir (the "drop a prebuilt grammar
+	//     in your site dir on the remote" story).
+	t.Run("treesitter dynamic grammar from server disk", func(t *testing.T) {
+		fixture, err := os.ReadFile(filepath.Join("..", "..", "web", "fixtures", "luadyn.wasm"))
+		if err != nil {
+			t.Skipf("fixture missing (run wasm/web/fixtures/build-fixture.sh): %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "luadyn.wasm"), fixture, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rtp := filepath.Join(root, "tsrt", "parser")
+		if err := os.MkdirAll(rtp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rtp, "luadyn_rtp.wasm"), fixture, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := evalRPC(t, ctx, `window.nvim.request('nvim_exec_lua', ['local ok = vim.treesitter.language.add("luadyn", { path = "`+root+`/luadyn.wasm" }); local root = vim.treesitter.get_string_parser("local x = 1", "luadyn"):parse()[1]:root():type(); return tostring(ok) .. ":" .. root', []])`)
+		if got != "true:chunk" {
+			t.Fatalf("explicit-path server grammar = %q, want \"true:chunk\"", got)
+		}
+		got = evalRPC(t, ctx, `window.nvim.request('nvim_exec_lua', ['vim.opt.runtimepath:append("`+root+`/tsrt"); local ok = vim.treesitter.language.add("luadyn_rtp", { symbol_name = "luadyn" }); return tostring(ok)', []])`)
+		if got != "true" {
+			t.Fatalf("runtimepath server grammar = %q, want \"true\"", got)
+		}
+	})
+
 	// 6) PTY: :terminal runs a real shell ON THE SERVER, in the editor's cwd —
 	//    which is the server's working dir (`root`; the browser chdir'd into it
 	//    from the hello) — so a RELATIVE path lands in root.
