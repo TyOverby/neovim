@@ -99,8 +99,10 @@ cp "${ROOT}/wasm/proxy-client.js" "${ROOT}/wasm/proxy-reconnect.js" "${BUILD}/bi
 #
 #   full    - the entire runtime/ (today's complete ~22M runtime; the default).
 #   core    - boots + edits + filetype + indent + a CURATED syntax slice for
-#             common languages. Drops doc/, tutor/, spell/, treesitter queries/,
-#             pack/, and the bulk of syntax/.  Target a few MB.
+#             common languages + treesitter queries/ (the builtin grammars'
+#             highlight queries -- the lua/markdown/help ftplugins start
+#             treesitter unconditionally). Drops doc/, tutor/, spell/, and the
+#             bulk of syntax/.  Target a few MB.
 #   minimal - strictly what nvim needs to boot `--embed` and edit: lua/ (the vim.*
 #             stdlib -- MANDATORY, nvim won't boot without it), plugin/, scripts/,
 #             and the top-level boot .vim/.lua. No syntax, ftplugin, indent, doc.
@@ -255,10 +257,13 @@ stage_syntax "${MIN}"   # framework only, no languages
 
 # core: minimal + filetype/indent editing support + curated syntax + the WHOLE
 # pack/ (so the bundled plugin/ scripts' packadds resolve -> clean boot).
+# queries/ (~116K) must ride along with ftplugin/: the lua/markdown/help
+# ftplugins vim.treesitter.start() unconditionally, and the statically linked
+# builtin grammars need their highlight queries or start() errors.
 COR="${STAGE_ROOT}/core"
 mkdir -p "${COR}"
 stage_entries "${COR}" lua plugin scripts autoload colors compiler keymap \
-  ftplugin indent pack "${CORE_BOOT_FILES[@]}"
+  ftplugin indent pack queries "${CORE_BOOT_FILES[@]}"
 stage_syntax "${COR}" "${SYNTAX_LANGS[@]}"
 
 # --- verify each staged variant boots CLEAN (the gate) -----------------------

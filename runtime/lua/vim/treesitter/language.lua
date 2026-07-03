@@ -120,6 +120,13 @@ function M.add(lang, opts)
     return true
   end
 
+  -- The wasm build has no dlopen: its bundled parsers are statically linked
+  -- into the binary and registered by name (see src/nvim/lua/treesitter.c).
+  -- Only that build defines this hook.
+  if path == nil and vim._ts_add_language_builtin and vim._ts_add_language_builtin(lang) then
+    return true
+  end
+
   if path == nil then
     -- allow only safe language names when looking for libraries to load
     if not (lang and lang:match('[%w_]+') == lang) then

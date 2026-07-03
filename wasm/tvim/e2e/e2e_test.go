@@ -161,6 +161,22 @@ func TestBrowserProxyEndToEnd(t *testing.T) {
 		}
 	})
 
+	// 5b) tree-sitter: the bundled grammars are statically linked into nvim.wasm
+	//     (wasm has no dlopen; see the EMSCRIPTEN block in src/nvim/CMakeLists.txt),
+	//     and the highlight queries ride in the packaged runtime .data. Opening a
+	//     .lua file runs ftplugin/lua.lua -> vim.treesitter.start() unconditionally,
+	//     so this fails loudly if either half regresses. This covers the BROWSER
+	//     runtime path (queries from the .data package); the Node-side
+	//     wasm/web/treesitter.test.js covers the engine against the on-disk runtime.
+	t.Run("treesitter grammar on .lua", func(t *testing.T) {
+		writeFile(t, filepath.Join(root, "ts-probe.lua"), "local x = 1\nprint(x)\n")
+		evalRPC(t, ctx, `window.nvim.request('nvim_cmd', [{cmd:'edit', args:['`+root+`/ts-probe.lua']}, {}])`)
+		got := evalRPC(t, ctx, `window.nvim.request('nvim_exec_lua', ['local b = vim.api.nvim_get_current_buf(); local hl = vim.treesitter.highlighter.active[b] ~= nil; local rt = vim.treesitter.get_parser(b, "lua"):parse()[1]:root():type(); return tostring(hl) .. ":" .. rt', []])`)
+		if got != "true:chunk" {
+			t.Fatalf("treesitter not active on .lua buffer (highlighter:roottype = %q, want \"true:chunk\")", got)
+		}
+	})
+
 	// 6) PTY: :terminal runs a real shell ON THE SERVER, in the editor's cwd —
 	//    which is the server's working dir (`root`; the browser chdir'd into it
 	//    from the hello) — so a RELATIVE path lands in root.

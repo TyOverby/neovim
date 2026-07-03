@@ -779,6 +779,16 @@ target_link_libraries(nvim_bin PRIVATE main_lib PUBLIC libuv)
 if(EMSCRIPTEN)
   target_sources(nvim_bin PRIVATE
     ${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c)
+  # Bundled tree-sitter grammars. Natively these are the dlopen()able
+  # lib/nvim/parser/<lang>.so modules; wasm has no dlopen, so the same parser
+  # sources (cross-compiled to static archives by wasm/build-deps.sh -- CMake
+  # demotes their MODULE targets to static under emscripten) are linked
+  # straight into the binary and registered by name via
+  # vim._ts_add_language_builtin (treesitter.c). Keep this list in sync with
+  # builtin_langs[] there and the parser list in cmake.deps.
+  foreach(TS_PARSER c lua markdown markdown_inline query vim vimdoc)
+    target_link_libraries(nvim_bin PRIVATE ${DEPS_PREFIX}/lib/${TS_PARSER}.a)
+  endforeach()
   # Stage 4 / Phase 4: uv_stubs.c's __wrap_uv_spawn replicates real uv_spawn's
   # uv_process_t handle bookkeeping (uv__handle_init / uv__handle_start /
   # uv__queue_*), which lives in libuv's INTERNAL header uv-common.h. Scope that

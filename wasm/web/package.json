@@ -6,7 +6,7 @@
   "scripts": {
     "build": "./build-ts.sh",
     "pretest": "./build-ts.sh",
-    "test": "node e2e.test.js"
+    "test": "node e2e.test.js && node treesitter.test.js"
   },
   "keywords": [],
   "author": "",

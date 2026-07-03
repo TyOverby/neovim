@@ -190,7 +190,7 @@ costs no recompile and no relink — only a different `(data + loader)` pair.
 | `plugins` | Contents | Approx `.data` size |
 |---|---|---|
 | `'full'` (default) | The complete runtime — today's behavior, unchanged. | ~22 MB |
-| `'core'` | Boots + edits + filetype detection + indent + a **curated** syntax-highlighting slice for common languages (`autoload/`, `colors/`, `compiler/`, `keymap/`, `ftplugin/`, `indent/`, the whole `pack/`, and ~40 hand-picked `syntax/` languages). Drops `doc/`, `tutor/`, `spell/`, treesitter `queries/`, and the bulk of `syntax/`. | ~8.7 MB |
+| `'core'` | Boots + edits + filetype detection + indent + a **curated** syntax-highlighting slice for common languages (`autoload/`, `colors/`, `compiler/`, `keymap/`, `ftplugin/`, `indent/`, the whole `pack/`, treesitter `queries/`, and ~40 hand-picked `syntax/` languages). Drops `doc/`, `tutor/`, `spell/`, and the bulk of `syntax/`. | ~9.1 MB |
 | `'minimal'` | Strictly the boot/edit essentials: `lua/` (the `vim.*` stdlib — **mandatory**, nvim will not boot without it), `plugin/`, `scripts/`, `filetype.lua`, plus the tiny `syntax/` *framework* (`syntax.vim`/`synload.vim`/… ~16 KB) so nvim's default `syntax on` succeeds — with **no language files** so nothing is actually highlighted. No `ftplugin/`, no `indent/`, no `doc/`. | ~3.1 MB |
 
 The variants are staged and packaged by `wasm/build-nvim.sh` (which defines the
