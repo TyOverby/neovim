@@ -32,7 +32,7 @@ mkdir -p "$OUT_DIR/logs"
 run_one() {
   local spec="$1"
   local slug log status passed failed errors last
-  slug="$(echo "$spec" | sed 's|^test/functional/||; s|_spec\.lua$||; s|/|__|g')"
+  slug="$(basename "$OUT_DIR")_$(echo "$spec" | sed 's|^test/functional/||; s|_spec\.lua$||; s|/|__|g')"
   log="$OUT_DIR/logs/$slug.log"
   set +e
   TEST_SUFFIX="_$slug" TEST_TIMEOUT="$FILE_TIMEOUT" \
