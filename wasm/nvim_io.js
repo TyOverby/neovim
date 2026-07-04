@@ -50,7 +50,47 @@ addToLibrary({
     // suspended poll().
     signalWake: function () { if (NvimIO.wake) { NvimIO.wake(); } },
 
+    // Emscripten caches directory-entry nodes in FS.nameTable and never
+    // re-validates NODEFS-backed entries against the host filesystem. When an
+    // EXTERNAL process deletes (or deletes and recreates) a file the engine
+    // has looked up before, the stale cached node makes subsequent operations
+    // fail: an O_CREAT open takes the "node exists" path in FS.open and then
+    // ENOENTs in truncate/stream-open instead of creating the file (seen as
+    // shada E886 / writefile E482 in the upstream test suite, but it equally
+    // breaks `:w` after `rm` from another terminal). Validate cache hits for
+    // NODEFS *file* nodes with a host lstat and evict stale ones, then redo
+    // the lookup so a recreated file gets a fresh node and a missing one
+    // throws ENOENT from the backend. Directory nodes are left alone to keep
+    // path-walk components cheap (each lookup validates only the leaf file).
+    patchNodefsStaleness: function () {
+      if (typeof process === 'undefined' || !process.versions || !process.versions.node) {
+        return;  // browser: MEMFS only, no external mutations possible
+      }
+      var NODEFS = FS.filesystems && FS.filesystems.NODEFS;
+      if (!NODEFS) { return; }
+      var fs = require('fs');
+      var origLookupNode = FS.lookupNode;
+      FS.lookupNode = function (parent, name) {
+        var node = origLookupNode.call(FS, parent, name);
+        if (node && node.node_ops === NODEFS.node_ops &&
+            !FS.isMountpoint(node) && !FS.isDir(node.mode)) {
+          var gone = false;
+          try {
+            fs.lstatSync(NODEFS.realPath(node));
+          } catch (e) {
+            gone = !!(e && e.code === 'ENOENT');
+          }
+          if (gone) {
+            FS.hashRemoveNode(node);
+            return origLookupNode.call(FS, parent, name);
+          }
+        }
+        return node;
+      };
+    },
+
     setup: function () {
+      NvimIO.patchNodefsStaleness();
       var ch = Module['nvimChannel'];
       if (!ch) {
         // No engine channel: this isn't the --embed engine (e.g. a headless
