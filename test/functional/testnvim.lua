@@ -630,7 +630,10 @@ function M._new_argv(...)
         'TMPDIR',
         'TSAN_OPTIONS',
         'VIMRUNTIME',
+        'XDG_CONFIG_HOME',
         'XDG_DATA_DIRS',
+        'XDG_DATA_HOME',
+        'XDG_STATE_HOME',
       }) do
         if not env_opt[k] then
           env_opt[k] = os.getenv(k)
