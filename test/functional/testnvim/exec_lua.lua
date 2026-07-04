@@ -106,6 +106,21 @@ local function func_source(f)
     return nil
   end
   lines[1] = lines[1]:sub(fpos)
+  -- A named definition (`local function foo(...)`) is not valid as an
+  -- expression: anonymize it. Colon methods get their implicit self back.
+  local name, rest = lines[1]:match('^function%s+([%w_%.:]+)(%s*%(.*)$')
+  if name then
+    if name:find(':', 1, true) then
+      local after = rest:match('^%s*%((.*)$')
+      if after:match('^%s*%)') then
+        lines[1] = 'function(self' .. after
+      else
+        lines[1] = 'function(self,' .. after
+      end
+    else
+      lines[1] = 'function' .. rest
+    end
+  end
   -- Declare the upvalue names as locals so the recompiled function closes
   -- over real upvalue slots instead of falling back to global lookups.
   local upnames = {} --- @type string[]
