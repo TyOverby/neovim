@@ -120,14 +120,15 @@ local function func_source(f)
   end
   local prefix = #upnames > 0 and ('local ' .. table.concat(upnames, ', ') .. '; ') or ''
   -- The last line usually carries trailing call-site text (`end)`, `end, 42)`).
-  -- Chop from the end until the text compiles as an expression; the first
-  -- success is the longest valid prefix, i.e. the full function (a harmless
-  -- `, 42` tail merely adds extra ignored return values).
+  -- Chop from the end until the text compiles as an expression AND ends on the
+  -- function's own `end` keyword. Compiling alone is not enough: a tail like
+  -- `end, (cond() and 'a') or 'b')` chops to a valid multi-value return whose
+  -- extra expressions would be EVALUATED remotely (where the call-site's
+  -- locals don't exist).
   local text = table.concat(lines, '\n')
   while #text > 0 do
-    local chunk = prefix .. 'return ' .. text
-    if loadstring(chunk) then
-      return chunk
+    if text:match('%f[%w_]end%s*$') and loadstring(prefix .. 'return ' .. text) then
+      return prefix .. 'return ' .. text
     end
     text = text:sub(1, -2)
   end
