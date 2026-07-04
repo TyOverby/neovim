@@ -65,8 +65,78 @@ end
 
 local M = {}
 
+--- Recovers the source text of an inline function, for targets whose Lua VM
+--- cannot load this process's bytecode (the wasm build runs PUC Lua 5.1 in a
+--- 32-bit VM; neither LuaJIT bytecode nor a 64-bit PUC dump loads there).
+--- Returns a chunk that, when run, yields a function equivalent to `f`: the
+--- function's upvalue names are declared as locals wrapping the recompiled
+--- function so debug.setupvalue() in the handler still finds them by name.
+--- Returns nil if the source cannot be recovered (caller falls back to
+--- string.dump).
+--- @param f function
+--- @return string?
+local function func_source(f)
+  local info = debug.getinfo(f, 'S')
+  if not info or info.source:sub(1, 1) ~= '@' or info.linedefined <= 0 then
+    return nil
+  end
+  local fd = io.open(info.source:sub(2), 'r')
+  if not fd then
+    return nil
+  end
+  local lines = {} --- @type string[]
+  local lnum = 0
+  for line in fd:lines() do
+    lnum = lnum + 1
+    if lnum >= info.linedefined then
+      lines[#lines + 1] = line
+    end
+    if lnum >= info.lastlinedefined then
+      break
+    end
+  end
+  fd:close()
+  if #lines == 0 or lnum < info.lastlinedefined then
+    return nil
+  end
+  -- Drop whatever precedes the `function` keyword on the first line
+  -- (e.g. `exec_lua(function()` -> `function()`).
+  local fpos = lines[1]:find('function', 1, true)
+  if not fpos then
+    return nil
+  end
+  lines[1] = lines[1]:sub(fpos)
+  -- Declare the upvalue names as locals so the recompiled function closes
+  -- over real upvalue slots instead of falling back to global lookups.
+  local upnames = {} --- @type string[]
+  local i = 1
+  while true do
+    local n = debug.getupvalue(f, i)
+    if not n then
+      break
+    end
+    upnames[#upnames + 1] = n
+    i = i + 1
+  end
+  local prefix = #upnames > 0 and ('local ' .. table.concat(upnames, ', ') .. '; ') or ''
+  -- The last line usually carries trailing call-site text (`end)`, `end, 42)`).
+  -- Chop from the end until the text compiles as an expression; the first
+  -- success is the longest valid prefix, i.e. the full function (a harmless
+  -- `, 42` tail merely adds extra ignored return values).
+  local text = table.concat(lines, '\n')
+  while #text > 0 do
+    local chunk = prefix .. 'return ' .. text
+    if loadstring(chunk) then
+      return chunk
+    end
+    text = text:sub(1, -2)
+  end
+  return nil
+end
+
 --- This is run in the context of the remote Nvim instance.
---- @param bytecode string
+--- @param bytecode string bytecode of the function itself, or (source mode) a
+--- chunk that returns the function when called
 --- @param upvalues table<string,any>
 --- @param ... any[]
 --- @return any[] result
@@ -82,6 +152,10 @@ function M.handler(bytecode, upvalues, ...)
   end
 
   local f = assert(loadstring(bytecode))
+  if bytecode:sub(1, 1) ~= '\27' then
+    -- Source mode: the chunk returns the actual function.
+    f = f()
+  end
 
   set_upvalues(f, upvalues)
 
@@ -103,10 +177,18 @@ end
 --- @param code function
 --- @param ... ...
 local function run(session, lvl, code, ...)
+  -- The wasm target's Lua VM (PUC 5.1, 32-bit) cannot load this process's
+  -- bytecode; ship recovered source text instead (see func_source).
+  local payload --- @type string?
+  if os.getenv('NVIM_TEST_WASM') then
+    payload = func_source(code)
+  end
+  payload = payload or string.dump(code)
+
   local stat, rv = session:request(
     'nvim_exec_lua',
     [[return { require('test.functional.testnvim.exec_lua').handler(...) }]],
-    { string.dump(code), get_upvalues(code), ... }
+    { payload, get_upvalues(code), ... }
   )
 
   if not stat then
