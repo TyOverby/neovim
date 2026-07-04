@@ -152,11 +152,14 @@ static int tslua_add_language_from_object(lua_State *L)
 // caller right after dlopen (the library is in memory by then); the
 // counter keeps names unique so emscripten's per-filename library cache
 // can never hand back a previously loaded grammar.
-static const char *stage_parser_for_dlopen(lua_State *L, const char *path)
+static const char *stage_parser_for_dlopen(lua_State *L, const char *path, const char *lang_name)
 {
   FILE *in = os_fopen(path, "r");
   if (in == NULL) {
-    luaL_error(L, "Failed to load parser %s: cannot open file", path);
+    // Keep the native load-failure shape ("...: uv_dlopen: ...") -- callers
+    // and tests match on it.
+    luaL_error(L, "Failed to load parser for language '%s': uv_dlopen: cannot open %s",
+               lang_name, path);
   }
   fseek(in, 0L, SEEK_END);
   size_t len = (size_t)ftell(in);
@@ -165,7 +168,8 @@ static const char *stage_parser_for_dlopen(lua_State *L, const char *path)
   if (len > 0 && fread(data, len, 1, in) != 1) {
     xfree(data);
     fclose(in);
-    luaL_error(L, "Failed to load parser %s: cannot read file", path);
+    luaL_error(L, "Failed to load parser for language '%s': uv_dlopen: cannot read %s",
+               lang_name, path);
     return NULL;
   }
   fclose(in);
@@ -188,7 +192,8 @@ static const char *stage_parser_for_dlopen(lua_State *L, const char *path)
     if (out != NULL) {
       fclose(out);
     }
-    luaL_error(L, "Failed to load parser %s: cannot stage for dlopen", path);
+    luaL_error(L, "Failed to load parser for language '%s': uv_dlopen: cannot stage %s",
+               lang_name, path);
     return NULL;
   }
   fclose(out);
@@ -201,7 +206,7 @@ static const TSLanguage *load_language_from_object(lua_State *L, const char *pat
                                                    const char *lang_name, const char *symbol)
 {
 #ifdef __EMSCRIPTEN__
-  const char *staged = stage_parser_for_dlopen(L, path);
+  const char *staged = stage_parser_for_dlopen(L, path, lang_name);
   const char *load_path = staged;
 #else
   const char *load_path = path;
