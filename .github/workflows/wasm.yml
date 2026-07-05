@@ -1,15 +1,21 @@
-# Build and test the WebAssembly port, and publish a downloadable demo bundle.
+# The WebAssembly pipeline: ONE build, fanned out to every consumer.
 #
-# One job, one build, three deliverables:
-#   1. the wasm build itself (the composite action runs the per-variant boot
-#      gate as part of wasm/build-nvim.sh — a variant that doesn't boot clean
-#      fails the build);
-#   2. the test run: the Node smoke tests (wasm/web: e2e + treesitter) plus a
-#      sample of the upstream functional suite executed against the wasm
-#      engine (wasm/test/run-functional.sh);
-#   3. the demo: wasm/web/build-site.sh assembled and uploaded as the
-#      `nvim-wasm-demo` artifact — a flat directory that runs on any static
-#      file server. Download, unzip, `python3 -m http.server`, open the page.
+#   build ─────────┬─▶ test        (engine/JS tests + upstream functional sample)
+#   (wasm engine + ├─▶ test-tvim-e2e (headless-Chrome browser→engine→server e2e)
+#    runtime pkgs +├─▶ build-tvim  (cross-compile the standalone server, bundle
+#    site bundle)  │                embedded, per-OS/arch matrix)
+#                  └─▶ deploy      (GitHub Pages, push builds only)
+#
+# The expensive stage — emscripten + the wasm cross-compile + runtime variant
+# packaging (with the per-variant boot gate) + site assembly — lives in the
+# composite action .github/actions/build-wasm and runs exactly once, in
+# `build`. Its outputs are published as two artifacts:
+#   * nvim-wasm-demo : the assembled static site (also the human-downloadable
+#                      demo: unzip, `python3 -m http.server`, open the page)
+#   * wasm-bin       : build-wasm/bin (engine + data packages + Node hosts),
+#                      what the test job runs against
+# tvim's own unit/conformance tests need no wasm build and run in parallel
+# (test-tvim-unit).
 name: wasm
 
 on:
@@ -40,52 +46,28 @@ concurrency:
   group: wasm-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  EM_VERSION: 3.1.69
+
 jobs:
-  build-test-demo:
+  # ---- the shared heavy stage -----------------------------------------------
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      EM_VERSION: 3.1.69
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build wasm (engine + runtime packages + boot gate)
+      - name: Build wasm + assemble site
         uses: ./.github/actions/build-wasm
         with:
           em-version: ${{ env.EM_VERSION }}
+          site-dir: _site
 
-      # The upstream functional-test harness RUNNER is the native nvim (it
-      # spawns child processes); the composite action already configured
-      # build/ (for nlua0), so this is an incremental build.
-      - name: Build native nvim (functional-test runner)
-        run: cmake --build build
-
-      - name: Node smoke tests (e2e + treesitter)
-        working-directory: wasm/web
-        run: npm test
-
-      # A sample of the upstream functional suite against the wasm engine
-      # (one runner invocation per file; the full sweep is wasm/test/triage.sh).
-      # These files cover RPC + API, the PUC-Lua loader fallback, editing +
-      # folds, normal-mode input, and tree-sitter.
-      - name: Functional suite sample (wasm engine)
-        run: |
-          for f in \
-            test/functional/api/version_spec.lua \
-            test/functional/lua/loader_spec.lua \
-            test/functional/editor/fold_spec.lua \
-            test/functional/editor/mode_normal_spec.lua \
-            test/functional/treesitter/language_spec.lua \
-          ; do
-            echo "==> $f"
-            TEST_TIMEOUT=900 wasm/test/run-functional.sh "$f"
-          done
-
-      - name: Assemble the demo site
-        run: wasm/web/build-site.sh "${GITHUB_WORKSPACE}/_site"
-
-      # A README so the unzipped bundle is self-explanatory.
-      - name: Add bundle README
+      # A README so the downloaded demo bundle is self-explanatory.
+      - name: Add demo README
         run: |
           cat > _site/README.txt <<'EOF'
           Neovim (WebAssembly) — browser demo bundle
@@ -102,14 +84,216 @@ jobs:
 
           then open http://localhost:8000/ in a browser with WebAssembly JSPI
           support (Chrome/Chromium >= 137), click the grid, and type.
+
+          For real IO (files/:!/:terminal/LSP on a host machine), serve the
+          same bundle with the tvim server instead: wasm/tvim in the repo, or
+          the tvim-<os>-<arch> artifact from this same workflow run.
           EOF
 
-      - name: Zip the demo bundle
-        run: (cd _site && zip -qr ../nvim-wasm-demo.zip .)
-
-      - name: Upload demo bundle
+      # The demo site: consumed by build-tvim (embedded into the Go binary),
+      # by test-tvim-e2e, by the Pages deploy, and downloadable by humans.
+      - name: Upload demo site artifact
         uses: actions/upload-artifact@v4
         with:
           name: nvim-wasm-demo
-          path: nvim-wasm-demo.zip
+          path: _site
           retention-days: 30
+
+      # The raw engine build: what the test job drives (worker.js hosts,
+      # data packages, proxy client bundles all sit next to nvim.js).
+      - name: Upload engine artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-bin
+          path: build-wasm/bin
+          retention-days: 7
+
+      # For the Pages deploy job (its own artifact format).
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # ---- engine/JS tests against the shared build ------------------------------
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+
+      - name: Download engine artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-bin
+          path: build-wasm/bin
+
+      # The upstream functional-test harness RUNNER is the native nvim (it
+      # spawns child processes), so build it; same cache as the build job.
+      - name: Cache native deps (.deps)
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: native-deps-${{ runner.os }}-${{ hashFiles('cmake.deps/**') }}
+
+      - name: Build native nvim (functional-test runner)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gettext cmake unzip curl build-essential
+          cmake -S cmake.deps -B .deps -G Ninja -D CMAKE_BUILD_TYPE=Release
+          cmake --build .deps
+          cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Grid-renderer suite (snapshots + units)
+        working-directory: wasm/grid-renderer
+        env:
+          # The composite scene's CJK glyphs come from the machine's fallback
+          # font (runners ship a different Noto CJK than dev boxes); allow a
+          # small pixel-diff ratio on that one scene. See text.test.js.
+          SNAPSHOT_FONT_TOLERANCE: "1"
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Node smoke tests (e2e + treesitter)
+        working-directory: wasm/web
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Proxy reconnect-facade test
+        working-directory: wasm/web
+        run: |
+          (cd ../../wasm && npm install --no-audit --no-fund && ./build-ts.sh)
+          node reconnect.test.js
+
+      # A sample of the upstream functional suite against the wasm engine
+      # (one runner invocation per file; the full sweep is wasm/test/triage.sh).
+      - name: Functional suite sample (wasm engine)
+        run: |
+          for f in \
+            test/functional/api/version_spec.lua \
+            test/functional/lua/loader_spec.lua \
+            test/functional/editor/fold_spec.lua \
+            test/functional/editor/mode_normal_spec.lua \
+            test/functional/treesitter/language_spec.lua \
+          ; do
+            echo "==> $f"
+            TEST_TIMEOUT=900 wasm/test/run-functional.sh "$f"
+          done
+
+  # ---- tvim: unit + conformance (no wasm build needed) ------------------------
+  test-tvim-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm/tvim/go.mod
+          cache-dependency-path: wasm/tvim/go.sum
+      - name: Go tests (codec + server + conformance)
+        working-directory: wasm/tvim
+        run: go test ./...
+      - name: Conformance summary
+        working-directory: wasm/tvim
+        run: go run ./cmd/conformance
+
+  # ---- tvim: browser→engine→server e2e against the shared bundle --------------
+  test-tvim-e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm/tvim/e2e/go.mod
+          cache-dependency-path: wasm/tvim/e2e/go.sum
+      - name: Download demo site bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: nvim-wasm-demo
+          path: _site
+      # ubuntu-latest ships Chrome; the suite skips (not fails) without it.
+      - name: Headless-Chrome e2e
+        working-directory: wasm/tvim/e2e
+        env:
+          TVIM_BUNDLE: ${{ github.workspace }}/_site
+        run: go test -v -timeout 15m
+
+  # ---- tvim executables, bundle embedded --------------------------------------
+  build-tvim:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm/tvim/go.mod
+          cache-dependency-path: wasm/tvim/go.sum
+
+      # The same assembled site the build job produced — drop it into the embed
+      # dir so `-tags embed_assets` (`//go:embed all:site`) bakes it in.
+      - name: Download demo site bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: nvim-wasm-demo
+          path: wasm/tvim/server/site
+
+      # Gzip the large assets in place (raw dropped) so the binary embeds the
+      # compressed bytes and serves them with Content-Encoding: gzip. Shrinks
+      # the binary ~47MB -> ~20MB.
+      - name: Precompress embedded assets
+        working-directory: wasm/tvim
+        run: ./precompress.sh server/site
+
+      - name: Cross-compile tvim
+        working-directory: wasm/tvim
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out="tvim-${GOOS}-${GOARCH}"
+          go build -mod=readonly -tags embed_assets -trimpath -o "dist/${out}" ./cmd/tvim
+          ls -l "dist/${out}"
+
+      - name: Upload tvim binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: wasm/tvim/dist/tvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          retention-days: 7
+
+  # ---- GitHub Pages (push builds only) -----------------------------------------
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
