@@ -34,7 +34,8 @@
 // from the same headless Screen and needs no canvas stack.
 //
 // This module is the TypeScript SOURCE OF TRUTH; the build emits a UMD
-// `neovim-ui.js` (globalThis.NeovimUI / require()) and a `neovim-ui.d.ts`.
+// `neovim-ui.js` (globalThis.NeovimUI / require()), an ESM `neovim-ui.mjs`,
+// and a `neovim-ui.d.ts`.
 
 // The subset of a neovim.js instance the renderer uses.
 export interface UIInstance {

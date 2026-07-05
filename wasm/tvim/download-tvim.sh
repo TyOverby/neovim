@@ -2,7 +2,7 @@
 # Download the most recent CI-built `tvim` binary for an os/arch.
 #
 # Pulls the `tvim-<os>-<arch>` artifact from the latest SUCCESSFUL run of the
-# deploy-wasm-pages.yml workflow (the build that also deploys Pages) and lands it
+# wasm.yml workflow (the shared build/test/deploy pipeline) and lands it
 # at <OUT>/tvim. Defaults to this machine's os/arch; override by passing them or
 # via env.
 #
@@ -10,13 +10,13 @@
 #   ./download-tvim.sh linux amd64     # explicit      -> ./tvim
 #   OUT=/usr/local/bin ./download-tvim.sh darwin arm64 # -> /usr/local/bin/tvim
 #
-# Env: REPO (default TyOverby/neovim), BRANCH (default wasm-build),
+# Env: REPO (default TyOverby/neovim), BRANCH (default main),
 #      OUT (output dir, default .). Requires the `gh` CLI, authenticated.
 set -euo pipefail
 
 REPO="${REPO:-TyOverby/neovim}"
-BRANCH="${BRANCH:-wasm-build}"
-WORKFLOW="deploy-wasm-pages.yml"
+BRANCH="${BRANCH:-main}"
+WORKFLOW="wasm.yml"
 OUT="${OUT:-.}"
 
 # Default os/arch to this host, normalized to Go's GOOS/GOARCH spelling.
