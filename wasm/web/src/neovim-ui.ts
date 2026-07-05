@@ -1,18 +1,37 @@
-// wasm/web/src/neovim-ui.ts - the headless screen model for a Neovim instance.
+// wasm/web/src/neovim-ui.ts - default UI renderer for a Neovim instance.
+//
+// The "default UI renderer" layer (see wasm/README.md). It has two parts:
 //
 //   * Screen - a HEADLESS model of the ext_linegrid screen: it decodes `redraw`
-//     batches into a 2-D character grid + cursor + highlight table. No DOM.
-//     Deliberately separable so it can be driven and asserted without a
-//     browser; renderers (neovim-ui-pre.ts's <pre> DOM renderer today) paint
-//     from it.
+//     batches into a 2-D character grid + cursor. No DOM. This is deliberately
+//     separable so it can be driven and asserted without a browser (the headless
+//     end-to-end test in e2e.test.js renders into the very same Screen the page
+//     uses, which is what validates the decode path).
 //
-//   * keyToNvim - KeyboardEvent -> nvim_input notation ('<CR>', '<C-x>', ...).
+//   * mount_into(instance, canvas) - wires a Screen to a neovim.js instance and
+//     a <canvas>: subscribes to redraw, attaches the UI, paints via the
+//     grid-renderer package (wasm/grid-renderer - a bitmap-glyph-cache canvas
+//     renderer with path-drawn box-drawing/legacy-computing glyphs), and maps
+//     keydown -> nvim_input. Painting is flush-gated and ADAPTIVE: immediate
+//     while cheap (keystroke echo never waits for the next animation frame),
+//     coalescing into one rAF paint once a redraw flood exhausts an 8ms
+//     painting budget within the frame (see the adaptive-paint comment).
 //
-// We attach with ext_linegrid and model grid 1 as a monospace cell grid: the
-// Screen decodes the highlight stream (default_colors_set, hl_attr_define,
-// and the per-cell hl ids in grid_line). The command line and messages are
-// drawn by Neovim into the bottom rows of that same grid (we don't request
-// ext_cmdline/ext_messages), so `:w`, `:q`, etc. are visible.
+// We attach with ext_linegrid and paint grid 1 as a colored monospace cell
+// grid: the Screen decodes the highlight stream (default_colors_set,
+// hl_attr_define, and the per-cell hl ids in grid_line) and the renderer
+// paints fg/bg/bold/italic/underline/undercurl/strikethrough/reverse per
+// cell. The command line and messages are drawn by Neovim into the bottom
+// rows of that same grid (we don't request ext_cmdline/ext_messages), so
+// `:w`, `:q`, etc. are visible.
+//
+// DEPENDENCY: mount_into needs the grid-renderer module. Like the msgpack
+// dependency in neovim.ts, it is resolved at runtime - pass it via
+// opts.grid_renderer, or load dist/grid-renderer.js (UMD) before this module
+// so globalThis.GridRenderer is set. The headless Screen has no dependency.
+//
+// The simple "render into a <pre>" DOM renderer (neovim-ui-pre.ts) paints
+// from the same headless Screen and needs no canvas stack.
 //
 // This module is the TypeScript SOURCE OF TRUTH; the build emits a UMD
 // `neovim-ui.js` (globalThis.NeovimUI / require()) and a `neovim-ui.d.ts`.
@@ -42,6 +61,36 @@ export interface HlAttrs {
   [k: string]: any;
 }
 
+export interface MountOptions {
+  font_family?: string;
+  // Font size in CSS px (a number; the HiDPI backing-store scale is handled
+  // internally via devicePixelRatio).
+  font_size?: number;
+  cols?: number;
+  rows?: number;
+  // Base colors used when Neovim says "use the default terminal color"
+  // (defaults: 0xd4d4d4 on 0x000000, matching the demo page).
+  default_fg?: number;
+  default_bg?: number;
+  // Painting time budget per ~frame window (ms, default 8): flushes paint
+  // immediately until painting has cost this much within the window, then
+  // the rest of the flood coalesces into one requestAnimationFrame paint.
+  // 0 = always coalesce (pure rAF batching).
+  paint_budget_ms?: number;
+  // The grid-renderer module (see the header comment). Defaults to
+  // globalThis.GridRenderer.
+  grid_renderer?: any;
+}
+
+export interface MountHandle {
+  screen: Screen;
+  cols: number;
+  rows: number;
+  // The underlying grid-renderer instance (glyph cache, metrics, ...).
+  renderer: any;
+  resize(c: number, r: number): Promise<any>;
+  dispose(): void;
+}
 
 // ---- Screen: headless grid model + redraw decode ------------------------
 export class Screen {
@@ -190,6 +239,43 @@ export class Screen {
   }
 }
 
+// ---- Screen -> renderer cells --------------------------------------------
+// Resolve one row of the Screen into grid-renderer Cells: apply the hl attrs
+// over the default colors, apply reverse video, and mark wide glyphs (a wide
+// char is followed by a '' continuation cell in ext_linegrid).
+export function screenToCells(screen: Screen, defFg: number, defBg: number): any[][] {
+  const out: any[][] = new Array(screen.rows);
+  const baseFg = (screen.defaultFg !== null) ? screen.defaultFg : defFg;
+  const baseBg = (screen.defaultBg !== null) ? screen.defaultBg : defBg;
+  const baseSp = (screen.defaultSp !== null) ? screen.defaultSp : null;
+  for (let r = 0; r < screen.rows; r++) {
+    const line = screen.grid[r], hlLine = screen.hlGrid[r];
+    const row: any[] = new Array(screen.cols);
+    for (let c = 0; c < screen.cols; c++) {
+      const attrs = screen.hlAttrs[hlLine[c]] || {};
+      let fg = (typeof attrs.foreground === 'number') ? attrs.foreground : baseFg;
+      let bg = (typeof attrs.background === 'number') ? attrs.background : baseBg;
+      if (attrs.reverse) { const t = fg; fg = bg; bg = t; }
+      const cell: any = { text: line[c] || '', fg: fg, bg: bg };
+      const sp = (typeof attrs.special === 'number') ? attrs.special : baseSp;
+      if (sp !== null) { cell.sp = sp; }
+      if (attrs.bold) { cell.bold = true; }
+      if (attrs.italic) { cell.italic = true; }
+      if (attrs.underline) { cell.underline = true; }
+      if (attrs.undercurl) { cell.undercurl = true; }
+      if (attrs.underdouble) { cell.underdouble = true; }
+      if (attrs.underdotted) { cell.underdotted = true; }
+      if (attrs.underdashed) { cell.underdashed = true; }
+      if (attrs.strikethrough) { cell.strikethrough = true; }
+      // Wide glyph: ext_linegrid puts '' in the following cell.
+      if (cell.text && c + 1 < screen.cols && line[c + 1] === '') { cell.width = 2; }
+      row[c] = cell;
+    }
+    out[r] = row;
+  }
+  return out;
+}
+
 // ---- keyboard -----------------------------------------------------------
 const SPECIAL: Record<string, string> = {
   'Enter': 'CR', 'Backspace': 'BS', 'Tab': 'Tab', 'Escape': 'Esc',
@@ -220,4 +306,194 @@ export function keyToNvim(e: KeyboardEvent): string | null {
   if (!mods && !special) { return base === '<' ? '<lt>' : base; }
   const inner = base === '<' ? 'lt' : base;
   return '<' + mods + inner + '>';
+}
+
+function installKeyboard(el: HTMLElement, instance: UIInstance): void {
+  el.setAttribute('tabindex', '0');
+  el.addEventListener('keydown', function (e) {
+    const keys = keyToNvim(e as KeyboardEvent);
+    if (keys === null) { return; }
+    e.preventDefault();
+    instance.input(keys);
+  });
+  el.addEventListener('mousedown', function () { el.focus(); });
+  el.focus();
+}
+
+// ---- mount_into ---------------------------------------------------------
+// Wire `instance` to paint into `canvas` (a <canvas>) and forward its
+// keystrokes.
+//
+// opts:
+//   * font_family   - CSS font-family for the cell font (monospace expected).
+//   * font_size     - number, CSS px (default 16).
+//   * cols, rows    - EXPLICIT grid size. Passing either disables auto-sizing:
+//     the grid is fixed at the given dimensions (missing one defaults 80/24)
+//     and the canvas backing store is sized to exactly fit it.
+//   * default_fg/bg - base colors for "default terminal color" cells.
+//   * grid_renderer - the grid-renderer module (default: globalThis.GridRenderer).
+//
+// With neither cols nor rows given, the grid AUTO-SIZES: the canvas backing
+// store tracks the element's CSS box (x devicePixelRatio for crisp HiDPI
+// output), the grid is as many whole cells as fit, and a ResizeObserver
+// drives nvim_ui_try_resize on change (debounced via requestAnimationFrame;
+// the engine's grid_resize redraw reflows the Screen, so we never resize it
+// by hand). If the canvas has no layout yet (0x0), it falls back to 80x24.
+//
+// Returns { screen, renderer, resize(c, r), dispose(), cols, rows }.
+export function mount_into(instance: UIInstance, canvas: HTMLCanvasElement, opts?: MountOptions): MountHandle {
+  opts = opts || {};
+  const GR = opts.grid_renderer ||
+    (typeof globalThis !== 'undefined' && (globalThis as any).GridRenderer);
+  if (!GR || !GR.GridRenderer) {
+    throw new Error('mount_into: grid-renderer not available - load grid-renderer.js ' +
+      'before neovim-ui.js or pass opts.grid_renderer');
+  }
+
+  const explicit = (opts.cols != null) || (opts.rows != null);
+  const defFg = (opts.default_fg != null) ? opts.default_fg : 0xd4d4d4;
+  const defBg = (opts.default_bg != null) ? opts.default_bg : 0x000000;
+  const dpr = (typeof devicePixelRatio === 'number' && devicePixelRatio > 0) ? devicePixelRatio : 1;
+  const fontSizeCss = (typeof opts.font_size === 'number') ? opts.font_size : 16;
+
+  // The renderer works in DEVICE pixels: the font is scaled by dpr and the
+  // canvas backing store matches; the element is scaled back down via CSS.
+  const renderer = new GR.GridRenderer(canvas, {
+    fontFamily: opts.font_family,
+    fontSizePx: Math.round(fontSizeCss * dpr),
+  });
+
+  // The canvas element's CSS box in device px, or null when it has no layout.
+  function deviceBox(): { w: number; h: number } | null {
+    if (typeof canvas.getBoundingClientRect !== 'function') { return null; }
+    const rect = canvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) { return null; }
+    return { w: Math.round(rect.width * dpr), h: Math.round(rect.height * dpr) };
+  }
+
+  let cols: number, rows: number;
+  if (explicit) {
+    cols = opts.cols || 80; rows = opts.rows || 24;
+    renderer.resize(cols, rows);
+    // Style the element to its backing store's CSS size so it's crisp.
+    if (canvas.style) {
+      canvas.style.width = (renderer.pixelWidth / dpr) + 'px';
+      canvas.style.height = (renderer.pixelHeight / dpr) + 'px';
+    }
+  } else {
+    const box = deviceBox();
+    if (box) {
+      const fitted = renderer.fit(box.w, box.h, defBg);
+      cols = fitted.cols; rows = fitted.rows;
+    } else {
+      cols = 80; rows = 24;              // no layout yet: never attach 0x0
+      renderer.resize(cols, rows);
+    }
+  }
+
+  // rAF plumbing (shared by paint coalescing and the resize observer below).
+  const hasRaf = (typeof requestAnimationFrame === 'function');
+  function scheduleRaf(fn: () => void): number { return hasRaf ? requestAnimationFrame(fn) : (setTimeout(fn, 16) as any); }
+  function cancelRaf(id: number): void { if (hasRaf) { cancelAnimationFrame(id); } else { clearTimeout(id); } }
+
+  const screen = new Screen(cols, rows);
+
+  // ---- adaptive paint scheduling -----------------------------------------
+  // Every redraw notification is decoded into the Screen SYNCHRONOUSLY (the
+  // model must stay current). PAINTING adapts to load:
+  //
+  //   * By default a flush paints IMMEDIATELY - a keystroke's echo reaches
+  //     the canvas in the same task, never deferred to the next animation
+  //     frame (the renderer damage-diffs, so interactive paints are cheap).
+  //   * Painting time is metered against a budget (paint_budget_ms, default
+  //     8ms) per ~frame window. When a redraw flood - a fast scroll can emit
+  //     hundreds of flush-terminated batches per frame - burns through the
+  //     budget, what's painted so far stands as "the frame", and the REST of
+  //     the flood coalesces: further flushes only mark state dirty and one
+  //     requestAnimationFrame paints the final screen. Only the last state
+  //     per frame can reach the glass anyway.
+  //
+  // So light traffic gets minimum latency, and a flood costs at most the
+  // budget plus one coalesced paint per frame. A hidden tab always takes the
+  // rAF path: Chrome parks rAF while hidden, so nothing paints until the tab
+  // is visible again, and then one paint catches up.
+  const budgetMs = (typeof opts.paint_budget_ms === 'number') ? opts.paint_budget_ms : 8;
+  const FRAME_WINDOW_MS = 17;
+  const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+    ? function () { return performance.now(); } : function () { return Date.now(); };
+  let paintRafId: number | null = null;
+  let windowStart = -Infinity;   // start of the current paint-budget window
+  let spentMs = 0;               // painting time burned inside that window
+
+  function paintNow(): void {
+    const t0 = now();
+    renderer.render(screenToCells(screen, defFg, defBg), screen.cursor);
+    spentMs += now() - t0;
+  }
+  function paintCoalesced(): void {
+    paintRafId = null;
+    windowStart = now();
+    spentMs = 0;
+    paintNow();
+  }
+  screen.onFlush = function () {
+    if (paintRafId != null) { return; }     // flood mode: a paint is scheduled
+    const t = now();
+    if (t - windowStart > FRAME_WINDOW_MS) { windowStart = t; spentMs = 0; }
+    const hidden = (typeof document !== 'undefined' && document.hidden === true);
+    if (!hidden && spentMs < budgetMs) { paintNow(); return; }
+    paintRafId = scheduleRaf(paintCoalesced);
+  };
+  const off = instance.onNotification('redraw', function (params) { screen.handleRedraw(params); });
+  installKeyboard(canvas, instance);
+  instance.request('nvim_ui_attach', [cols, rows, { rgb: true, ext_linegrid: true }]);
+
+  const api: MountHandle = {
+    screen: screen,
+    cols: cols,
+    rows: rows,
+    renderer: renderer,
+    resize: function (c, r) {
+      api.cols = c; api.rows = r;
+      if (renderer.cols !== c || renderer.rows !== r) { renderer.resize(c, r); }
+      return instance.request('nvim_ui_try_resize', [c, r]);
+    },
+    dispose: function () {
+      off();
+      if (observer) { observer.disconnect(); observer = null; }
+      if (rafId != null) { cancelRaf(rafId); rafId = null; }
+      if (paintRafId != null) { cancelRaf(paintRafId); paintRafId = null; }
+    },
+  };
+
+  // ---- auto-resize: track the canvas box and drive try_resize on change --
+  // Only when auto-sizing (explicit cols/rows keep a fixed grid). On each
+  // observed resize we refit the backing store and, if the cell grid changed,
+  // ask the engine to resize -- it answers with a grid_resize redraw the
+  // Screen decode already handles. Coalesce bursts into one try_resize/frame.
+  let observer: ResizeObserver | null = null, rafId: number | null = null;
+
+  if (!explicit && typeof ResizeObserver === 'function') {
+    const recompute = function () {
+      rafId = null;
+      const box = deviceBox();
+      if (!box) { return; }                 // 0x0 (e.g. hidden): keep last grid
+      const fitted = renderer.fit(box.w, box.h, defBg);
+      // The refit cleared the canvas; repaint the current screen contents at
+      // whatever size we have while the engine reflows. We're already inside
+      // a rAF callback, so paint synchronously (and drop any pending paint).
+      if (paintRafId != null) { cancelRaf(paintRafId); }
+      paintCoalesced();
+      if (fitted.cols === api.cols && fitted.rows === api.rows) { return; }
+      api.cols = fitted.cols; api.rows = fitted.rows;
+      instance.request('nvim_ui_try_resize', [fitted.cols, fitted.rows]);
+    };
+    observer = new ResizeObserver(function () {
+      if (rafId != null) { return; }        // coalesce: one try_resize per frame
+      rafId = scheduleRaf(recompute);
+    });
+    observer.observe(canvas);
+  }
+
+  return api;
 }

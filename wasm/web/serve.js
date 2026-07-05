@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 
 const WEB = __dirname;                                   // wasm/web
+const WASM = path.resolve(__dirname, '..');              // wasm
 const DIST = path.join(WEB, 'dist');                     // wasm/web/dist (tsc output)
 const ROOT = path.resolve(__dirname, '..', '..');        // repo root
 const BUILD = path.join(ROOT, 'build-wasm', 'bin');
@@ -52,6 +53,11 @@ function resolveStaticPath(urlPath) {
     return path.join(BUILD, urlPath);
   }
   if (urlPath === '/msgpack.min.js') { return MSGPACK; }
+  // The canvas grid renderer: its own package (wasm/grid-renderer), built by
+  // wasm/grid-renderer/build-ts.sh into dist/grid-renderer.js (UMD).
+  if (urlPath === '/grid-renderer.js') {
+    return path.join(WASM, 'grid-renderer', 'dist', 'grid-renderer.js');
+  }
   // The TypeScript-compiled page + library JS lives in dist/.
   if (BUILT.has(urlPath.slice(1))) { return path.join(DIST, urlPath); }
   // Everything else from wasm/web, but never escape it.
@@ -91,6 +97,11 @@ function warnIfBuildStale() {
   if (!fs.existsSync(path.join(DIST, 'neovim.js'))) {
     console.warn('  WARNING: missing ' + path.join(DIST, 'neovim.js') +
       ' — run wasm/web/build-ts.sh (or `npm run build`) to compile the TypeScript page + library.');
+  }
+  // The canvas renderer is its own package.
+  if (!fs.existsSync(path.join(WASM, 'grid-renderer', 'dist', 'grid-renderer.js'))) {
+    console.warn('  WARNING: missing wasm/grid-renderer/dist/grid-renderer.js' +
+      ' — run wasm/grid-renderer/build-ts.sh (needs `npm install` there once).');
   }
 }
 

@@ -333,6 +333,18 @@ if command -v npm >/dev/null 2>&1; then
     ( cd "${ROOT}/wasm/web" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
       || echo "    (npm install failed; run it manually in wasm/web before serving)"
   fi
+  # The canvas grid renderer package (wasm/grid-renderer): typescript to build,
+  # node-canvas for its snapshot tests. Install + build so the dev server /
+  # site bundle can serve dist/grid-renderer.js.
+  if [ ! -x "${ROOT}/wasm/grid-renderer/node_modules/.bin/tsc" ]; then
+    echo "==> Installing wasm/grid-renderer npm deps (typescript, node-canvas)"
+    ( cd "${ROOT}/wasm/grid-renderer" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
+      || echo "    (npm install failed; run it manually in wasm/grid-renderer)"
+  fi
+  if [ -x "${ROOT}/wasm/grid-renderer/node_modules/.bin/tsc" ]; then
+    echo "==> Building wasm/grid-renderer (dist/grid-renderer.js)"
+    "${ROOT}/wasm/grid-renderer/build-ts.sh" >/dev/null
+  fi
 fi
 
 # Boot smoke: prove the engine actually starts under Node. Node >= 24 has JSPI

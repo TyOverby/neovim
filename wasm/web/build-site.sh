@@ -17,9 +17,12 @@ BUILD="${ROOT}/build-wasm/bin"
 MSGPACK="${WEB}/node_modules/@msgpack/msgpack/dist.umd/msgpack.min.js"
 OUT="${1:-${ROOT}/_site}"
 
-# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/.
-# Build it first so the site always ships fresh artifacts (idempotent).
+# The page + library JS is compiled from TypeScript (wasm/web/src) into dist/,
+# and the canvas grid renderer from wasm/grid-renderer/src. Build both first so
+# the site always ships fresh artifacts (idempotent).
 "${WEB}/build-ts.sh"
+"${ROOT}/wasm/grid-renderer/build-ts.sh"
+GRID_RENDERER="${ROOT}/wasm/grid-renderer/dist/grid-renderer.js"
 
 # Shared engine + the three runtime-variant packages (full/core/minimal). The
 # demo ships all three so it can switch via create({ plugins }) in the browser.
@@ -39,6 +42,8 @@ cp "${DIST}/neovim.js" "${DIST}/neovim-ui.js" "${DIST}/neovim-ui-pre.js" \
    "${DIST}/app.js" "${DIST}/engine-worker.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
+# canvas grid renderer UMD bundle (index.html loads it before neovim-ui.js)
+cp "${GRID_RENDERER}" "${OUT}/grid-renderer.js"
 # wasm artifacts: the shared engine + every runtime variant present (so the demo
 # can switch full/core/minimal). full is required (checked above); core/minimal
 # are copied if built.

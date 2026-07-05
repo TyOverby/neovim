@@ -219,7 +219,21 @@ async function main() {
   ok(ip !== null && screen.hlIdAt(ip.row, ip.col) === 0,
      'a plain-text cell resolves to the default highlight (id 0)');
 
-  // 5b. The <pre> renderer (neovim-ui-pre.js, the demo page's renderer)
+  // 5b. Canvas-renderer cell resolution: screenToCells (what mount_into feeds
+  //     the grid-renderer) resolves the same real highlight stream into
+  //     concrete per-cell colors. Pure data, no canvas needed.
+  const cells = NeovimUI.screenToCells(screen, 0xd4d4d4, 0x000000);
+  ok(Array.isArray(cells) && cells.length === screen.rows && cells[0].length === screen.cols,
+     'screenToCells produces a rows x cols cell grid');
+  const defCell = cells[dp.row][dp.col];
+  ok(defCell.text === 'd' && defCell.fg === defAttrs.foreground,
+     "the `def` keyword cell carries the highlight's foreground (" + JSON.stringify(defCell) + ')');
+  const plainCell = cells[ip.row][ip.col];
+  const expectPlainFg = (screen.defaultFg !== null) ? screen.defaultFg : 0xd4d4d4;
+  ok(plainCell.fg === expectPlainFg,
+     'a default-highlight cell falls back to the default foreground');
+
+  // 5c. The <pre> renderer (neovim-ui-pre.js, the demo page's renderer)
   //     renders the same Screen into styled HTML. Drive it with a stub
   //     element - no DOM library needed.
   const PreUI = require('./dist/neovim-ui-pre.js');
