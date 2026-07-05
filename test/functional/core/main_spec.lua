@@ -85,6 +85,7 @@ describe('command-line option', function()
     end)
 
     it('does not crash after reading from stdin in non-headless mode', function()
+      skip(t.is_wasm(), 'wasm: no child processes')
       skip(is_os('win'))
       local screen = Screen.new(40, 8)
       local args = {
