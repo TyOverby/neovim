@@ -59,6 +59,15 @@ export interface ClipboardProvider {
 
 export type ClipboardOption = 'browser' | ClipboardProvider;
 
+// The optional Stage 4 IO-proxy config (standalone-app). The server's
+// filesystem is mounted at the engine's root.
+export interface ProxyConfig {
+  url: string;
+  nvimSocket?: string;
+  session?: string;
+  rc?: string;
+}
+
 export type PluginsVariant = 'full' | 'core' | 'minimal';
 
 // Optional runtime source for tree-sitter grammars that are NOT bundled into
@@ -86,6 +95,7 @@ export interface BrowserEngineConfig {
   cwd?: string;
   filesystem?: Record<string, string>;
   plugins?: PluginsVariant;
+  proxy?: ProxyConfig | null;
   parsers?: ParsersConfig | null;
 }
 
@@ -502,6 +512,11 @@ export function browserEngineTransport(engineUrl: string, config?: BrowserEngine
     // Runtime bundle variant. engine-worker.js loads nvim-<plugins>.data.js
     // before nvim.js. Default 'full'.
     plugins: config.plugins,
+    // Optional Stage 4 IO-proxy config ({ url, ... }). When present,
+    // engine-worker.js opens a WebSocket to the server and wires the proxy
+    // client (the server's filesystem then appears at the engine's root);
+    // when absent it opens no connection (additive/opt-in).
+    proxy: config.proxy,
     // Optional runtime-fetched tree-sitter grammars ({ baseUrl?, urls? }).
     // engine-worker.js installs the fetch hook the engine falls back to when
     // no parser file exists; absent => no hook (additive/opt-in).
@@ -565,6 +580,43 @@ export function resolveEngineUrl(opts: { engineUrl?: string; baseUrl?: string })
 //   minimal - strictly the boot/edit essentials (no syntax/ftplugin/doc).
 const PLUGIN_VARIANTS: Record<string, number> = { full: 1, core: 1, minimal: 1 };
 
+// Validate the optional Stage 4 `proxy` config (the standalone-app IO proxy --
+// see wasm/docs/history/stage4.md). It is ADDITIVE and OPT-IN: absent => behave
+// exactly as today (no server connection). Shape: { url:<string>, ... }. Throw
+// a clear error on a bad shape, mirroring the `plugins` validation. Returns the
+// (possibly normalized) proxy config or null.
+function validateProxy(proxy: ProxyConfig | null | undefined): ProxyConfig | null {
+  if (proxy == null) { return null; }
+  if (typeof proxy !== 'object') {
+    throw new Error('Neovim.create: proxy must be an object { url, nvimSocket?, session?, rc? }');
+  }
+  if (typeof proxy.url !== 'string' || !proxy.url) {
+    throw new Error("Neovim.create: proxy.url (the server WebSocket URL) is required and must be a string");
+  }
+  // nvimSocket (optional): the server-side path for nvim's RPC socket ($NVIM),
+  // forwarded to the worker so it can be sent in the hello — the server then
+  // exports $NVIM to spawned children so they can drive nvim over RPC.
+  if (proxy.nvimSocket != null && typeof proxy.nvimSocket !== 'string') {
+    throw new Error('Neovim.create: proxy.nvimSocket must be a string (the server-side RPC socket path)');
+  }
+  // session (optional): a STABLE per-project id (the host app mints + persists
+  // it) carried in the /proxy URL, routing this tab's :terminal shells to the
+  // session-host daemon so they survive a drop AND can be rehydrated on reload.
+  // Absent -> the worker mints an ephemeral per-load id (durable across
+  // reconnects, but not across a full reload).
+  if (proxy.session != null && typeof proxy.session !== 'string') {
+    throw new Error('Neovim.create: proxy.session must be a string (the durable-PTY session id)');
+  }
+  // rc (optional): where nvim's config/$HOME comes from — 'remote' | 'local' |
+  // 'builtin' (set by tvim's /proxy-config.js). 'remote' makes the engine worker
+  // point $HOME at the IO host's home (reported in the hello). Unknown/absent is
+  // treated as 'builtin' downstream.
+  if (proxy.rc != null && typeof proxy.rc !== 'string') {
+    throw new Error('Neovim.create: proxy.rc must be a string (remote|local|builtin)');
+  }
+  return { url: proxy.url, nvimSocket: proxy.nvimSocket, session: proxy.session, rc: proxy.rc };
+}
+
 // Validate the optional `parsers` config (runtime-fetched tree-sitter
 // grammars). ADDITIVE and OPT-IN: absent => no hook is installed and a missing
 // grammar errors exactly as today. Returns the normalized config or null.
@@ -621,6 +673,8 @@ export function create(opts?: CreateOptions): NeovimFacade {
     throw new Error("Neovim.create: unknown plugins variant '" + opts.plugins +
       "' (expected 'full', 'core', or 'minimal')");
   }
+  // Validate the optional Stage 4 proxy config (opt-in; absent => unchanged).
+  const proxy = validateProxy(opts.proxy);
   // Validate the optional runtime-grammar config (opt-in; absent => unchanged).
   const parsers = validateParsers(opts.parsers);
   const transport = opts.transport ||
@@ -630,6 +684,9 @@ export function create(opts?: CreateOptions): NeovimFacade {
       cwd: opts.cwd,
       filesystem: opts.filesystem,
       plugins: opts.plugins,
+      // Threaded into the engine-worker init message as init.proxy. When absent
+      // engine-worker.js opens NO server connection (current behavior).
+      proxy: proxy,
       // Threaded as init.parsers; the worker installs the grammar fetch hook.
       parsers: parsers,
     });

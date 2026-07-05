@@ -27,6 +27,7 @@ const MessagePack = require('@msgpack/msgpack');
 // test drives those build artifacts. `npm test` runs the build first (pretest).
 const Neovim = require('./dist/neovim.js');
 const NeovimUI = require('./dist/neovim-ui.js');
+const NeovimUtils = require('./dist/neovim-utils.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const BIN = path.join(ROOT, 'build-wasm', 'bin');
@@ -219,7 +220,21 @@ async function main() {
   ok(ip !== null && screen.hlIdAt(ip.row, ip.col) === 0,
      'a plain-text cell resolves to the default highlight (id 0)');
 
-  // 5b. The <pre> renderer (neovim-ui-pre.js, the demo page's renderer)
+  // 5b. Canvas-renderer cell resolution: screenToCells (what mount_into feeds
+  //     the grid-renderer) resolves the same real highlight stream into
+  //     concrete per-cell colors. Pure data, no canvas needed.
+  const cells = NeovimUI.screenToCells(screen, 0xd4d4d4, 0x000000);
+  ok(Array.isArray(cells) && cells.length === screen.rows && cells[0].length === screen.cols,
+     'screenToCells produces a rows x cols cell grid');
+  const defCell = cells[dp.row][dp.col];
+  ok(defCell.text === 'd' && defCell.fg === defAttrs.foreground,
+     "the `def` keyword cell carries the highlight's foreground (" + JSON.stringify(defCell) + ')');
+  const plainCell = cells[ip.row][ip.col];
+  const expectPlainFg = (screen.defaultFg !== null) ? screen.defaultFg : 0xd4d4d4;
+  ok(plainCell.fg === expectPlainFg,
+     'a default-highlight cell falls back to the default foreground');
+
+  // 5c. The <pre> renderer (neovim-ui-pre.js, the demo page's renderer)
   //     renders the same Screen into styled HTML. Drive it with a stub
   //     element - no DOM library needed.
   const PreUI = require('./dist/neovim-ui-pre.js');
@@ -232,8 +247,8 @@ async function main() {
 
   // Clear any residual prompt that `syntax on` / the edits may have queued
   // (nvim_get_mode returns even while a hit-enter prompt is up), then drop the
-  // scratch edits so later buffer switches don't hit an E37 "no write since
-  // last change" prompt.
+  // scratch edits so the later open_file_in_editor (check 11) doesn't hit an
+  // E37 "no write since last change" prompt.
   nvim.input('<Esc>');
   for (let i = 0; i < 20; i++) {
     const m = await nvim.request('nvim_get_mode');
@@ -260,6 +275,56 @@ async function main() {
   // 8. cwd: pre.js chdir'd into the seeded dir, so getcwd() reflects it.
   const cwd = await nvim.request('nvim_eval', ['getcwd()']);
   ok(cwd === '/work', "cwd took effect (getcwd() = '" + cwd + "')");
+
+  // ---- neovim-utils.js helpers (the high-level free-function layer) ----------
+  // These drive the REAL engine over the same instance API the browser uses.
+
+  // 10. write_file then read_file round-trips a known string through the engine FS.
+  const SAMPLE = 'alpha\nbeta\ngamma';
+  await NeovimUtils.write_file(nvim, '/work/util.txt', SAMPLE);
+  const roundtrip = await NeovimUtils.read_file(nvim, '/work/util.txt');
+  ok(roundtrip === SAMPLE,
+     "write_file + read_file round-trips a known string (got " + JSON.stringify(roundtrip) + ')');
+
+  // read_file on a missing file returns null (documented behavior), not a reject.
+  const missing = await NeovimUtils.read_file(nvim, '/work/does-not-exist.txt');
+  ok(missing === null, 'read_file on a missing file resolves to null (got ' + JSON.stringify(missing) + ')');
+
+  // 11. open_file_in_editor makes the file the current buffer.
+  await NeovimUtils.open_file_in_editor(nvim, '/work/util.txt');
+  const bufname = await nvim.request('nvim_eval', ['bufname("%")']);
+  ok(/util\.txt$/.test(bufname), "open_file_in_editor makes util.txt the current buffer (bufname = '" + bufname + "')");
+  const firstLine = await nvim.request('nvim_buf_get_lines', [0, 0, 1, false]);
+  ok(Array.isArray(firstLine) && firstLine[0] === 'alpha',
+     "the opened buffer's first line is 'alpha' (got " + JSON.stringify(firstLine) + ')');
+
+  // 12. create_autocmd returns an id (a thin nvim_create_autocmd wrapper).
+  const acId = await NeovimUtils.create_autocmd(nvim, 'User', { pattern: 'NvimUtilsProbe', command: 'echom "probe"' });
+  ok(typeof acId === 'number' && acId > 0, 'create_autocmd returns an autocmd id (' + acId + ')');
+
+  // 13. on_autocmd: the combined rpcnotify round-trip. Register for BufWritePost,
+  //     `:w` the open buffer, and assert the handler fires with the saved path.
+  let fired = null;
+  const handle = await NeovimUtils.on_autocmd(nvim, 'BufWritePost', { pattern: '*' }, function (payload) {
+    fired = payload;
+  });
+  ok(typeof handle.id === 'number' && handle.name && typeof handle.unsubscribe === 'function',
+     'on_autocmd returns a handle { id, group, name, unsubscribe }');
+  // The util.txt buffer is current (from check 11); save it to fire BufWritePost.
+  await nvim.request('nvim_command', ['write']);
+  const sawSave = await waitFor(function () { return fired !== null; }, 5000);
+  ok(sawSave, 'on_autocmd handler fires on :w (BufWritePost)');
+  ok(sawSave && /util\.txt$/.test(fired.file),
+     "the payload.file is the saved path (got " + (fired && JSON.stringify(fired.file)) + ')');
+  ok(sawSave && typeof fired.buffer === 'number' && fired.buffer > 0,
+     'the payload.buffer is the current buffer number (' + (fired && fired.buffer) + ')');
+
+  // unsubscribe stops further notifications: clear, save again, assert no re-fire.
+  await handle.unsubscribe();
+  fired = null;
+  await nvim.request('nvim_command', ['write']);
+  const reFired = await waitFor(function () { return fired !== null; }, 1000);
+  ok(!reFired, 'on_autocmd unsubscribe() stops further notifications');
 
   // ---- async onRequest seam + clipboard (engine -> page calls) ---------------
   // These exercise the FIRST direction where the engine makes requests OF the

@@ -71,9 +71,10 @@ cmake --build "${BUILD}" --target nvim_bin
 # into nvim.js; worker.js hosts the engine wasm in a Node worker_thread, used by
 # the browser library's Node transport and the e2e test).
 #
-# worker.js is compiled from TypeScript (wasm/src/worker.ts) by wasm/build-ts.sh
-# into wasm/ (gitignored). Build it first (installing the wasm/ typescript +
-# @types/node devDeps if missing) so the copy below ships a fresh artifact.
+# worker.js + proxy-client.js + proxy-reconnect.js are compiled from TypeScript
+# (wasm/src/*.ts) by wasm/build-ts.sh into wasm/ (gitignored). Build them first
+# (installing the wasm/ typescript + @types/node devDeps if missing) so the copies
+# below ship fresh artifacts.
 if command -v npm >/dev/null 2>&1; then
   if [ ! -x "${ROOT}/wasm/node_modules/.bin/tsc" ]; then
     echo "==> Installing wasm/ npm deps (typescript, @types/node)"
@@ -85,6 +86,9 @@ fi
 
 echo "==> Installing the Node engine host next to nvim.js"
 cp "${ROOT}/wasm/worker.js" "${BUILD}/bin/"
+# Stage 4: worker.js requires proxy-client.js (the IO-proxy transport client) when
+# a proxy is configured; ship it next to worker.js so it resolves under Node.
+cp "${ROOT}/wasm/proxy-client.js" "${ROOT}/wasm/proxy-reconnect.js" "${BUILD}/bin/"
 
 
 # -----------------------------------------------------------------------------
@@ -322,16 +326,30 @@ rm -rf "${STAGE_ROOT}"
 # Browser target: the page UI (wasm/web/) is served straight from the source
 # tree by wasm/web/serve.js (which also points /nvim.js,/nvim.wasm and the
 # nvim-<variant>.data(.js) packages at this build dir), so nothing is copied.
-# Deps: @msgpack/msgpack (the UI client) and the typescript devDependency
-# (build-ts.sh compiles wasm/web/src/*.ts). Both are declared in
+# Deps: @msgpack/msgpack (the UI client), ws (the Node reconnect-facade test,
+# wasm/web/reconnect.test.js), and the typescript devDependency (build-site.sh /
+# build-lib.sh compile wasm/web/src/*.ts via build-ts.sh). All are declared in
 # wasm/web/package.json; a full `npm install` (devDeps included) runs if any is
 # missing.
 if command -v npm >/dev/null 2>&1; then
   if [ ! -d "${ROOT}/wasm/web/node_modules/@msgpack" ] || \
+     [ ! -d "${ROOT}/wasm/web/node_modules/ws" ] || \
      [ ! -x "${ROOT}/wasm/web/node_modules/.bin/tsc" ]; then
-    echo "==> Installing wasm/web npm deps (@msgpack/msgpack, typescript)"
+    echo "==> Installing wasm/web npm deps (@msgpack/msgpack, ws, typescript)"
     ( cd "${ROOT}/wasm/web" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
       || echo "    (npm install failed; run it manually in wasm/web before serving)"
+  fi
+  # The canvas grid renderer package (wasm/grid-renderer): typescript to build,
+  # node-canvas for its snapshot tests. Install + build so the dev server /
+  # site bundle can serve dist/grid-renderer.js.
+  if [ ! -x "${ROOT}/wasm/grid-renderer/node_modules/.bin/tsc" ]; then
+    echo "==> Installing wasm/grid-renderer npm deps (typescript, node-canvas)"
+    ( cd "${ROOT}/wasm/grid-renderer" && npm install --no-audit --no-fund >/dev/null 2>&1 ) \
+      || echo "    (npm install failed; run it manually in wasm/grid-renderer)"
+  fi
+  if [ -x "${ROOT}/wasm/grid-renderer/node_modules/.bin/tsc" ]; then
+    echo "==> Building wasm/grid-renderer (dist/grid-renderer.js)"
+    "${ROOT}/wasm/grid-renderer/build-ts.sh" >/dev/null
   fi
 fi
 

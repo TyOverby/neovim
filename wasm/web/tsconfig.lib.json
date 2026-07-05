@@ -1,5 +1,5 @@
 {
-  "// description": "Library modules: the three core modules (CommonJS, later UMD-wrapped) + .d.ts declarations. Emitted to dist-lib/, then assembled into dist/ by build-ts.sh.",
+  "// description": "Library modules: the core modules (CommonJS, later UMD-wrapped) + .mts ESM entry points + .d.ts/.d.mts declarations. Emitted to dist-lib/, then assembled into dist/ by build-ts.sh.",
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist-lib",
@@ -9,6 +9,10 @@
   "files": [
     "src/neovim.ts",
     "src/neovim-ui.ts",
-    "src/neovim-ui-pre.ts"
+    "src/neovim-ui-pre.ts",
+    "src/neovim-utils.ts",
+    "src/neovim.mts",
+    "src/neovim-ui.mts",
+    "src/neovim-utils.mts"
   ]
 }

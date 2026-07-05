@@ -1,17 +1,24 @@
-# Composite action: cross-compile Neovim to WebAssembly.
+# Composite action: cross-compile Neovim to WebAssembly and assemble the static
+# browser bundle (wasm/web/build-site.sh output).
 #
 # This is the heavy, shared half of the wasm pipeline — emscripten + the native
 # host helpers + the wasm cross-compile + the runtime variant packaging (which
-# includes the per-variant boot gate). Callers run tests against the build
-# and/or assemble the static demo bundle from it (wasm/web/build-site.sh).
-name: Build wasm
-description: Cross-compile Neovim to wasm (engine + runtime data packages).
+# includes the per-variant boot gate) + the site assembly. It runs ONCE in the
+# `build` job of .github/workflows/wasm.yml, whose artifacts feed every
+# downstream job: the engine/JS tests, the GitHub Pages deploy, and the `tvim`
+# Go-binary cross-compile (which embeds the same bundle).
+name: Build wasm + assemble site
+description: Cross-compile Neovim to wasm and assemble the static browser bundle.
 
 inputs:
   em-version:
     description: Emscripten version to pin (must have -sJSPI).
     required: false
     default: "3.1.69"
+  site-dir:
+    description: Directory to assemble the static site into.
+    required: false
+    default: _site
 
 runs:
   using: composite
@@ -74,3 +81,7 @@ runs:
     - name: Cross-compile Neovim to wasm
       shell: bash
       run: wasm/build-nvim.sh
+
+    - name: Assemble the static site
+      shell: bash
+      run: wasm/web/build-site.sh "${GITHUB_WORKSPACE}/${{ inputs.site-dir }}"

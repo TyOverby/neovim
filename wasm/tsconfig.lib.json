@@ -1,0 +1,16 @@
+{
+  "// description": "The shared IO-proxy client (proxy-client.ts + proxy-reconnect.ts). Compiled to CommonJS, then UMD-wrapped by tools/umd-wrap.mjs so they load via require() in Node AND set self.ProxyClient / self.ProxyReconnect under classic-worker importScripts. WebWorker lib for TextEncoder/DataView/setTimeout/self.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist-lib",
+    "rootDir": "./src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2020", "WebWorker"],
+    "declaration": false
+  },
+  "files": [
+    "src/proxy-client.ts",
+    "src/proxy-reconnect.ts"
+  ]
+}

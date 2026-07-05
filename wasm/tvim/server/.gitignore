@@ -1,0 +1,3 @@
+# Assembled static bundle for -tags embed_assets builds (build-site.sh output).
+# Large wasm artifacts; not committed — regenerate with build-site.sh.
+site/

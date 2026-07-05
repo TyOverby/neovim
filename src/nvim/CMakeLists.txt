@@ -795,7 +795,44 @@ if(EMSCRIPTEN)
   # module is itself relocatable, so every object linked into it must be PIC
   # (the deps archives are too: wasm/build-deps.sh adds -fPIC to EMCC_CFLAGS).
   target_compile_options(nvim_bin PRIVATE -fPIC)
+  # uv_stubs.c's __wrap_uv_spawn replicates real uv_spawn's uv_process_t handle
+  # bookkeeping (uv__handle_init / uv__handle_start / uv__queue_*), which lives
+  # in libuv's INTERNAL header uv-common.h. Scope that internal include dir to
+  # THIS ONE translation unit only (it is not on nvim's normal include path).
+  # wasm/build-deps.sh vendors uv-common.h (+ queue.h / strscpy.h) into
+  # .deps-wasm/usr/include/libuv-src; we point here (not at the libuv
+  # build/source tree) because CI caches only usr/, so the build tree may be
+  # absent on a deps-cache hit.
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c PROPERTIES
+    INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/.deps-wasm/usr/include/libuv-src)
   target_link_options(nvim_bin PRIVATE
+    # IO proxy (additive, opt-in): intercept uv_spawn / uv_process_kill so LSP
+    # servers + vim.system() + any luv subprocess can run on a proxy SERVER.
+    # The real implementations remain reachable as __real_uv_*; uv_stubs.c's
+    # __wrap_* falls through to them when no proxy is active (ENOSYS, exactly
+    # as before). Wasm-only; the native build is untouched.
+    -Wl,--wrap=uv_spawn
+    -Wl,--wrap=uv_process_kill
+    # Socket proxy (additive, opt-in): outbound TCP + DNS on the proxy server.
+    -Wl,--wrap=uv_tcp_connect
+    -Wl,--wrap=uv_getaddrinfo
+    -Wl,--wrap=uv_freeaddrinfo
+    # Unix-domain (pipe) sockets: sockconnect('pipe', path) + vim.uv.new_pipe()
+    # :connect / pipe_connect2 connect to a UNIX socket on the server, over the
+    # SAME virtual-fd backing + connect-result drain as the TCP wraps above.
+    -Wl,--wrap=uv_pipe_connect
+    -Wl,--wrap=uv_pipe_connect2
+    # Inbound listen/accept: serverstart() / luv bind()+listen()+accept().
+    # bind stores the addr, listen round-trips the server, accept pops a
+    # server-side connection onto a virtual fd, getsockname reports the real
+    # bound port, and uv_close tears down our listener (a transparent
+    # pass-through for every non-listener handle).
+    -Wl,--wrap=uv_tcp_bind
+    -Wl,--wrap=uv_pipe_bind
+    -Wl,--wrap=uv_listen
+    -Wl,--wrap=uv_accept
+    -Wl,--wrap=uv_tcp_getsockname
+    -Wl,--wrap=uv_close
     # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
     # suspend on async JS promises via WebAssembly stack-switching.
     -sJSPI
@@ -831,6 +868,21 @@ if(EMSCRIPTEN)
     --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
     # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
     --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js
+    # IO proxy (additive, opt-in): async server-backed filesystem syscalls.
+    # With no proxy configured (globalThis.__nvimProxy), every override
+    # delegates to the default behavior, so MEMFS/NODEFS IO is byte-for-byte
+    # unchanged. See file.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js
+    # IO proxy: the process-spawn backend's JS half -- the virtual stdio fd
+    # table + spawn/stdin/stdout/stderr/exit routing for
+    # src/nvim/event/proxy_proc.c. With no proxy configured the C backend is
+    # never taken, so none of this runs. See the file header.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js
+    # IO proxy: the JS half of the socket wraps -- a virtual bidirectional
+    # pollable fd backing each uv_tcp_t plus the connect/write/close/
+    # getaddrinfo routing + server pushes. With no proxy configured the C
+    # wraps fall through to __real_uv_*, so none of this runs.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js
     # Dynamic tree-sitter grammars (additive, opt-in): the host-fetch hook
     # language.add() falls back to when no parser file exists anywhere --
     # lets a browser page fetch() grammar .wasm side modules at runtime.
@@ -850,12 +902,15 @@ if(EMSCRIPTEN)
     # function" AT FIRST CALL -- if a grammar hits that, extend this list.
     -sMAIN_MODULE=2
     "SHELL:-sEXPORTED_FUNCTIONS=_main,_malloc,_calloc,_realloc,_free,_abort,_memcpy,_memmove,_memset,_memcmp,_memchr,_strlen,_strcmp,_strncmp,_strchr,_strcpy,_strncpy,_isalnum,_isalpha,_isdigit,_isspace,_isxdigit,_islower,_isupper,_ispunct,_tolower,_toupper,_iswalnum,_iswalpha,_iswdigit,_iswspace,_iswxdigit,_iswlower,_iswupper,_iswpunct,_iswblank,_towlower,_towupper"
-    # NB: EXPORTED_FUNCTIONS replaces emcc's default export set (hence _main).
+    # NB: EXPORTED_FUNCTIONS replaces emcc's default export set (hence _main),
+    # but EMSCRIPTEN_KEEPALIVE entries (e.g. proxy_proc.c's
+    # _nvim_proxy_proc_on_exit, which the proc-proxy js-library calls) are
+    # still exported independently of this list.
     # We only need a few runtime methods the js-libraries use to pass the
     # handle pointer + read strings.
     -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
-    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()
 
 install_helper(TARGETS nvim_bin)

@@ -4,17 +4,20 @@
 #
 # The TypeScript in src/ is the SOURCE OF TRUTH. From it this produces, in dist/:
 #
-#   neovim.js  neovim-ui.js  neovim-ui-pre.js    UMD (globalThis.<Name> via a
-#                                                <script>, or require() in Node)
-#   neovim.d.ts (+ ui/ui-pre)                    type declarations
-#   app.js                                       page glue (classic <script>)
-#   engine-worker.js                             Web Worker engine host
+#   neovim.js neovim-ui.js neovim-ui-pre.js
+#   neovim-utils.js                               UMD (globalThis.<Name> via a
+#                                                 <script>, or require() in Node)
+#   neovim.mjs neovim-ui.mjs neovim-utils.mjs     ESM entry points
+#   neovim.d.ts / .d.mts  (+ ui/ui-pre/utils)     type declarations
+#   app.js                                        page glue (classic <script>)
+#   engine-worker.js                              Web Worker engine host
 #
 # HOW: three `tsc` passes (no bundler) with per-target libs/module settings, then
 # a small wrap step. The core modules are compiled to CommonJS and wrapped into
 # UMD-that-sets-a-global by tools/umd-wrap.mjs (tsc's own deprecated `module: umd`
-# does not assign a browser global). app.ts (DOM) and engine-worker.ts (WebWorker)
-# need different libs, so each gets its own pass.
+# does not assign a browser global). The .mts entries compile straight to .mjs.
+# app.ts (DOM) and engine-worker.ts (WebWorker) need different libs, so each gets
+# its own pass.
 #
 #   Usage:  wasm/web/build-ts.sh            (writes wasm/web/dist/)
 #
@@ -35,7 +38,7 @@ TMP_WORKER="${WEB}/dist-worker"
 rm -rf "${DIST}" "${TMP_LIB}" "${TMP_APP}" "${TMP_WORKER}"
 mkdir -p "${DIST}"
 
-echo "==> tsc: library modules (CJS cores + .d.ts)"
+echo "==> tsc: library modules (CJS cores + .d.ts + .mjs entries)"
 "${TSC}" -p "${WEB}/tsconfig.lib.json"
 echo "==> tsc: page glue (app.js)"
 "${TSC}" -p "${WEB}/tsconfig.app.json"
@@ -43,20 +46,24 @@ echo "==> tsc: engine worker (engine-worker.js)"
 "${TSC}" -p "${WEB}/tsconfig.worker.json"
 
 echo "==> wrap CommonJS cores into UMD-with-global"
-node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim.js"        "${DIST}/neovim.js"        Neovim
-node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim-ui.js"     "${DIST}/neovim-ui.js"     NeovimUI
+node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim.js"       "${DIST}/neovim.js"       Neovim
+node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim-ui.js"    "${DIST}/neovim-ui.js"    NeovimUI
+node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim-utils.js" "${DIST}/neovim-utils.js" NeovimUtils
 node "${WEB}/tools/umd-wrap.mjs" "${TMP_LIB}/neovim-ui-pre.js" "${DIST}/neovim-ui-pre.js" NeovimUIPre \
   --dep ./neovim-ui.js=NeovimUI
 
-echo "==> assemble dist/ (declarations, page glue, worker)"
-# type declarations (for require()/UMD consumers)
-cp "${TMP_LIB}"/*.d.ts "${DIST}/"
+echo "==> assemble dist/ (ESM entries, declarations, page glue, worker)"
+# ESM entry points
+cp "${TMP_LIB}/neovim.mjs" "${TMP_LIB}/neovim-ui.mjs" "${TMP_LIB}/neovim-utils.mjs" "${DIST}/"
+# type declarations (.d.ts for require()/UMD consumers, .d.mts for ESM consumers)
+cp "${TMP_LIB}"/*.d.ts "${TMP_LIB}"/*.d.mts "${DIST}/"
 # Declare the UMD <script> global on each core .d.ts (the `export as namespace`
 # that may only live in a declaration file), so a <script src="neovim.js">
 # consumer gets a typed globalThis.<Name>.
 printf '\nexport as namespace Neovim;\n'      >> "${DIST}/neovim.d.ts"
 printf '\nexport as namespace NeovimUI;\n'    >> "${DIST}/neovim-ui.d.ts"
-printf '\nexport as namespace NeovimUIPre;\n' >> "${DIST}/neovim-ui-pre.d.ts"
+printf '\nexport as namespace NeovimUtils;\n' >> "${DIST}/neovim-utils.d.ts"
+printf '\nexport as namespace NeovimUIPre;\n'   >> "${DIST}/neovim-ui-pre.d.ts"
 # page glue + worker
 cp "${TMP_APP}/app.js" "${DIST}/"
 cp "${TMP_WORKER}/engine-worker.js" "${DIST}/"

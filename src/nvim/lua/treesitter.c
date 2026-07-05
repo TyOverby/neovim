@@ -142,14 +142,16 @@ static int tslua_add_language_from_object(lua_State *L)
 // Stage a parser file into MEMFS so emscripten's dlopen can read it.
 //
 // dlopen resolves the library file at the JS FS layer (FS.readFile), which
-// only sees paths the wasm FS itself can resolve -- not every path nvim's C
-// file IO can read (hosts may intercept reads at the syscall layer). Read
-// the file through nvim's normal C file IO and write it below
-// /usr/share/nvim -- a MEMFS path in every configuration (plain MEMFS in
-// the browser, un-mounted MEMFS under Node's NODEFS roots). The staged copy
-// is unlinked by the caller right after dlopen (the library is in memory by
-// then); the counter keeps names unique so emscripten's per-filename
-// library cache can never hand back a previously loaded grammar.
+// never routes through the IO-proxy's syscall overrides -- so dlopen'ing a
+// path on the proxied (tvim server/remote) filesystem would ENOENT even
+// though open()/read() on it succeed. Read the file through nvim's normal
+// C file IO (which the proxy DOES intercept) and write it below
+// /usr/share/nvim -- a MEMFS shadow in every configuration (plain MEMFS in
+// the browser, un-mounted MEMFS under Node's NODEFS roots, an explicit
+// shadow overlay under the IO proxy). The staged copy is unlinked by the
+// caller right after dlopen (the library is in memory by then); the
+// counter keeps names unique so emscripten's per-filename library cache
+// can never hand back a previously loaded grammar.
 static const char *stage_parser_for_dlopen(lua_State *L, const char *path, const char *lang_name)
 {
   FILE *in = os_fopen(path, "r");

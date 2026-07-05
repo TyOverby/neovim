@@ -12,9 +12,9 @@
 // the parent's messages.
 //
 // Compiled (by wasm/build-ts.sh) to a classic Node CommonJS script worker.js
-// (gitignored) -- it is loaded by `new Worker(path)` and require()s nvim.js
-// from its own directory at runtime, so it stays require-based and
-// module-wrapper-free. This TypeScript is the SOURCE OF TRUTH.
+// (gitignored) -- it is loaded by `new Worker(path)` and require()s nvim.js +
+// proxy-client.js from its own directory at runtime, so it stays require-based
+// and module-wrapper-free. This TypeScript is the SOURCE OF TRUTH.
 'use strict';
 
 const { parentPort, workerData } = require('worker_threads');
@@ -73,6 +73,58 @@ if (workerData.parsers && (workerData.parsers.baseUrl || workerData.parsers.urls
     if (!resp.ok) { return null; }
     return new Uint8Array(await resp.arrayBuffer());
   };
+}
+
+// Stage 4 (additive/opt-in): if a proxy URL was supplied, open the IO-proxy
+// WebSocket and wire the shared proxy client, the Node analogue of
+// engine-worker.js's setupProxy. This is the minimal symmetric seam -- the goal
+// is just that globalThis.__nvimProxy exists for later phases' js-library to
+// find. Absent => do nothing (current behavior; the e2e test never sets it). A
+// connection failure must not crash the worker.
+if (workerData.proxy && workerData.proxy.url) {
+  try {
+    const { createProxyClient } = require(path.join(__dirname, 'proxy-client.js'));
+    // Resolve `ws` robustly. worker.js is copied into build-wasm/bin (where there
+    // is no node_modules), so a bare require('ws') fails there. Try, in order:
+    // a workerData-provided path, a bare require (when worker.js runs in-tree),
+    // and the repo's web-bundle node_modules (../../wasm/web/node_modules from
+    // build-wasm/bin). The web bundle is where build-nvim.sh npm-installs ws.
+    let WebSocket: any = null;
+    const wsCandidates: string[] = [];
+    if (workerData.proxy.wsModule) { wsCandidates.push(workerData.proxy.wsModule); }
+    wsCandidates.push('ws');
+    wsCandidates.push(path.resolve(__dirname, '..', '..', 'wasm', 'web', 'node_modules', 'ws'));
+    wsCandidates.push(path.resolve(__dirname, 'node_modules', 'ws'));
+    for (const cand of wsCandidates) {
+      try { WebSocket = require(cand); break; } catch (_e) { /* try next */ }
+    }
+    if (!WebSocket) { throw new Error("the 'ws' npm package could not be resolved"); }
+    const ws = new WebSocket(workerData.proxy.url);
+    const transport: any = {
+      send: function (data: any) { ws.send(data); },
+      close: function () { try { ws.close(); } catch (_e) {} },
+    };
+    const client = createProxyClient(transport);
+    G.__nvimProxy = client;
+    // The FS-proxy js-library mounts the server's filesystem at the engine's
+    // root, except the shadow subtrees (its built-in default: the packaged
+    // runtime + /dev + /proc). A host may override the list via workerData.
+    if (Array.isArray(workerData.proxy.shadows)) {
+      G.__nvimProxyShadows = workerData.proxy.shadows;
+    }
+    ws.on('message', function (d: any) { if (transport.onFrame) { transport.onFrame(d); } });
+    ws.on('open', function () {
+      client.hello({ nvimSocket: workerData.proxy.nvimSocket })
+        .catch(function () { /* ignore; engine keeps running */ });
+    });
+    ws.on('close', function () { if (client.onTransportClosed) { client.onTransportClosed(); } });
+    ws.on('error', function () { /* ignore; transport errors surface as close */ });
+  } catch (e: any) {
+    // proxy-client.js or ws missing -> skip the seam; the engine still boots
+    // (MEMFS/NODEFS only). Surface it on stderr so a misconfigured proxy isn't
+    // a silent no-op (proxied file ops would then fail to open).
+    try { process.stderr.write('nvim worker: proxy setup failed: ' + (e && e.message || e) + '\n'); } catch (_e) {}
+  }
 }
 
 // Booting the (non-MODULARIZE) Emscripten module starts the engine. When it

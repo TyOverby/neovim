@@ -1,7 +1,7 @@
 {
   "name": "neovim-wasm-host",
   "version": "1.0.0",
-  "description": "TypeScript sources for the wasm engine's Node host (worker.ts). Compiled by build-ts.sh into the worker.js the Node hosts consume.",
+  "description": "TypeScript sources for the wasm engine's Node host (worker.ts) and the shared IO-proxy client (proxy-client.ts / proxy-reconnect.ts). Compiled by build-ts.sh into the proxy-client.js / proxy-reconnect.js / worker.js the engine build + browser/Node hosts consume.",
   "private": true,
   "type": "commonjs",
   "scripts": {
