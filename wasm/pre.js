@@ -36,8 +36,8 @@
   //     But Node doesn't need it: the real runtime/ tree is already on disk and
   //     reachable through the /home NODEFS mount below. So under Node we point
   //     VIMRUNTIME at the on-disk runtime/ next to the build (build-wasm/bin ->
-  //     ../../runtime), giving every Node host the full runtime with zero
-  //     per-host wiring and no .data at all.
+  //     ../../runtime), giving every Node host (the launcher, wasm/worker.js, the
+  //     e2e test) the full runtime with zero per-host wiring and no .data at all.
   var VIMRUNTIME = '/usr/share/nvim/runtime';
 
   var args = [];
@@ -67,18 +67,29 @@
   // Emscripten's own `var Module` shadows any globalThis.Module a host could set.
   //
   // The same seam also carries the optional runtime config the `create()` API
-  // exposes (see wasm/README.md): __nvimEnv (environment
+  // exposes (see wasm/web/neovim.js and wasm/README.md): __nvimEnv (environment
   // overrides), __nvimFiles (files to seed into the wasm FS), __nvimCwd (working
   // directory). They are applied in preRun below, AFTER the default env/FS setup.
   var cfgEnv = null;    // { KEY: 'val', ... } environment overrides (caller wins)
   var cfgFiles = null;  // { '/abs/path': 'contents' | Uint8Array } files to seed
   var cfgCwd = null;    // '/abs/path' working directory to chdir into last
+  var proxyUser = null; // server-reported user of the IO proxy (browser -> $USER)
+  var proxyHome = null; // --rc remote: IO host's home in editor-space (-> $HOME)
   if (typeof globalThis !== 'undefined') {
     if (globalThis.__nvimArgs) {
       args = globalThis.__nvimArgs;
     }
     if (globalThis.__nvimChannel) {
       Module['nvimChannel'] = globalThis.__nvimChannel;
+    }
+    // The engine worker stashes the proxied user here from the hello ack (set
+    // before the engine boots; see wasm/web/engine-worker.js). It becomes the
+    // browser default for $USER/$LOGNAME -- a caller's __nvimEnv still overrides it.
+    if (typeof globalThis.__nvimProxyUser === 'string' && globalThis.__nvimProxyUser) {
+      proxyUser = globalThis.__nvimProxyUser;
+    }
+    if (typeof globalThis.__nvimProxyHome === 'string' && globalThis.__nvimProxyHome) {
+      proxyHome = globalThis.__nvimProxyHome;
     }
     if (globalThis.__nvimEnv) { cfgEnv = globalThis.__nvimEnv; }
     if (globalThis.__nvimFiles) { cfgFiles = globalThis.__nvimFiles; }
@@ -151,11 +162,13 @@
         }
       }
     } else {
-      // Browser: no host environment to inherit; give nvim a writable MEMFS
-      // home and a plausible identity. __nvimEnv (below) can override any of it.
-      ENV['HOME'] = '/root';
-      ENV['USER'] = 'web';
-      ENV['LOGNAME'] = 'web';
+      // --rc remote points $HOME at the IO host's home (in editor-space, via the
+      // mount) so nvim loads the box's config/plugins; otherwise the MEMFS default.
+      ENV['HOME'] = proxyHome || '/root';
+      // Under the standalone proxy, $USER reflects the user the IO host runs as
+      // (the remote user under --remote); otherwise the standalone 'web' default.
+      ENV['USER'] = proxyUser || 'web';
+      ENV['LOGNAME'] = proxyUser || 'web';
       ENV['PWD'] = '/root';
       ENV['TERM'] = 'xterm-256color';
       ENV['LANG'] = 'C.UTF-8';
@@ -211,8 +224,11 @@
     }
 
     // 3. cwd: chdir last, so a cwd that lives inside a seeded dir resolves. In
-    //    the BROWSER the requested cwd may have no MEMFS node yet -- create the
-    //    directory chain first. Under Node the host filesystem is NODEFS-mounted,
+    //    the BROWSER the cwd is usually a SERVER path (the engine worker sets
+    //    __nvimCwd from the proxy hello's cwd) with no MEMFS node -- create the
+    //    stub directory chain first, exactly like the fs-proxy's chdir override
+    //    does for `:cd` (the stub only serves cwd bookkeeping; IO under it still
+    //    routes to the server). Under Node the host filesystem is NODEFS-mounted,
     //    so creating directories would touch the real disk -- chdir only. Fail
     //    soft -- on a missing dir keep the default cwd rather than crashing.
     if (cfgCwd) {

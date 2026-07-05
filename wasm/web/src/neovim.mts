@@ -69,7 +69,7 @@ export const ByteQueue = ns.ByteQueue;
 // get the option/instance types from the ESM entry.
 export type {
   CreateOptions, CreateNvimOptions, NeovimFacade, NeovimInstance, MessagePackModule,
-  Transport, NvimStatus, ClipboardProvider, ClipboardOption,
+  Transport, NvimStatus, ClipboardProvider, ClipboardOption, ProxyConfig,
   PluginsVariant, BrowserEngineConfig, RequestHandler,
 } from './neovim.js';
 

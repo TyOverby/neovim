@@ -3,6 +3,9 @@
 
 # wasm/ TypeScript build (sources live in src/; build-ts.sh emits these)
 node_modules/
+dist-lib/
 dist-worker/
 *.tsbuildinfo
+proxy-client.js
+proxy-reconnect.js
 worker.js

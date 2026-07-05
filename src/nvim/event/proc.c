@@ -22,6 +22,16 @@
 #include "nvim/os/time.h"
 #include "nvim/ui_client.h"
 
+#ifdef __EMSCRIPTEN__
+# include "nvim/event/proxy_proc.h"
+// Defined in wasm/nvim_proc_proxy.js: nonzero iff an IO-proxy is configured.
+extern int nvim_proxy_active(void);
+// Defined in wasm/nvim_proc_proxy.js: send a signal to the server child.
+extern void nvim_proxy_proc_kill(void *handle, int signum);
+// Defined in wasm/nvim_proc_proxy.js (Phase 5): kill the server PTY for a handle.
+extern void nvim_proxy_pty_kill(void *handle, int signum);
+#endif
+
 #include "event/proc.c.generated.h"
 
 // Time for a process to exit cleanly before we send KILL.
@@ -44,6 +54,17 @@ int proc_spawn(Proc *proc, bool in, bool out, bool err)
 {
   // forwarding stderr contradicts with processing it internally
   assert(!(err && proc->fwd_err));
+
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 3 (additive, opt-in): when an IO-proxy is configured, run a
+  // non-PTY child on the server over virtual stdio fds instead of uv_spawn()
+  // (which has no fork/posix_spawn under wasm). Retarget a uv proc to the proxy
+  // backend BEFORE the pipe/stream setup below (which is type-agnostic). With NO
+  // proxy this is skipped entirely -> spawning fails exactly as it does today.
+  if (proc->type == kProcTypeUv && nvim_proxy_active()) {
+    proc->type = kProcTypeProxy;
+  }
+#endif
 
   if (in) {
     uv_pipe_init(&proc->loop->uv, &proc->in.uv.pipe, 0);
@@ -76,6 +97,11 @@ int proc_spawn(Proc *proc, bool in, bool out, bool err)
   case kProcTypePty:
     status = pty_proc_spawn((PtyProc *)proc);
     break;
+#ifdef __EMSCRIPTEN__
+  case kProcTypeProxy:
+    status = proxy_proc_spawn(proc);
+    break;
+#endif
   }
 
   if (status) {
@@ -227,6 +253,14 @@ void proc_stop(Proc *proc) FUNC_ATTR_NONNULL_ALL
     proc->exit_signal = SIGTERM;
     os_proc_tree_kill(proc->pid, SIGTERM);
     break;
+#ifdef __EMSCRIPTEN__
+  case kProcTypeProxy:
+    // No local pid to signal: ask the server to kill its child. The server's
+    // subsequent 'exit' push drives the normal exit/close/refcount flow.
+    proc->exit_signal = SIGTERM;
+    nvim_proxy_proc_kill(proc, SIGTERM);
+    break;
+#endif
   case kProcTypePty:
     // close all streams for pty processes to send SIGHUP to the process
     proc->exit_signal = SIGHUP;
@@ -262,6 +296,23 @@ static void children_kill_cb(uv_timer_t *handle)
       continue;
     }
     uint64_t term_sent = UINT64_MAX == proc->stopped_time;
+#ifdef __EMSCRIPTEN__
+    if (proc->type == kProcTypeProxy) {
+      // proc->pid is the SERVER's child id, not a local pid -- escalate the kill
+      // on the server, never via os_proc_tree_kill() (which would target an
+      // unrelated local process).
+      proc->exit_signal = SIGKILL;
+      nvim_proxy_proc_kill(proc, SIGKILL);
+      continue;
+    }
+    if (proc->type == kProcTypePty && nvim_proxy_active()) {
+      // Phase 5: same reasoning -- proc->pid is the SERVER's pty id. Escalate the
+      // kill on the server, never via os_proc_tree_kill().
+      proc->exit_signal = SIGKILL;
+      nvim_proxy_pty_kill(proc, SIGKILL);
+      continue;
+    }
+#endif
     if (kProcTypePty != proc->type || term_sent) {
       proc->exit_signal = SIGKILL;
       os_proc_tree_kill(proc->pid, SIGKILL);
@@ -334,6 +385,11 @@ static void proc_close(Proc *proc)
   case kProcTypePty:
     pty_proc_close((PtyProc *)proc);
     break;
+#ifdef __EMSCRIPTEN__
+  case kProcTypeProxy:
+    proxy_proc_close(proc);
+    break;
+#endif
   }
 }
 

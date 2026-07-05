@@ -79,9 +79,11 @@ done
 [ -f "${MSGPACK_ESM}/index.mjs" ] || { echo "missing ${MSGPACK_ESM}/index.mjs (run: cd wasm/web && npm install)"; exit 1; }
 
 # The page + library JS is compiled from TypeScript (wasm/web/src) into dist/ by
-# build-ts.sh; the canvas grid renderer from wasm/grid-renderer/src.
-# Build both first so the bundle always ships fresh artifacts.
+# build-ts.sh; the proxy client (proxy-client.js / proxy-reconnect.js, copied
+# below) from wasm/src; the canvas grid renderer from wasm/grid-renderer/src.
+# Build all three first so the bundle always ships fresh artifacts.
 "${WEB}/build-ts.sh"
+"${ROOT}/wasm/build-ts.sh"
 "${ROOT}/wasm/grid-renderer/build-ts.sh"
 GRID_RENDERER_DIST="${ROOT}/wasm/grid-renderer/dist"
 
@@ -98,6 +100,10 @@ cp "${DIST}/neovim.js" "${DIST}/neovim-ui.js" "${DIST}/neovim-ui-pre.js" \
 cp "${DIST}"/neovim.d.ts "${DIST}"/neovim-ui.d.ts "${DIST}"/neovim-ui-pre.d.ts \
    "${DIST}"/neovim-utils.d.ts \
    "${DIST}"/neovim.d.mts "${DIST}"/neovim-ui.d.mts "${DIST}"/neovim-utils.d.mts "${OUT}/"
+# Stage 4 IO-proxy client (lives in wasm/, one dir up): the engine worker
+# importScripts('proxy-client.js') at runtime when create({ proxy }) is used, so
+# it must sit next to nvim.js in the bundle root. Harmless when no proxy is used.
+cp "${ROOT}/wasm/proxy-client.js" "${ROOT}/wasm/proxy-reconnect.js" "${OUT}/"
 # canvas grid renderer (UMD; sets globalThis.GridRenderer). mount_into (./ui)
 # needs it loaded first -- or passed in via opts.grid_renderer. Types come from
 # the renderer package's tsc output.

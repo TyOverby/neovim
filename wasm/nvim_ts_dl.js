@@ -4,7 +4,7 @@
 // (emscripten side modules -- the artifact `tree-sitter build --wasm`
 // publishes) can be dlopen'd at runtime by nvim's normal parser loader. Files
 // that already exist on a filesystem the engine can read (runtimepath dirs,
-// a MEMFS seed) need nothing from this library -- the C
+// an IO-proxy path, a MEMFS seed) need nothing from this library -- the C
 // loader stages + dlopens them by itself (see stage_parser_for_dlopen in
 // src/nvim/lua/treesitter.c).
 //

@@ -50,6 +50,37 @@ int forkpty(int *, char *, const struct termios *, const struct winsize *);
 
 #include "os/pty_proc_unix.c.generated.h"
 
+#ifdef __EMSCRIPTEN__
+# include "nvim/memory.h"   // xmalloc / xfree
+# include "nvim/os/os.h"    // tv_dict_to_env / os_free_fullenv
+// Stage 4 / Phase 5 (additive, opt-in): when an IO-proxy is configured, run a
+// :terminal child on the server over a single BIDIRECTIONAL virtual fd instead
+// of forkpty() (no fork/openpty under wasm). Every branch below is gated on
+// nvim_proxy_active(); the native forkpty/ioctl path stays byte-identical.
+//
+// JS bridge (implemented in wasm/nvim_proc_proxy.js):
+// nonzero iff globalThis.__nvimProxy is present (a proxy is configured).
+extern int nvim_proxy_active(void);
+// Allocate ONE virtual pollable fd usable for BOTH reading (server pty output)
+// and writing (terminal input). Returns the fd (>= 0) or -1 on failure. mode 2
+// = bidirectional (cf. mode 0 readable / 1 writable in the proc-spawn path).
+extern int nvim_proxy_alloc_fd(int mode);
+// Open a SECOND FS stream onto the SAME virtual channel as `fd` (so nvim can dup
+// the one master into proc->in and proc->out, mirroring the native dup()). The
+// two streams share the channel; reads drain server output, writes send input.
+extern int nvim_proxy_pty_dup_fd(int fd);
+// Request `pty.spawn` from the server (argv/env are NUL-separated) wired to the
+// virtual fd, plus the initial cols/rows. Registers the Proc* handle so pty.data
+// / pty.exit pushes route to it. Returns the server pty id (>= 0) or < 0.
+extern int nvim_proxy_pty_spawn(void *handle, const char *argv, const char *cwd,
+                                const char *env, int fd, int cols, int rows);
+// Send `pty.resize` to the server for this handle's pty.
+extern void nvim_proxy_pty_resize(void *handle, int cols, int rows);
+// Kill the server pty (close path); the server's `pty.exit` push then drives the
+// normal exit/close/refcount flow.
+extern void nvim_proxy_pty_kill(void *handle, int signum);
+#endif
+
 #if !defined(HAVE_FORKPTY) && !defined(__APPLE__)
 
 // this header defines STR, just as nvim.h, but it is defined as ('S'<<8),
@@ -179,6 +210,15 @@ int pty_proc_spawn(PtyProc *ptyproc)
   int status = 0;  // zero or negative error code (libuv convention)
   Proc *proc = (Proc *)ptyproc;
   assert(proc->err.s.closed);
+
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 5 (additive, opt-in): proxy the pty to the server. The native
+  // forkpty path below is skipped entirely when a proxy is active.
+  if (nvim_proxy_active()) {
+    return pty_proc_spawn_proxy(ptyproc);
+  }
+#endif
+
   uv_signal_start(&proc->loop->children_watcher, chld_handler, SIGCHLD);
   ptyproc->winsize = (struct winsize){ ptyproc->height, ptyproc->width, 0, 0 };
   uv_disable_stdio_inheritance();
@@ -233,6 +273,103 @@ error:
   return status;
 }
 
+#ifdef __EMSCRIPTEN__
+// Stage 4 / Phase 5: flatten a NULL-terminated string vector into a NUL-
+// separated, double-NUL-terminated buffer (the same wire shape proxy_proc.c
+// uses; wasm/nvim_proc_proxy.js readStrv() splits it). Caller xfree()s.
+static char *pty_flatten_strv(char **strv)
+{
+  size_t total = 1;  // for the final extra NUL (double-NUL terminator)
+  if (strv) {
+    for (size_t i = 0; strv[i] != NULL; i++) {
+      total += strlen(strv[i]) + 1;
+    }
+  }
+  char *buf = xmalloc(total);
+  size_t off = 0;
+  if (strv) {
+    for (size_t i = 0; strv[i] != NULL; i++) {
+      size_t n = strlen(strv[i]);
+      memcpy(buf + off, strv[i], n);
+      off += n;
+      buf[off++] = '\0';
+    }
+  }
+  buf[off++] = '\0';
+  return buf;
+}
+
+/// Stage 4 / Phase 5: spawn a :terminal child on the IO-proxy server instead of
+/// forkpty(). Mirrors the native master-fd wiring exactly: the native code dup()s
+/// ONE pty master into proc->in AND proc->out (a pty is one bidirectional stream;
+/// proc->err is always closed). Here we allocate ONE bidirectional virtual fd, open
+/// a SECOND FS stream onto the SAME channel (the analogue of dup), and uv_pipe_open
+/// the readable stream into proc->out and the writable stream into proc->in. After
+/// we return, proc_spawn()'s type-agnostic stream_init() wires them like the uv
+/// backend. Returns 0 on success (proc->pid = server pty id) or a negative error.
+static int pty_proc_spawn_proxy(PtyProc *ptyproc)
+  FUNC_ATTR_NONNULL_ALL
+{
+  Proc *proc = (Proc *)ptyproc;
+  ptyproc->winsize = (struct winsize){ ptyproc->height, ptyproc->width, 0, 0 };
+
+  // One bidirectional virtual fd backs the whole pty (read = server output,
+  // write = terminal input).
+  int fd = nvim_proxy_alloc_fd(2 /* bidirectional */);
+  if (fd < 0) {
+    return UV_ENOMEM;
+  }
+  ptyproc->tty_fd = fd;
+
+  // Mirror set_duplicating_descriptor(): nvim's pty wires the master into BOTH
+  // proc->in (write side) and proc->out (read side). Open a second FS stream on
+  // the same channel for the second pipe (a virtual dup).
+  if (!proc->out.s.closed) {
+    int rc = uv_pipe_open(&proc->out.s.uv.pipe, fd);
+    if (rc) {
+      return rc;
+    }
+  }
+  if (!proc->in.closed) {
+    int fd2 = nvim_proxy_pty_dup_fd(fd);
+    if (fd2 < 0) {
+      return UV_ENOMEM;
+    }
+    int rc = uv_pipe_open(&proc->in.uv.pipe, fd2);
+    if (rc) {
+      return rc;
+    }
+  }
+
+  char *argv_buf = pty_flatten_strv(proc->argv);
+  char **fullenv = NULL;
+  char *env_buf;
+  if (proc->env) {
+    fullenv = tv_dict_to_env(proc->env);
+    env_buf = pty_flatten_strv(fullenv);
+  } else {
+    env_buf = pty_flatten_strv(NULL);
+  }
+  const char *cwd = proc->cwd ? proc->cwd : "";
+
+  int pty_id = nvim_proxy_pty_spawn(proc, argv_buf, cwd, env_buf, fd,
+                                    ptyproc->width, ptyproc->height);
+
+  xfree(argv_buf);
+  xfree(env_buf);
+  if (fullenv) {
+    os_free_fullenv(fullenv);
+  }
+
+  if (pty_id < 0) {
+    return UV_ENOENT;
+  }
+  // Use the server pty id as the pid (opaque, positive, unique per child).
+  proc->pid = pty_id;
+  return 0;
+}
+#endif
+
 const char *pty_proc_tty_name(PtyProc *ptyproc)
 {
   return ptsname(ptyproc->tty_fd);
@@ -242,6 +379,13 @@ void pty_proc_resize(PtyProc *ptyproc, uint16_t width, uint16_t height)
   FUNC_ATTR_NONNULL_ALL
 {
   ptyproc->winsize = (struct winsize){ height, width, 0, 0 };
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 5: no master fd to ioctl(TIOCSWINSZ); ask the server's pty.
+  if (nvim_proxy_active()) {
+    nvim_proxy_pty_resize((Proc *)ptyproc, width, height);
+    return;
+  }
+#endif
   ioctl(ptyproc->tty_fd, TIOCSWINSZ, &ptyproc->winsize);
 }
 
@@ -282,6 +426,21 @@ void pty_proc_close(PtyProc *ptyproc)
 void pty_proc_close_master(PtyProc *ptyproc)
   FUNC_ATTR_NONNULL_ALL
 {
+#ifdef __EMSCRIPTEN__
+  // Stage 4 / Phase 5: there is no real master fd to close -- the virtual fd(s)
+  // are owned by nvim's in/out pipe streams and freed by their uv_close/FS.close
+  // teardown (the JS side releases its bookkeeping on the pty.exit push). What
+  // closing the master DOES on a native pty is hang up the child (SIGHUP via the
+  // session); the proxy equivalent is to ask the server to kill the pty. The
+  // server's `pty.exit` push then drives the normal exit/close/refcount flow.
+  if (nvim_proxy_active()) {
+    if (ptyproc->tty_fd >= 0) {
+      nvim_proxy_pty_kill((Proc *)ptyproc, SIGHUP);
+      ptyproc->tty_fd = -1;
+    }
+    return;
+  }
+#endif
   if (ptyproc->tty_fd >= 0) {
     close(ptyproc->tty_fd);
     ptyproc->tty_fd = -1;

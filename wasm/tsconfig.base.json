@@ -1,5 +1,5 @@
 {
-  "// description": "Shared TypeScript compiler options for the wasm/ host build. tsconfig.worker.json extends this; wasm/build-ts.sh drives it. Mirrors wasm/web/tsconfig.base.json.",
+  "// description": "Shared TypeScript compiler options for the wasm/ host + proxy-client build. The per-target configs (tsconfig.lib/worker.json) extend this; wasm/build-ts.sh drives them. Mirrors wasm/web/tsconfig.base.json.",
   "compilerOptions": {
     "target": "ES2020",
     "strict": false,
