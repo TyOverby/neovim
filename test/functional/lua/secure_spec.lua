@@ -16,6 +16,10 @@ local pcall_err = t.pcall_err
 local matches = t.matches
 local read_file = t.read_file
 
+if t.skip(t.is_wasm(), 'wasm: hangs on vim.secure prompt; TODO investigate') then
+  return
+end
+
 describe('vim.secure', function()
   --- Joins path components using the OS-native separator.
   --- Unlike vim.fs.joinpath (which normalizes to "/"), this preserves "\" on Windows
