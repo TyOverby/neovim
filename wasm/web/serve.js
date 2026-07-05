@@ -26,7 +26,8 @@ const BUILD = path.join(ROOT, 'build-wasm', 'bin');
 // build-ts.sh; serve those built artifacts (index.html itself is hand-written and
 // stays in wasm/web). Keep this list in sync with build-ts.sh's dist/ output.
 const BUILT = new Set([
-  'neovim.js', 'neovim-ui.js', 'neovim-ui-pre.js',
+  'neovim.js', 'neovim-ui.js', 'neovim-ui-pre.js', 'neovim-utils.js',
+  'neovim.mjs', 'neovim-ui.mjs', 'neovim-utils.mjs',
   'app.js', 'engine-worker.js',
 ]);
 const MSGPACK = path.join(WEB, 'node_modules', '@msgpack', 'msgpack', 'dist.umd', 'msgpack.min.js');

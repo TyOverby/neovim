@@ -39,6 +39,7 @@ mkdir -p "${OUT}"
 # hand-written (wasm/web); the JS is the tsc output from dist/.
 cp "${WEB}/index.html" "${OUT}/"
 cp "${DIST}/neovim.js" "${DIST}/neovim-ui.js" "${DIST}/neovim-ui-pre.js" \
+   "${DIST}/neovim-utils.js" "${DIST}/neovim-utils.mjs" \
    "${DIST}/app.js" "${DIST}/engine-worker.js" "${OUT}/"
 # msgpack UMD bundle
 cp "${MSGPACK}" "${OUT}/msgpack.min.js"
