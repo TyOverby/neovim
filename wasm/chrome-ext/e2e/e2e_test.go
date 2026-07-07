@@ -353,7 +353,8 @@ func TestTextareaRoundTrip(t *testing.T) {
 	}
 	waitFor(t, ctx, `document.activeElement && document.activeElement.id === 'ta'`, "focus restored to textarea", 5*time.Second)
 
-	// ---- session 2: pre-warmed engine; :q! must NOT write back -------------
+	// ---- session 2: pre-warmed engine; plain :q on a MODIFIED buffer -------
+	// discards: no E37 nag (QuitPre clears 'modified'), no write-back.
 	start := time.Now()
 	trigger(t, ctx)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "second session ready (pre-warmed engine)", 60*time.Second)
@@ -361,14 +362,14 @@ func TestTextareaRoundTrip(t *testing.T) {
 	typeKeys(t, ctx, "ggdG")
 	typeKeys(t, ctx, "ithrown away")
 	escape(t, ctx)
-	typeKeys(t, ctx, ":q!")
+	typeKeys(t, ctx, ":q")
 	enter(t, ctx)
-	waitFor(t, ctx, `!document.querySelector('[data-nvim-overlay]')`, "overlay to close on :q!", 15*time.Second)
+	waitFor(t, ctx, `!document.querySelector('[data-nvim-overlay]')`, "overlay to close on :q despite unsaved changes", 15*time.Second)
 	if got := evalString(t, ctx, `document.getElementById('ta').value`); got != "hello from nvim!" {
-		t.Fatalf("textarea after :q! = %q, want unchanged %q", got, "hello from nvim!")
+		t.Fatalf("textarea after :q = %q, want unchanged %q", got, "hello from nvim!")
 	}
 	if strings.Contains(evalString(t, ctx, `document.getElementById('ta').value`), "thrown away") {
-		t.Fatal(":q! leaked unwritten buffer content into the textarea")
+		t.Fatal(":q leaked unwritten buffer content into the textarea")
 	}
 
 	// ---- session 3: LINEWISE yank/put through the system clipboard ---------

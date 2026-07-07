@@ -128,6 +128,11 @@
     //     that rpcnotify()s the full buffer back to us (`:w` and the write half
     //     of `:wq`/`:x` both land here), then marks the buffer unmodified so
     //     the quit half proceeds without E37.
+    //   * make plain `:q` DISCARD: QuitPre clears 'modified' so quitting a
+    //     dirty buffer neither nags (E37) nor writes back -- in a textarea
+    //     overlay, quit-without-write means "throw my edits away" (`:q!`
+    //     semantics). Writes happen before the quit stage, so `:wq`/`ZZ`
+    //     still push first.
     //   * soft-wrap long lines, textarea-style; no statusline and no
     //     end-of-buffer tildes (laststatus=0, fillchars eob:space) so the
     //     overlay reads as "the textarea, but nvim" rather than a full editor
@@ -155,6 +160,10 @@
       "    vim.rpcnotify(chan, 'nvim_textarea_write', vim.api.nvim_buf_get_lines(buf, 0, -1, false))",
       '    vim.bo[buf].modified = false',
       '  end,',
+      '})',
+      "vim.api.nvim_create_autocmd('QuitPre', {",
+      '  buffer = buf,',
+      '  callback = function() vim.bo[buf].modified = false end,',
       '})',
       'vim.bo[buf].modified = false',
     ].join('\n');
