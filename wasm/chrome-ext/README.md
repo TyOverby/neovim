@@ -14,6 +14,11 @@ resizes it. If the textarea is resizable (CSS `resize`), the overlay grows the
 same native resize handle — dragging it resizes the underlying textarea in
 lockstep, and the grid reflows live.
 
+The editor is themed from the textarea: its computed text color and effective
+background (resolved through transparent ancestors) become nvim's `Normal`
+fg/bg, and the `'background'` option is set light/dark by luminance so the
+rest of the colorscheme harmonizes.
+
 ```sh
 wasm/build-deps.sh && wasm/build-nvim.sh     # the engine (once)
 wasm/chrome-ext/build-ext.sh                 # assembles _ext/

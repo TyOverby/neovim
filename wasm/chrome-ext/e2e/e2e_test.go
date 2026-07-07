@@ -44,7 +44,7 @@ const pageHTML = `<!doctype html>
 <title>textarea host</title>
 <body>
   <h1>test page</h1>
-  <textarea id="ta" style="width:420px;height:180px">hello from the page</textarea>
+  <textarea id="ta" style="width:420px;height:180px;color:#204060;background:#f5f0e8">hello from the page</textarea>
   <script>
     // Count the framework-visible write-backs (overlay dispatches input events
     // through the native value setter).
@@ -249,6 +249,24 @@ func TestTextareaRoundTrip(t *testing.T) {
 	trigger(t, ctx)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-overlay]')`, "overlay to appear", 20*time.Second)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "session ready (engine attached, buffer loaded)", 60*time.Second)
+
+	// ---- theme contract: overlay replicates the textarea's colors ----------
+	// The empty right margin must be the textarea's background (#f5f0e8, a
+	// LIGHT background -- also exercises the 'background' option flip), and
+	// the first text row must contain pixels near the textarea's text color
+	// (#204060; antialiasing means near, not exact).
+	waitFor(t, ctx, `(() => {
+		const c = document.querySelector('[data-nvim-overlay] canvas');
+		const g = c.getContext('2d');
+		const m = g.getImageData(c.width - 4, 4, 1, 1).data;
+		if (!(m[0] === 0xf5 && m[1] === 0xf0 && m[2] === 0xe8)) return false;
+		const row = g.getImageData(0, 0, 160, 18).data;
+		for (let i = 0; i < row.length; i += 4) {
+			const d = Math.abs(row[i] - 0x20) + Math.abs(row[i+1] - 0x40) + Math.abs(row[i+2] - 0x60);
+			if (d < 60) return true;
+		}
+		return false;
+	})()`, "overlay themed with the textarea's colors", 10*time.Second)
 
 	// ---- size contract: overlay == textarea, resize propagates back --------
 	waitFor(t, ctx, `(() => {

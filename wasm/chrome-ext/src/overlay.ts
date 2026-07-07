@@ -69,14 +69,74 @@
       return 'textarea://' + location.host + location.pathname + '#' + id;
     }
 
+    // ---- theme: replicate the textarea's colors ---------------------------
+    // Parse a computed CSS color ('rgb(r, g, b)' / 'rgba(r, g, b, a)' -- the
+    // legacy form Chrome reports for computed styles). Returns {r,g,b,a} or
+    // null for anything else (keywords never appear computed; wide-gamut
+    // color() forms are rare enough to fall back on defaults).
+    function parseCssColor(s: string): { r: number; g: number; b: number; a: number } | null {
+      const m = /^rgba?\(([^)]+)\)$/.exec(s || '');
+      if (!m) { return null; }
+      const parts = m[1].split(',').map(function (x) { return parseFloat(x); });
+      if (parts.length < 3 || parts.some(function (x) { return isNaN(x); })) { return null; }
+      return { r: parts[0], g: parts[1], b: parts[2], a: parts.length >= 4 ? parts[3] : 1 };
+    }
+
+    // The textarea's EFFECTIVE background: walk up through transparent
+    // ancestors, then composite any translucent layers (topmost last) over
+    // the first opaque one (white if none -- the browser's canvas default).
+    function effectiveBg(el: Element): { r: number; g: number; b: number } {
+      const layers: Array<{ r: number; g: number; b: number; a: number }> = [];
+      for (let n: Element | null = el; n; n = n.parentElement) {
+        const c = parseCssColor(getComputedStyle(n).backgroundColor);
+        if (!c || c.a <= 0) { continue; }
+        layers.push(c);
+        if (c.a >= 1) { break; }
+      }
+      let out = { r: 255, g: 255, b: 255 };
+      for (let i = layers.length - 1; i >= 0; i--) {
+        const l = layers[i];
+        out = {
+          r: l.r * l.a + out.r * (1 - l.a),
+          g: l.g * l.a + out.g * (1 - l.a),
+          b: l.b * l.a + out.b * (1 - l.a),
+        };
+      }
+      return out;
+    }
+
+    function toInt(c: { r: number; g: number; b: number }): number {
+      return (Math.round(c.r) << 16) | (Math.round(c.g) << 8) | Math.round(c.b);
+    }
+
+    // fg/bg as 24-bit ints + whether the bg reads as light (drives nvim's
+    // 'background' option so the rest of the default colorscheme harmonizes).
+    function textareaTheme(ta: HTMLTextAreaElement): { fg: number; bg: number; light: boolean } {
+      const bg = effectiveBg(ta);
+      const fgc = parseCssColor(getComputedStyle(ta).color) || { r: 0, g: 0, b: 0, a: 1 };
+      const fg = fgc.a >= 1 ? fgc : {   // translucent text: composite over the bg
+        r: fgc.r * fgc.a + bg.r * (1 - fgc.a),
+        g: fgc.g * fgc.a + bg.g * (1 - fgc.a),
+        b: fgc.b * fgc.a + bg.b * (1 - fgc.a),
+      };
+      const lum = (0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b) / 255;
+      return { fg: toInt(fg), bg: toInt(bg), light: lum > 0.5 };
+    }
+
     // Buffer-side session setup, run once the instance is ready:
     //   * name the buffer and make it write-through: 'acwrite' + a BufWriteCmd
     //     that rpcnotify()s the full buffer back to us (`:w` and the write half
     //     of `:wq`/`:x` both land here), then marks the buffer unmodified so
     //     the quit half proceeds without E37.
     //   * soft-wrap long lines, textarea-style.
+    //   * replicate the textarea's colors: 'background' FIRST (setting it
+    //     re-initializes the default colorscheme, so light-bg pages get
+    //     readable syntax/UI groups), THEN the Normal override (the other
+    //     order would wipe it).
     const SESSION_LUA = [
-      'local chan, name = ...',
+      'local chan, name, fg, bg, bgopt = ...',
+      "pcall(function() vim.o.background = bgopt end)",
+      "pcall(vim.api.nvim_set_hl, 0, 'Normal', { fg = fg, bg = bg })",
       'local buf = vim.api.nvim_get_current_buf()',
       'pcall(vim.api.nvim_buf_set_name, buf, name)',
       "vim.bo[buf].buftype = 'acwrite'",
@@ -109,13 +169,20 @@
       // to the page): present = session open, data-nvim-ready = buffer loaded
       // and writable. The e2e drives the extension through these.
       box.setAttribute('data-nvim-overlay', '');
+      // Colors sampled from the textarea; applied to the overlay chrome here,
+      // to the renderer defaults below (so the FIRST paint matches, before
+      // the engine reports its colors), and to the engine's Normal group in
+      // SESSION_LUA.
+      const theme = textareaTheme(ta);
+      const bgCss = '#' + (0x1000000 + theme.bg).toString(16).slice(1);
+
       // The box shrink-wraps the canvas (auto size); the CANVAS carries the
       // explicit pixel size and, when the textarea is resizable, the native
       // resize handle -- putting the handle on the canvas itself keeps it on
       // top (a handle on the box would be covered by the canvas).
       box.style.cssText =
         'position:fixed;z-index:2147483646;box-sizing:border-box;' +
-        'background:#000;border:1px solid #555;border-radius:4px;' +
+        'background:' + bgCss + ';border:1px solid #555;border-radius:4px;' +
         'box-shadow:0 4px 24px rgba(0,0,0,0.5);overflow:hidden;padding:0;margin:0;';
       const canvas = document.createElement('canvas');
       canvas.style.cssText = 'display:block;outline:none;overflow:hidden;';
@@ -211,6 +278,8 @@
       const ui = NeovimUI.mount_into(nvim, canvas, {
         font_family: 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
         font_size: 13,
+        default_fg: theme.fg,
+        default_bg: theme.bg,
       });
 
       let done = false;
@@ -247,7 +316,10 @@
       const lines = String(ta.value == null ? '' : ta.value).split('\n');
       nvim.ready
         .then(function () { return nvim.request('nvim_buf_set_lines', [0, 0, -1, false, lines]); })
-        .then(function () { return nvim.request('nvim_exec_lua', [SESSION_LUA, [nvim.chan, bufferName(ta)]]); })
+        .then(function () {
+          return nvim.request('nvim_exec_lua', [SESSION_LUA,
+            [nvim.chan, bufferName(ta), theme.fg, theme.bg, theme.light ? 'light' : 'dark']]);
+        })
         .then(function () {
           return Neovim.enableClipboard(nvim, Neovim.browserClipboardProvider()).catch(function (e: any) {
             console.warn('[nvim-textarea] clipboard wiring failed:', e && e.message || e);
