@@ -183,15 +183,6 @@ func waitFor(t *testing.T, ctx context.Context, expr, what string, timeout time.
 	}
 }
 
-func evalBool(t *testing.T, ctx context.Context, expr string) bool {
-	t.Helper()
-	var b bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &b)); err != nil {
-		t.Fatalf("evaluating %s: %v", expr, err)
-	}
-	return b
-}
-
 func evalString(t *testing.T, ctx context.Context, expr string) string {
 	t.Helper()
 	var s string
@@ -199,6 +190,40 @@ func evalString(t *testing.T, ctx context.Context, expr string) string {
 		t.Fatalf("evaluating %s: %v", expr, err)
 	}
 	return s
+}
+
+func evalFloat(t *testing.T, ctx context.Context, expr string) float64 {
+	t.Helper()
+	var f float64
+	if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &f)); err != nil {
+		t.Fatalf("evaluating %s: %v", expr, err)
+	}
+	return f
+}
+
+// drag presses the left button at (x0,y0), moves in steps, and releases at
+// (x1,y1) -- real trusted input, exactly what engages a CSS resize handle.
+func drag(t *testing.T, ctx context.Context, x0, y0, x1, y1 float64) {
+	t.Helper()
+	press := input.DispatchMouseEvent(input.MousePressed, x0, y0).
+		WithButton(input.Left).WithButtons(1).WithClickCount(1)
+	if err := chromedp.Run(ctx, press); err != nil {
+		t.Fatalf("mouse press: %v", err)
+	}
+	const steps = 8
+	for i := 1; i <= steps; i++ {
+		f := float64(i) / steps
+		move := input.DispatchMouseEvent(input.MouseMoved, x0+(x1-x0)*f, y0+(y1-y0)*f).
+			WithButton(input.Left).WithButtons(1)
+		if err := chromedp.Run(ctx, move); err != nil {
+			t.Fatalf("mouse move: %v", err)
+		}
+	}
+	release := input.DispatchMouseEvent(input.MouseReleased, x1, y1).
+		WithButton(input.Left).WithClickCount(1)
+	if err := chromedp.Run(ctx, release); err != nil {
+		t.Fatalf("mouse release: %v", err)
+	}
 }
 
 func TestTextareaRoundTrip(t *testing.T) {
@@ -274,20 +299,21 @@ func TestTextareaRoundTrip(t *testing.T) {
 		const r = document.querySelector('[data-nvim-overlay] canvas').getBoundingClientRect();
 		return ta.width > 400 && Math.abs(r.width - ta.width) < 2 && Math.abs(r.height - ta.height) < 2;
 	})()`, "overlay sized to the textarea", 5*time.Second)
-	waitFor(t, ctx, `getComputedStyle(document.querySelector('[data-nvim-overlay] canvas')).resize === 'both'`,
-		"overlay resizable like the textarea (resize:both)", 5*time.Second)
-	// Resize the nvim canvas (what the native corner-drag does: inline px) and
-	// expect the textarea to follow.
-	if !evalBool(t, ctx, `(() => {
-		const c = document.querySelector('[data-nvim-overlay] canvas');
-		c.style.width = '560px'; c.style.height = '320px'; return true;
-	})()`) {
-		t.Fatal("resizing overlay canvas failed")
-	}
-	waitFor(t, ctx, `(() => {
+	waitFor(t, ctx, `getComputedStyle(document.querySelector('[data-nvim-overlay]')).resize === 'both'`,
+		"overlay resizable like the textarea (resize:both on the box; a <canvas> can't carry resize)", 5*time.Second)
+	// REALLY drag the native resize handle (grab the box's bottom-right
+	// corner with trusted mouse events, drag +140/+140) and expect the
+	// textarea to follow. This is the regression a style-set simulation
+	// missed: `resize` on the <canvas> never grew a handle at all.
+	taW := evalFloat(t, ctx, `document.getElementById('ta').getBoundingClientRect().width`)
+	taH := evalFloat(t, ctx, `document.getElementById('ta').getBoundingClientRect().height`)
+	cornerX := evalFloat(t, ctx, `document.querySelector('[data-nvim-overlay]').getBoundingClientRect().right`) - 5
+	cornerY := evalFloat(t, ctx, `document.querySelector('[data-nvim-overlay]').getBoundingClientRect().bottom`) - 5
+	drag(t, ctx, cornerX, cornerY, cornerX+140, cornerY+140)
+	waitFor(t, ctx, fmt.Sprintf(`(() => {
 		const r = document.getElementById('ta').getBoundingClientRect();
-		return Math.abs(r.width - 560) < 3 && Math.abs(r.height - 320) < 3;
-	})()`, "textarea to follow the overlay resize (560x320)", 5*time.Second)
+		return Math.abs(r.width - %f) < 4 && Math.abs(r.height - %f) < 4;
+	})()`, taW+140, taH+140), "textarea to follow the native-handle drag (+140,+140)", 5*time.Second)
 
 	// Replace the buffer: ggdG then insert; Esc; :w -> textarea updates, overlay stays.
 	typeKeys(t, ctx, "ggdG")

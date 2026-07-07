@@ -17,7 +17,9 @@ lockstep, and the grid reflows live.
 The editor is themed from the textarea: its computed text color and effective
 background (resolved through transparent ancestors) become nvim's `Normal`
 fg/bg, and the `'background'` option is set light/dark by luminance so the
-rest of the colorscheme harmonizes.
+rest of the colorscheme harmonizes. The statusline and end-of-buffer tildes
+are hidden (`laststatus=0`, `fillchars+=eob:\ `) and the overlay is borderless
+(drop shadow only), so it reads as "the textarea, but nvim".
 
 ```sh
 wasm/build-deps.sh && wasm/build-nvim.sh     # the engine (once)

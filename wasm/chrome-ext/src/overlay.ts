@@ -128,7 +128,10 @@
     //     that rpcnotify()s the full buffer back to us (`:w` and the write half
     //     of `:wq`/`:x` both land here), then marks the buffer unmodified so
     //     the quit half proceeds without E37.
-    //   * soft-wrap long lines, textarea-style.
+    //   * soft-wrap long lines, textarea-style; no statusline and no
+    //     end-of-buffer tildes (laststatus=0, fillchars eob:space) so the
+    //     overlay reads as "the textarea, but nvim" rather than a full editor
+    //     chrome.
     //   * replicate the textarea's colors: 'background' FIRST (setting it
     //     re-initializes the default colorscheme, so light-bg pages get
     //     readable syntax/UI groups), THEN the Normal override (the other
@@ -143,6 +146,8 @@
       'vim.bo[buf].swapfile = false',
       'vim.wo.wrap = true',
       'vim.wo.linebreak = true',
+      'vim.o.laststatus = 0',
+      "vim.opt.fillchars:append({ eob = ' ' })",
       "vim.api.nvim_create_autocmd('BufWriteCmd', {",
       '  buffer = buf,',
       '  callback = function()',
@@ -176,29 +181,32 @@
       const theme = textareaTheme(ta);
       const bgCss = '#' + (0x1000000 + theme.bg).toString(16).slice(1);
 
-      // The box shrink-wraps the canvas (auto size); the CANVAS carries the
-      // explicit pixel size and, when the textarea is resizable, the native
-      // resize handle -- putting the handle on the canvas itself keeps it on
-      // top (a handle on the box would be covered by the canvas).
+      // The BOX carries the explicit pixel size and, when the textarea is
+      // resizable, the native resize handle -- `resize` does nothing on a
+      // <canvas> (replaced element), so it must live on the div; the box's
+      // resizer corner stays grabbable over the child canvas (like a
+      // scrollbar, it belongs to the box's own hit-test layer). No border /
+      // border-radius: the overlay is a bare grid, only a drop shadow marks
+      // it as floating.
       box.style.cssText =
         'position:fixed;z-index:2147483646;box-sizing:border-box;' +
-        'background:' + bgCss + ';border:1px solid #555;border-radius:4px;' +
+        'background:' + bgCss + ';border:none;' +
         'box-shadow:0 4px 24px rgba(0,0,0,0.5);overflow:hidden;padding:0;margin:0;';
-      const canvas = document.createElement('canvas');
-      canvas.style.cssText = 'display:block;outline:none;overflow:hidden;';
       // Mirror the textarea's resizability (resize needs overflow!=visible,
       // set above). Dragging the handle writes inline width/height on the
-      // canvas; the observer below pushes that onto the textarea.
-      canvas.style.resize = getComputedStyle(ta).resize || 'none';
+      // box; the observer below pushes that onto the textarea.
+      box.style.resize = getComputedStyle(ta).resize || 'none';
+      const canvas = document.createElement('canvas');
+      canvas.style.cssText = 'display:block;width:100%;height:100%;outline:none;';
       box.appendChild(canvas);
 
-      // SIZE CONTRACT: overlay == textarea. reposition() sizes the canvas to
-      // the textarea's border-box rect (floored/viewport-clamped) and pins the
-      // box over it; it re-runs on scroll/resize and whenever the TEXTAREA's
+      // SIZE CONTRACT: overlay == textarea. reposition() sizes the box to
+      // the textarea's border-box rect (floored/viewport-clamped) and pins it
+      // over it; it re-runs on scroll/resize and whenever the TEXTAREA's
       // size changes (page scripts, our own propagation below). `lastSet`
-      // remembers what reposition wrote so canvasRO can tell a user drag from
-      // a programmatic write. mount_into's own ResizeObserver reflows the grid
-      // on any canvas size change.
+      // remembers what reposition wrote so boxRO can tell a user drag from
+      // a programmatic write. The canvas fills the box, so mount_into's own
+      // ResizeObserver reflows the grid on any box size change.
       const lastSet = { w: -1, h: -1 };
       function reposition(): void {
         const r = ta.getBoundingClientRect();
@@ -211,8 +219,8 @@
         box.style.top = top + 'px';
         if (Math.abs(bw - lastSet.w) >= 1 || Math.abs(bh - lastSet.h) >= 1) {
           lastSet.w = bw; lastSet.h = bh;
-          canvas.style.width = bw + 'px';
-          canvas.style.height = bh + 'px';
+          box.style.width = bw + 'px';
+          box.style.height = bh + 'px';
         }
       }
       reposition();
@@ -220,18 +228,18 @@
       window.addEventListener('scroll', reposition, true);
       window.addEventListener('resize', reposition);
 
-      // Canvas size changed away from what reposition wrote => the user
-      // dragged the resize handle (or a script resized us): push the new size
-      // onto the textarea. Its own observer then re-runs reposition, which
+      // Box size changed away from what reposition wrote => the user dragged
+      // the resize handle (or a script resized us): push the new size onto
+      // the textarea. Its own observer then re-runs reposition, which
       // converges (sizes equal -> no further writes).
-      const canvasRO = new ResizeObserver(function () {
-        const r = canvas.getBoundingClientRect();
+      const boxRO = new ResizeObserver(function () {
+        const r = box.getBoundingClientRect();
         if (!(r.width > 0) || !(r.height > 0)) { return; }
         if (Math.abs(r.width - lastSet.w) < 1 && Math.abs(r.height - lastSet.h) < 1) { return; }
         lastSet.w = r.width; lastSet.h = r.height;
         setTextareaSize(ta, r.width, r.height);
       });
-      canvasRO.observe(canvas);
+      boxRO.observe(box);
       const taRO = new ResizeObserver(function () { reposition(); });
       taRO.observe(ta);
 
@@ -289,7 +297,7 @@
         sessions.delete(ta);
         try { ui.dispose(); } catch (_e) {}
         try { nvim.dispose(); } catch (_e) {}
-        canvasRO.disconnect();
+        boxRO.disconnect();
         taRO.disconnect();
         window.removeEventListener('scroll', reposition, true);
         window.removeEventListener('resize', reposition);
