@@ -76,27 +76,11 @@
       'vim.bo[buf].modified = false',
     ].join('\n');
 
-    // navigator.clipboard-backed provider for Neovim.enableClipboard (the
-    // library's built-in 'browser' provider is create()-only; this is the same
-    // idea, minus the regtype cache). Failures surface as RPC errors/warnings
-    // at use time -- clipboard is a nicety, not a session requirement.
-    function clipboardProvider(): any {
-      return {
-        get: function () {
-          if (!navigator.clipboard || !navigator.clipboard.readText) {
-            return Promise.reject(new Error('clipboard unavailable'));
-          }
-          return navigator.clipboard.readText();
-        },
-        set: function (lines: any) {
-          const text = Array.isArray(lines) ? lines.join('\n') : String(lines == null ? '' : lines);
-          if (!navigator.clipboard || !navigator.clipboard.writeText) { return Promise.resolve(); }
-          return navigator.clipboard.writeText(text).catch(function (e: any) {
-            console.warn('[nvim-textarea] clipboard write failed:', e && e.message || e);
-          });
-        },
-      };
-    }
+    // Clipboard: the library's browser provider (NOT a hand-rolled readText/
+    // writeText wrapper) -- it carries the regtype recovery (last-write cache +
+    // trailing-newline heuristic) that keeps `yy`/`p` linewise across the
+    // plain-text system clipboard. Failures surface as RPC errors/warnings at
+    // use time; clipboard is a nicety, not a session requirement.
 
     function open(ta: HTMLTextAreaElement): void {
       const existing = sessions.get(ta);
@@ -217,7 +201,7 @@
         .then(function () { return nvim.request('nvim_buf_set_lines', [0, 0, -1, false, lines]); })
         .then(function () { return nvim.request('nvim_exec_lua', [SESSION_LUA, [nvim.chan, bufferName(ta)]]); })
         .then(function () {
-          return Neovim.enableClipboard(nvim, clipboardProvider()).catch(function (e: any) {
+          return Neovim.enableClipboard(nvim, Neovim.browserClipboardProvider()).catch(function (e: any) {
             console.warn('[nvim-textarea] clipboard wiring failed:', e && e.message || e);
           });
         })

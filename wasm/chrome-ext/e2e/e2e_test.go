@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/extensions"
 	"github.com/chromedp/cdproto/input"
@@ -207,6 +208,17 @@ func TestTextareaRoundTrip(t *testing.T) {
 	ctx, cancelT := context.WithTimeout(ctx, 180*time.Second)
 	defer cancelT()
 
+	// The linewise yank/put session below round-trips the real system
+	// clipboard (clipboard=unnamedplus routes y/p through navigator.clipboard);
+	// headless has no permission prompt, so grant it up front.
+	bctx := cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Browser)
+	if err := browser.GrantPermissions([]browser.PermissionType{
+		browser.PermissionTypeClipboardReadWrite,
+		browser.PermissionTypeClipboardSanitizedWrite,
+	}).WithOrigin(srv.URL).Do(bctx); err != nil {
+		t.Fatalf("granting clipboard permission: %v", err)
+	}
+
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(srv.URL),
 		chromedp.WaitVisible("#ta", chromedp.ByID),
@@ -266,5 +278,20 @@ func TestTextareaRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(evalString(t, ctx, `document.getElementById('ta').value`), "thrown away") {
 		t.Fatal(":q! leaked unwritten buffer content into the textarea")
+	}
+
+	// ---- session 3: LINEWISE yank/put through the system clipboard ---------
+	// `yy` then `p` must open a NEW line (regtype 'V' recovered by the
+	// library's browser clipboard provider), not paste inline -- the
+	// historical regtype regression this guards against.
+	trigger(t, ctx)
+	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "third session ready", 60*time.Second)
+	typeKeys(t, ctx, "yyp")
+	escape(t, ctx)
+	typeKeys(t, ctx, ":wq")
+	enter(t, ctx)
+	waitFor(t, ctx, `!document.querySelector('[data-nvim-overlay]')`, "overlay to close after yyp :wq", 15*time.Second)
+	if got := evalString(t, ctx, `document.getElementById('ta').value`); got != "hello from nvim!\nhello from nvim!" {
+		t.Fatalf("textarea after yyp = %q, want two lines (linewise put)", got)
 	}
 }

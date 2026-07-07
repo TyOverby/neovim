@@ -336,7 +336,13 @@ export function createNvim(opts?: CreateNvimOptions): NeovimInstance {
 // get()/set() reject/warn so the failure surfaces as a clear RPC error rather
 // than at install time. CAVEAT: navigator.clipboard.readText() may be denied
 // without a user gesture (paste then yields an error to nvim).
-function browserClipboardProvider(): ClipboardProvider {
+//
+// EXPORTED (like enableClipboard) for embedders driving createNvim() directly
+// with a custom transport — create({clipboard:'browser'}) resolves to this same
+// provider. Hand-rolling a {get,set} around navigator.clipboard instead loses
+// the regtype recovery below and REGRESSES linewise yank/put (`yy` then `p`
+// pastes inline instead of opening a new line).
+export function browserClipboardProvider(): ClipboardProvider {
   function clip(): any {
     return (typeof navigator !== 'undefined' && navigator.clipboard) || null;
   }
