@@ -157,15 +157,13 @@
       'vim.wo.linebreak = true',
       'vim.o.laststatus = 0',
       'vim.o.cmdheight = 0',
-      "vim.opt.fillchars:append({ eob = ' ' })",
-      // When the window starts mid-way through a soft-wrapped line
-      // (w_skipcol > 0 -- routine here: textarea content is often one long
-      // line taller than the overlay), nvim hardcodes a "<<<" marker OVER
-      // the first three text cells (drawline.c wlv_put_linebuf). There is no
-      // option to disable it, but that code yields to a non-empty
-      // 'showbreak' -- and a single-space showbreak INSERTS a blank cell at
-      // the start of continuation rows instead of overwriting text.
-      "vim.o.showbreak = ' '",
+      // firstline:<empty> disables the "<<<" marker nvim draws OVER the
+      // first three text cells when the window starts mid-way through a
+      // soft-wrapped line (w_skipcol > 0 -- routine here: textarea content
+      // is often one long line taller than the overlay). The empty-value
+      // "firstline" fillchars item is this fork's feature (see 'fillchars'
+      // in :help options): text stays fully visible, no marker, no indent.
+      "vim.opt.fillchars:append({ eob = ' ', firstline = '' })",
       "vim.keymap.set({ 'n', 'v' }, 'j', 'gj')",
       "vim.keymap.set({ 'n', 'v' }, 'k', 'gk')",
       "vim.keymap.set('n', '<Up>', 'gk')",
