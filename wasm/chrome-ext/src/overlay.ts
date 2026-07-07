@@ -147,6 +147,7 @@
       'vim.wo.wrap = true',
       'vim.wo.linebreak = true',
       'vim.o.laststatus = 0',
+      'vim.o.cmdheight = 0',
       "vim.opt.fillchars:append({ eob = ' ' })",
       "vim.api.nvim_create_autocmd('BufWriteCmd', {",
       '  buffer = buf,',
