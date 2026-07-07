@@ -1,0 +1,270 @@
+// Browser e2e for the chrome extension: real headless Chrome, the real
+// unpacked extension (build-ext.sh output), a real page with a <textarea>.
+//
+// The extension is loaded via the CDP Extensions.loadUnpacked command
+// (--enable-unsafe-extension-debugging): branded Google Chrome >= 137 dropped
+// the --load-extension flag, so that command is the supported path (we still
+// pass the flag for Chromium builds, where it is honored first).
+//
+// The test drives the whole user flow with synthesized trusted input events:
+// focus the textarea -> Ctrl+Shift+. -> wait for the overlay canvas + the
+// data-nvim-ready marker -> edit with normal-mode keys -> `:w` pushes the
+// buffer into the textarea (input events observed by the page) -> `:wq`
+// pushes and tears the overlay down, restoring focus. A second session
+// exercises the pre-warmed engine and `:q!` (no write-back).
+//
+// Skips (not fails) without Chrome or a built _ext. Run:
+//
+//	wasm/chrome-ext/build-ext.sh && cd wasm/chrome-ext/e2e && go test -v
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/extensions"
+	"github.com/chromedp/cdproto/input"
+	"github.com/chromedp/chromedp"
+)
+
+const pageHTML = `<!doctype html>
+<meta charset="utf-8">
+<title>textarea host</title>
+<body>
+  <h1>test page</h1>
+  <textarea id="ta" rows="8" cols="60">hello from the page</textarea>
+  <script>
+    // Count the framework-visible write-backs (overlay dispatches input events
+    // through the native value setter).
+    window.inputEvents = 0;
+    document.getElementById('ta').addEventListener('input', function () { window.inputEvents++; });
+  </script>
+</body>`
+
+func chromeFound() (string, error) {
+	for _, b := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+		if p, err := exec.LookPath(b); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no chrome")
+}
+
+// extDir returns the unpacked extension: NVIM_EXT_DIR if set, else the
+// default build-ext.sh output (wasm/chrome-ext/_ext). Skips if absent.
+func extDir(t *testing.T) string {
+	if d := os.Getenv("NVIM_EXT_DIR"); d != "" {
+		if _, err := os.Stat(filepath.Join(d, "manifest.json")); err != nil {
+			t.Skipf("NVIM_EXT_DIR=%s has no manifest.json: %v", d, err)
+		}
+		return d
+	}
+	_, thisFile, _, _ := runtime.Caller(0)
+	d := filepath.Join(filepath.Dir(thisFile), "..", "_ext")
+	if _, err := os.Stat(filepath.Join(d, "manifest.json")); err != nil {
+		t.Skip("no built extension (run wasm/chrome-ext/build-ext.sh, or set NVIM_EXT_DIR)")
+	}
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+// newChromeWithExt launches headless Chrome and loads the unpacked extension.
+func newChromeWithExt(t *testing.T, ext string) (context.Context, context.CancelFunc) {
+	t.Helper()
+	// NOT DefaultExecAllocatorOptions: that set includes --disable-extensions.
+	opts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.NoSandbox,
+		chromedp.DisableGPU,
+		chromedp.Headless,
+		chromedp.Flag("disable-dev-shm-usage", true),
+		// The supported unpacked-load path on Chrome >= 137:
+		chromedp.Flag("enable-unsafe-extension-debugging", true),
+		// Honored by Chromium builds (ignored by branded Chrome >= 137); the
+		// CDP loadUnpacked below is idempotent enough that both paths coexist.
+		chromedp.Flag("load-extension", ext),
+	}
+	allocCtx, cancelA := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, cancelC := chromedp.NewContext(allocCtx)
+	cancel := func() { cancelC(); cancelA() }
+
+	// Allocate the browser, then issue browser-domain commands.
+	if err := chromedp.Run(ctx); err != nil {
+		cancel()
+		t.Fatalf("launching chrome: %v", err)
+	}
+	c := chromedp.FromContext(ctx)
+	bctx := cdp.WithExecutor(ctx, c.Browser)
+	if _, err := extensions.LoadUnpacked(ext).Do(bctx); err != nil {
+		// Chromium may have already honored --load-extension; the first wait
+		// on the overlay decides. Surface the error for diagnosis either way.
+		t.Logf("Extensions.loadUnpacked: %v (may be fine if --load-extension was honored)", err)
+	}
+	return ctx, cancel
+}
+
+// key sends a trusted keydown+keyup pair. `key` is the KeyboardEvent.key the
+// content scripts read; `code` matters only for the trigger chord.
+func key(ctx context.Context, k, code string, mods input.Modifier) error {
+	down := input.DispatchKeyEvent(input.KeyDown).WithKey(k).WithCode(code).WithModifiers(mods)
+	up := input.DispatchKeyEvent(input.KeyUp).WithKey(k).WithCode(code).WithModifiers(mods)
+	if err := chromedp.Run(ctx, down); err != nil {
+		return err
+	}
+	return chromedp.Run(ctx, up)
+}
+
+// typeKeys sends a string one rune at a time (plain keydowns; the overlay's
+// keydown handler feeds nvim_input from KeyboardEvent.key).
+func typeKeys(t *testing.T, ctx context.Context, s string) {
+	t.Helper()
+	for _, r := range s {
+		if err := key(ctx, string(r), "", 0); err != nil {
+			t.Fatalf("typing %q: %v", r, err)
+		}
+	}
+}
+
+func enter(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := key(ctx, "Enter", "Enter", 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func escape(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := key(ctx, "Escape", "Escape", 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// trigger sends the activation chord Ctrl+Shift+. (the trigger matches on
+// KeyboardEvent.code == "Period").
+func trigger(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if err := key(ctx, ">", "Period", input.ModifierCtrl|input.ModifierShift); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitFor polls a boolean page expression.
+func waitFor(t *testing.T, ctx context.Context, expr, what string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		var ok bool
+		if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &ok)); err != nil {
+			t.Fatalf("evaluating %s: %v", expr, err)
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s (%s)", what, expr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func evalString(t *testing.T, ctx context.Context, expr string) string {
+	t.Helper()
+	var s string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &s)); err != nil {
+		t.Fatalf("evaluating %s: %v", expr, err)
+	}
+	return s
+}
+
+func TestTextareaRoundTrip(t *testing.T) {
+	if _, err := chromeFound(); err != nil {
+		t.Skip("no Chrome/Chromium on PATH; skipping browser e2e")
+	}
+	ext := extDir(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, pageHTML)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := newChromeWithExt(t, ext)
+	defer cancel()
+	ctx, cancelT := context.WithTimeout(ctx, 180*time.Second)
+	defer cancelT()
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(srv.URL),
+		chromedp.WaitVisible("#ta", chromedp.ByID),
+		chromedp.Focus("#ta", chromedp.ByID),
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Give the document_idle content script a beat to install its listener.
+	waitFor(t, ctx, `document.activeElement && document.activeElement.id === 'ta'`, "textarea focused", 5*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	// ---- session 1: edit, :w (live write-back), :wq (write + close) --------
+	trigger(t, ctx)
+	waitFor(t, ctx, `!!document.querySelector('[data-nvim-overlay]')`, "overlay to appear", 20*time.Second)
+	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "session ready (engine attached, buffer loaded)", 60*time.Second)
+
+	// Replace the buffer: ggdG then insert; Esc; :w -> textarea updates, overlay stays.
+	typeKeys(t, ctx, "ggdG")
+	typeKeys(t, ctx, "ihello from nvim")
+	escape(t, ctx)
+	typeKeys(t, ctx, ":w")
+	enter(t, ctx)
+	waitFor(t, ctx, `document.getElementById('ta').value === 'hello from nvim'`, ":w write-back", 15*time.Second)
+	waitFor(t, ctx, `window.inputEvents > 0`, "input event dispatched on write-back", 5*time.Second)
+	var overlayGone bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`!document.querySelector('[data-nvim-overlay]')`, &overlayGone)); err != nil {
+		t.Fatal(err)
+	}
+	if overlayGone {
+		t.Fatal("overlay disappeared after :w (should only close on quit)")
+	}
+
+	// Append and :wq -> final content lands, overlay tears down, focus returns.
+	typeKeys(t, ctx, "A!")
+	escape(t, ctx)
+	typeKeys(t, ctx, ":wq")
+	enter(t, ctx)
+	waitFor(t, ctx, `!document.querySelector('[data-nvim-overlay]')`, "overlay to close on :wq", 15*time.Second)
+	if got := evalString(t, ctx, `document.getElementById('ta').value`); got != "hello from nvim!" {
+		t.Fatalf("textarea after :wq = %q, want %q", got, "hello from nvim!")
+	}
+	waitFor(t, ctx, `document.activeElement && document.activeElement.id === 'ta'`, "focus restored to textarea", 5*time.Second)
+
+	// ---- session 2: pre-warmed engine; :q! must NOT write back -------------
+	start := time.Now()
+	trigger(t, ctx)
+	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "second session ready (pre-warmed engine)", 60*time.Second)
+	t.Logf("second session ready in %s (pre-warmed engine)", time.Since(start))
+	typeKeys(t, ctx, "ggdG")
+	typeKeys(t, ctx, "ithrown away")
+	escape(t, ctx)
+	typeKeys(t, ctx, ":q!")
+	enter(t, ctx)
+	waitFor(t, ctx, `!document.querySelector('[data-nvim-overlay]')`, "overlay to close on :q!", 15*time.Second)
+	if got := evalString(t, ctx, `document.getElementById('ta').value`); got != "hello from nvim!" {
+		t.Fatalf("textarea after :q! = %q, want unchanged %q", got, "hello from nvim!")
+	}
+	if strings.Contains(evalString(t, ctx, `document.getElementById('ta').value`), "thrown away") {
+		t.Fatal(":q! leaked unwritten buffer content into the textarea")
+	}
+}

@@ -1,0 +1,13 @@
+{
+  "// description": "The MV3 service worker (background.ts): WebWorker lib, classic script.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist-sw",
+    "rootDir": "./src",
+    "lib": ["ES2020", "WebWorker"]
+  },
+  "files": [
+    "src/chrome-api.d.ts",
+    "src/background.ts"
+  ]
+}

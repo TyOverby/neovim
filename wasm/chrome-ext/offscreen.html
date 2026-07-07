@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- The offscreen document: the extension's long-lived host for the Neovim
+     engine Web Workers (MV3 service workers are ephemeral and cannot spawn
+     Workers, so the engines live here). Created once by background.js via
+     chrome.offscreen.createDocument and left open. ext-config.js is generated
+     by build-ext.sh (runtime-variant choice); ext-common.js provides the
+     base64 helpers shared with the content-script side. -->
+<meta charset="utf-8">
+<title>Neovim engine host</title>
+<script src="ext-config.js"></script>
+<script src="ext-common.js"></script>
+<script src="offscreen.js"></script>

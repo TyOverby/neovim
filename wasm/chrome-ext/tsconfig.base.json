@@ -1,0 +1,17 @@
+{
+  "// description": "Shared compiler options for the chrome-ext build; the per-target configs extend this (see build-ext.sh). Mirrors wasm/web/tsconfig.base.json.",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "Bundler",
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "removeComments": false,
+    "newLine": "lf"
+  }
+}
