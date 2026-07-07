@@ -3315,6 +3315,8 @@ static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, boo
 
   // Take care of putting "<<<" on the first line for 'smoothscroll'.
   if (wlv->row == 0 && wp->w_skipcol > 0
+      // the marker may be disabled entirely with 'fillchars' "firstline:"
+      && wp->w_p_fcs_chars.firstline != NUL
       // do not overwrite the 'showbreak' text with "<<<"
       && *get_showbreak_value(wp) == NUL
       // do not overwrite the 'listchars' "precedes" text with "<<<"
@@ -3333,7 +3335,7 @@ static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, boo
         // overwritten, change the second half to a space.
         linebuf_char[off + 1] = schar_from_ascii(' ');
       }
-      linebuf_char[off] = schar_from_ascii('<');
+      linebuf_char[off] = wp->w_p_fcs_chars.firstline;
       linebuf_attr[off] = HL_ATTR(HLF_AT);
       off++;
     }
