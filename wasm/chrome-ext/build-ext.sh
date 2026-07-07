@@ -54,7 +54,7 @@ mkdir -p "${OUT}"
 cp "${EXT}/manifest.json" "${EXT}/offscreen.html" "${OUT}/"
 cp "${EXT}/dist-page/ext-common.js" "${EXT}/dist-page/trigger.js" \
    "${EXT}/dist-page/overlay.js" "${EXT}/dist-page/offscreen.js" \
-   "${EXT}/dist-sw/background.js" "${OUT}/"
+   "${EXT}/dist-sw/background.js" "${EXT}/dist-sw/ext-engine-worker.js" "${OUT}/"
 # Build-time config read by offscreen.js (which runtime variant to boot).
 printf 'globalThis.NVIM_EXT_CONFIG = { plugins: %s };\n' "'${VARIANT}'" > "${OUT}/ext-config.js"
 

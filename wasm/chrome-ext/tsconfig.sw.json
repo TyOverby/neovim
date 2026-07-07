@@ -1,5 +1,5 @@
 {
-  "// description": "The MV3 service worker (background.ts): WebWorker lib, classic script.",
+  "// description": "Worker-context scripts: the MV3 service worker (background.ts) and the engine worker wrapper (ext-engine-worker.ts). WebWorker lib, classic scripts.",
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist-sw",
@@ -8,6 +8,7 @@
   },
   "files": [
     "src/chrome-api.d.ts",
-    "src/background.ts"
+    "src/background.ts",
+    "src/ext-engine-worker.ts"
   ]
 }

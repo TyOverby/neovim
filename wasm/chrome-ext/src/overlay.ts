@@ -123,7 +123,11 @@
       return { fg: toInt(fg), bg: toInt(bg), light: lum > 0.5 };
     }
 
-    // Buffer-side session setup, run once the instance is ready:
+    // Buffer-side session setup, run once the instance is ready. ONLY the
+    // session-specific glue lives here -- general editor configuration
+    // (display-line navigation, wrap, the minimal chrome) is in the DEFAULT
+    // ~/.config/nvim/init.vim that the offscreen host seeds (user-editable,
+    // persisted; see offscreen.ts DEFAULT_INIT_VIM):
     //   * name the buffer and make it write-through: 'acwrite' + a BufWriteCmd
     //     that rpcnotify()s the full buffer back to us (`:w` and the write half
     //     of `:wq`/`:x` both land here), then marks the buffer unmodified so
@@ -133,18 +137,11 @@
     //     overlay, quit-without-write means "throw my edits away" (`:q!`
     //     semantics). Writes happen before the quit stage, so `:wq`/`ZZ`
     //     still push first.
-    //   * navigate by DISPLAY line: textarea content is often one long
-    //     soft-wrapped line, where plain j/k would jump a whole paragraph --
-    //     remap j/k (normal+visual) and the arrow keys (incl. insert mode)
-    //     to gj/gk.
-    //   * soft-wrap long lines, textarea-style; no statusline and no
-    //     end-of-buffer tildes (laststatus=0, fillchars eob:space) so the
-    //     overlay reads as "the textarea, but nvim" rather than a full editor
-    //     chrome.
     //   * replicate the textarea's colors: 'background' FIRST (setting it
     //     re-initializes the default colorscheme, so light-bg pages get
     //     readable syntax/UI groups), THEN the Normal override (the other
-    //     order would wipe it).
+    //     order would wipe it). Runs after the user's init.vim (engine boot),
+    //     so the theme wins over a colorscheme set there.
     const SESSION_LUA = [
       'local chan, name, fg, bg, bgopt = ...',
       "pcall(function() vim.o.background = bgopt end)",
@@ -153,23 +150,6 @@
       'pcall(vim.api.nvim_buf_set_name, buf, name)',
       "vim.bo[buf].buftype = 'acwrite'",
       'vim.bo[buf].swapfile = false',
-      'vim.wo.wrap = true',
-      'vim.wo.linebreak = true',
-      'vim.o.laststatus = 0',
-      'vim.o.cmdheight = 0',
-      // firstline:<empty> disables the "<<<" marker nvim draws OVER the
-      // first three text cells when the window starts mid-way through a
-      // soft-wrapped line (w_skipcol > 0 -- routine here: textarea content
-      // is often one long line taller than the overlay). The empty-value
-      // "firstline" fillchars item is this fork's feature (see 'fillchars'
-      // in :help options): text stays fully visible, no marker, no indent.
-      "vim.opt.fillchars:append({ eob = ' ', firstline = '' })",
-      "vim.keymap.set({ 'n', 'v' }, 'j', 'gj')",
-      "vim.keymap.set({ 'n', 'v' }, 'k', 'gk')",
-      "vim.keymap.set('n', '<Up>', 'gk')",
-      "vim.keymap.set('n', '<Down>', 'gj')",
-      "vim.keymap.set('i', '<Up>', '<C-o>gk')",
-      "vim.keymap.set('i', '<Down>', '<C-o>gj')",
       "vim.api.nvim_create_autocmd('BufWriteCmd', {",
       '  buffer = buf,',
       '  callback = function()',

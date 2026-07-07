@@ -89,6 +89,14 @@ func extDir(t *testing.T) string {
 // newChromeWithExt launches headless Chrome and loads the unpacked extension.
 func newChromeWithExt(t *testing.T, ext string) (context.Context, context.CancelFunc) {
 	t.Helper()
+	return newChromeWithExtProfile(t, ext, "")
+}
+
+// newChromeWithExtProfile is newChromeWithExt with an explicit user-data-dir
+// (pass "" for a throwaway profile) -- the restart-persistence test relaunches
+// Chrome on the same profile.
+func newChromeWithExtProfile(t *testing.T, ext, profile string) (context.Context, context.CancelFunc) {
+	t.Helper()
 	// NOT DefaultExecAllocatorOptions: that set includes --disable-extensions.
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
@@ -102,6 +110,9 @@ func newChromeWithExt(t *testing.T, ext string) (context.Context, context.Cancel
 		// Honored by Chromium builds (ignored by branded Chrome >= 137); the
 		// CDP loadUnpacked below is idempotent enough that both paths coexist.
 		chromedp.Flag("load-extension", ext),
+	}
+	if profile != "" {
+		opts = append(opts, chromedp.UserDataDir(profile))
 	}
 	allocCtx, cancelA := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancelC := chromedp.NewContext(allocCtx)

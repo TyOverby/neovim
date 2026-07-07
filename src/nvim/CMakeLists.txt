@@ -907,8 +907,11 @@ if(EMSCRIPTEN)
     # _nvim_proxy_proc_on_exit, which the proc-proxy js-library calls) are
     # still exported independently of this list.
     # We only need a few runtime methods the js-libraries use to pass the
-    # handle pointer + read strings.
-    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
+    # handle pointer + read strings. FS is exported for embedding HOSTS (not
+    # the js-libraries, which see it in scope): a worker host can observe or
+    # seed the in-memory filesystem from outside nvim.js -- e.g. the chrome
+    # extension persists ~/.config/nvim by wrapping FS ops from a preRun hook.
+    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue,FS)
   set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
     "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
 endif()

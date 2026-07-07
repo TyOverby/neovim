@@ -16,6 +16,14 @@ resizes it. If the textarea is resizable (CSS `resize`), the overlay grows the
 same native resize handle — dragging it resizes the underlying textarea in
 lockstep, and the grid reflows live.
 
+Configuration persists: the engine's `~/.config/nvim` is stored by the
+extension (IndexedDB in the extension origin), seeded into every future
+session, and captured on every write -- `:e $MYVIMRC`, edit, `:w`, and the
+next session (including after a browser restart) inherits it. Deleting
+`init.vim` (`:call delete($MYVIMRC)`) restores the stock configuration --
+the defaults above (display-line navigation, minimal chrome) all live in the
+seeded default `init.vim`, so they are user-overridable.
+
 The editor is themed from the textarea: its computed text color and effective
 background (resolved through transparent ancestors) become nvim's `Normal`
 fg/bg, and the `'background'` option is set light/dark by luminance so the
@@ -79,6 +87,16 @@ Design decisions, and why:
   gives concurrent sessions (several textareas, several tabs) for free, where
   a genuinely shared engine would hit msgpack msgid collisions and nvim's
   one-UI-per-channel limit.
+* **Config persistence is FS-level interception.** The engine worker wrapper
+  (`ext-engine-worker.ts`) installs a `Module.preRun` hook that wraps the
+  Emscripten `FS` ops (open/close/unlink/rename; needs `FS` in the engine's
+  `EXPORTED_RUNTIME_METHODS`): every write or delete under `~/.config/nvim`
+  -- `:w`, `writefile()`, `delete()` -- is reported to the offscreen host,
+  which persists it in IndexedDB (offscreen documents can't use
+  `chrome.storage`) and seeds the stored tree into each new engine via the
+  init message's `filesystem` (materialized in MEMFS before `main()`). A
+  config change discards the pre-warmed engine so the next session inherits
+  it; boot-time seed echoes are deduplicated by content.
 * **Write-back is an autocmd, not scraping.** Session setup marks the buffer
   `buftype=acwrite` with a `BufWriteCmd` that `rpcnotify`s the full buffer to
   the overlay; `:w` and the write half of `:wq`/`:x` both land there. Engine
@@ -91,7 +109,8 @@ Design decisions, and why:
 | `manifest.json` | MV3 manifest. `wasm-unsafe-eval` CSP for extension pages; `minimum_chrome_version: 137` (JSPI on by default). |
 | `src/trigger.ts` | Always-injected content script: the keybinding listener, nothing else. |
 | `src/background.ts` | Service worker: offscreen-document lifecycle + on-demand injection of the overlay stack (`chrome.scripting`). |
-| `src/offscreen.ts` | Engine host: warm pool, Port↔worker bridging. |
+| `src/offscreen.ts` | Engine host: warm pool, Port↔worker bridging, the persistent config store (IndexedDB) + default `init.vim`. |
+| `src/ext-engine-worker.ts` | Engine worker entry: config-persistence FS hooks around the stock `engine-worker.js`. |
 | `src/overlay.ts` | The session: overlay DOM, Port `Transport`, buffer load, `BufWriteCmd` write-back, teardown. |
 | `src/ext-common.ts` | base64 helpers + the Port protocol constants (`globalThis.NvimExt`). |
 | `src/chrome-api.d.ts` | Minimal ambient chrome.* typings (no `@types/chrome` dependency). |
@@ -120,8 +139,9 @@ fast) closed with `:q!` (asserting no write-back).
 * **Page capture-phase key listeners** registered above the canvas still see
   keystrokes before us (platform limit); bubble-phase page hotkeys are
   stopped at the canvas.
-* **No per-user config/plugins** — the engine boots `-n` with the bundled
-  runtime variant only.
+* **Config persists, but there's no network or shell** — `~/.config/nvim` is
+  durable (hand-written config, small colorschemes/plugins pasted as files
+  under it load fine), but plugin managers that shell out or fetch can't run.
 * Textareas inside cross-origin iframes work (the trigger runs `all_frames`),
   but the overlay is confined to that iframe's viewport.
 * `<input type="text">` and `contenteditable` are not handled (textareas only).
