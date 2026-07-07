@@ -11,7 +11,9 @@
 // data-nvim-ready marker -> edit with normal-mode keys -> `:w` pushes the
 // buffer into the textarea (input events observed by the page) -> `:wq`
 // pushes and tears the overlay down, restoring focus. A second session
-// exercises the pre-warmed engine and `:q!` (no write-back).
+// exercises the pre-warmed engine and plain `:q` on a modified buffer
+// (discard: no nag, no write-back); a third does linewise yank/put through
+// the real system clipboard.
 //
 // Skips (not fails) without Chrome or a built _ext. Run:
 //
@@ -20,6 +22,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -271,6 +274,28 @@ func TestTextareaRoundTrip(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// ---- session 1: edit, :w (live write-back), :wq (write + close) --------
+	// First-paint probe: sample a cell-region pixel (bottom-left, always
+	// empty buffer background before we type) every frame from before the
+	// overlay exists, recording each distinct opaque color. If any unthemed
+	// frame reaches the canvas (the "black flash": nvim's default dark
+	// colorscheme painting before the theme lands), a dark sample shows up.
+	evalString(t, ctx, `(() => {
+		window.paintSamples = [];
+		(function poll() {
+			const c = document.querySelector('[data-nvim-overlay] canvas');
+			if (c) {
+				try {
+					const d = c.getContext('2d').getImageData(8, c.height - 8, 1, 1).data;
+					if (d[3] > 0) {
+						const key = d[0] + ',' + d[1] + ',' + d[2];
+						if (window.paintSamples.indexOf(key) < 0) window.paintSamples.push(key);
+					}
+				} catch (e) {}
+			}
+			if (!window.paintStop) requestAnimationFrame(poll);
+		})();
+		return 'ok';
+	})()`)
 	trigger(t, ctx)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-overlay]')`, "overlay to appear", 20*time.Second)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "session ready (engine attached, buffer loaded)", 60*time.Second)
@@ -292,6 +317,26 @@ func TestTextareaRoundTrip(t *testing.T) {
 		}
 		return false;
 	})()`, "overlay themed with the textarea's colors", 10*time.Second)
+
+	// Every color the probe saw must be light (the theme bg #f5f0e8 sums to
+	// 725; nvim's unthemed dark default #14161b sums to 75).
+	samples := evalString(t, ctx, `(() => { window.paintStop = true; return JSON.stringify(window.paintSamples); })()`)
+	var seen []string
+	if err := json.Unmarshal([]byte(samples), &seen); err != nil {
+		t.Fatalf("parsing paint samples %q: %v", samples, err)
+	}
+	if len(seen) == 0 {
+		t.Fatal("first-paint probe saw no painted pixels (probe broken?)")
+	}
+	for _, s := range seen {
+		var r, g, b int
+		if _, err := fmt.Sscanf(s, "%d,%d,%d", &r, &g, &b); err != nil {
+			t.Fatalf("bad paint sample %q", s)
+		}
+		if r+g+b < 300 {
+			t.Fatalf("unthemed dark frame reached the canvas before the theme (sample rgb(%s), all: %v)", s, seen)
+		}
+	}
 
 	// ---- size contract: overlay == textarea, resize propagates back --------
 	waitFor(t, ctx, `(() => {

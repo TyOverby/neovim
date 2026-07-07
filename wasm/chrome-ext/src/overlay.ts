@@ -307,24 +307,21 @@
         transport: transport,
         MessagePack: (globalThis as any).MessagePack,
       });
-      // The grid uses the textarea's own font. Cells are monospace-advance
-      // (the renderer's cell width comes from the font's reference glyph), so
-      // a proportional textarea font renders one glyph per fixed cell --
-      // faithful for the monospace fonts textareas that host code use.
-      const ui = NeovimUI.mount_into(nvim, canvas, {
-        font_family: taStyle.fontFamily ||
-          'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
-        font_size: parseFloat(taStyle.fontSize) || 13,
-        default_fg: theme.fg,
-        default_bg: theme.bg,
-      });
+      // The UI is mounted LATE, after the session Lua has themed the engine
+      // (see the ready chain below) -- mounting attaches the UI, and the
+      // engine's first redraw would otherwise carry nvim's default DARK
+      // colorscheme (the theme exec_lua hasn't run yet), flashing a black
+      // grid before the real colors land. Until mount the canvas is
+      // transparent over the theme-colored box, so nothing unthemed ever
+      // paints. Buffer load + exec_lua need no attached UI.
+      let ui: any = null;
 
       let done = false;
       function teardown(): void {
         if (done) { return; }
         done = true;
         sessions.delete(ta);
-        try { ui.dispose(); } catch (_e) {}
+        try { if (ui) { ui.dispose(); } } catch (_e) {}
         try { nvim.dispose(); } catch (_e) {}
         boxRO.disconnect();
         taRO.disconnect();
@@ -362,7 +359,22 @@
             console.warn('[nvim-textarea] clipboard wiring failed:', e && e.message || e);
           });
         })
-        .then(function () { box.setAttribute('data-nvim-ready', ''); })
+        .then(function () {
+          if (done) { return; }
+          // The engine is themed; NOW attach the UI. The grid uses the
+          // textarea's own font. Cells are monospace-advance (the renderer's
+          // cell width comes from the font's reference glyph), so a
+          // proportional textarea font renders one glyph per fixed cell --
+          // faithful for the monospace fonts textareas that host code use.
+          ui = NeovimUI.mount_into(nvim, canvas, {
+            font_family: taStyle.fontFamily ||
+              'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
+            font_size: parseFloat(taStyle.fontSize) || 13,
+            default_fg: theme.fg,
+            default_bg: theme.bg,
+          });
+          box.setAttribute('data-nvim-ready', '');
+        })
         .catch(function (err: any) {
           console.error('[nvim-textarea] session setup failed:', err && err.message || err);
           teardown();

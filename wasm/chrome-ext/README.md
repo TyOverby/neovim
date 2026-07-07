@@ -7,7 +7,9 @@ any page with the WebAssembly Neovim editor from this repo.
 the textarea with its content loaded into the buffer. `:w` writes the buffer
 back into the textarea (dispatching `input`/`change` through the native value
 setter, so React-style frameworks notice). `:wq` / `ZZ` writes and closes the
-overlay; `:q!` closes without writing. Focus returns to the textarea.
+overlay; plain `:q` closes and DISCARDS unwritten changes (no "no write since
+last change" nag — the real content lives in the textarea). Focus returns to
+the textarea.
 
 The overlay matches the textarea's size exactly and follows it if the page
 resizes it. If the textarea is resizable (CSS `resize`), the overlay grows the
@@ -17,11 +19,13 @@ lockstep, and the grid reflows live.
 The editor is themed from the textarea: its computed text color and effective
 background (resolved through transparent ancestors) become nvim's `Normal`
 fg/bg, and the `'background'` option is set light/dark by luminance so the
-rest of the colorscheme harmonizes. The statusline, command line, and
-end-of-buffer tildes are hidden (`laststatus=0`, `cmdheight=0`,
+rest of the colorscheme harmonizes. The textarea's padding, border (incl.
+radius), and font (family + size) are replicated too, the statusline, command
+line, and end-of-buffer tildes are hidden (`laststatus=0`, `cmdheight=0`,
 `fillchars+=eob:\ ` — the cmdline pops up over the last row while typing a
-`:` command) and the overlay is borderless (drop shadow only), so it reads as
-"the textarea, but nvim".
+`:` command), and the UI attaches only after the theme is applied (no flash
+of nvim's default dark colorscheme), so the overlay reads as "the textarea,
+but nvim".
 
 ```sh
 wasm/build-deps.sh && wasm/build-nvim.sh     # the engine (once)
