@@ -3234,6 +3234,13 @@ local options = {
           diff		'-'		deleted lines of the 'diff' option
           msgsep	' '		message separator 'display'
           eob		'~'		empty lines at the end of a buffer
+          firstline	'<'		the "<<<" marker drawn over the start
+        				of the first line when part of it is
+        				above the window (as with
+        				'smoothscroll').  May be given an
+        				EMPTY value ("firstline:") to disable
+        				the marker and show the text it would
+        				otherwise overwrite
           lastline	'@'		'display' contains lastline/truncate
           trunc		'>'		truncated text in the
         				|ins-completion-menu|.
@@ -3274,6 +3281,7 @@ local options = {
           diff		DiffDelete		|hl-DiffDelete|
           msgsep	MsgSeparator		|hl-MsgSeparator|
           eob		EndOfBuffer		|hl-EndOfBuffer|
+          firstline	NonText			|hl-NonText|
           lastline	NonText			|hl-NonText|
           trunc		one of the many Popup menu highlighting groups like
         		|hl-PmenuSel|
@@ -8370,7 +8378,8 @@ local options = {
         Scrolling works with screen lines.  When 'wrap' is set and the first
         line in the window wraps part of it may not be visible, as if it is
         above the window.  "<<<" is displayed at the start of the first line,
-        highlighted with |hl-NonText|.
+        highlighted with |hl-NonText|.  The marker character can be changed,
+        or the marker disabled, with the 'fillchars' "firstline" item.
         You may also want to add "lastline" to the 'display' option to show as
         much of the last line as possible.
         NOTE: partly implemented, doesn't work yet for |gj| and |gk|.

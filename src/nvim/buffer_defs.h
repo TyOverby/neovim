@@ -1091,6 +1091,7 @@ typedef struct {
   schar_T diff;
   schar_T msgsep;
   schar_T eob;
+  schar_T firstline;   ///< the "<<<" marker; NUL when disabled with "firstline:"
   schar_T lastline;
   schar_T trunc;
   schar_T truncrl;

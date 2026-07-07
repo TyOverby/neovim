@@ -242,6 +242,8 @@ LUA
 
 OPTIONS
 
+• 'fillchars' "firstline" item changes (or, with an empty value, disables) the
+  "<<<" marker shown when the first screen line is not the start of a line.
 • 'ttyfast' can be disabled during startup by setting |$NVIM_NOTTYFAST|.
 • 'scrolloffpad' allows vertically centering cursor at the end of file.
 • 'shortmess' flag |shm-u| silences undo/redo messages.

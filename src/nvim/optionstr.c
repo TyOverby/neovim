@@ -2283,6 +2283,7 @@ static const struct chars_tab fcs_tab[] = {
   CHARSTAB_ENTRY(&fcs_chars.diff,       "diff",      "-",  NULL),
   CHARSTAB_ENTRY(&fcs_chars.msgsep,     "msgsep",    " ",  NULL),
   CHARSTAB_ENTRY(&fcs_chars.eob,        "eob",       "~",  NULL),
+  CHARSTAB_ENTRY(&fcs_chars.firstline,  "firstline", "<",  NULL),
   CHARSTAB_ENTRY(&fcs_chars.lastline,   "lastline",  "@",  NULL),
   CHARSTAB_ENTRY(&fcs_chars.trunc,      "trunc",     ">",  NULL),
   CHARSTAB_ENTRY(&fcs_chars.truncrl,    "truncrl",   "<",  NULL),
@@ -2461,6 +2462,18 @@ const char *set_chars_option(win_T *wp, const char *value, CharsOption what, boo
                 lcs_chars.leadmultispace[multispace_pos++] = c1;
               }
             }
+          }
+          p = s;
+          break;
+        }
+
+        // 'fillchars' "firstline" accepts an EMPTY value: it disables the
+        // "<<<" marker entirely, so the text it would overwrite is shown
+        // (see wlv_put_linebuf()).  NUL is the "disabled" sentinel.
+        if (what == kFillchars && tab[i].cp == &fcs_chars.firstline
+            && (*s == NUL || *s == ',')) {
+          if (round > 0) {
+            *(tab[i].cp) = NUL;
           }
           p = s;
           break;
