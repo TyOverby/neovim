@@ -196,9 +196,14 @@
       // <canvas> (replaced element), so it must live on the div; the box's
       // resizer corner stays grabbable over the child canvas (like a
       // scrollbar, it belongs to the box's own hit-test layer).
+      // Invisible (and click-through) until the first painted frame: the
+      // box exists for the whole engine boot, and an empty theme-colored
+      // rectangle over the textarea reads as a white flash. Revealed in the
+      // ready chain below once real grid pixels are on the canvas.
       box.style.cssText =
         'position:fixed;z-index:2147483646;box-sizing:border-box;' +
-        'background:' + bgCss + ';overflow:hidden;padding:0;margin:0;';
+        'background:' + bgCss + ';overflow:hidden;padding:0;margin:0;' +
+        'opacity:0;pointer-events:none;';
       // Replicate the textarea's box styling so the overlay is a visual
       // stand-in, not a floating panel: padding and border (the canvas fills
       // the CONTENT box, so the grid is inset exactly like the textarea's
@@ -369,6 +374,17 @@
           // standard monospace stack. The SIZE is copied either way.
           const MONO_STACK = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace';
           const taFont = taStyle.fontFamily || '';
+          // Reveal on the first redraw AFTER attach: painting happens
+          // synchronously when the redraw's flush decodes (mount_into's
+          // immediate-paint path), so by this macrotask the grid pixels are
+          // already on the canvas -- no empty-box frame can show.
+          const offReveal = nvim.onNotification('redraw', function () {
+            offReveal();
+            setTimeout(function () {
+              box.style.opacity = '';
+              box.style.pointerEvents = '';
+            }, 0);
+          });
           ui = NeovimUI.mount_into(nvim, canvas, {
             font_family: /mono|courier|consol|menlo|monaco/i.test(taFont) ? taFont : MONO_STACK,
             font_size: parseFloat(taStyle.fontSize) || 13,

@@ -279,18 +279,27 @@ func TestTextareaRoundTrip(t *testing.T) {
 	// overlay exists, recording each distinct opaque color. If any unthemed
 	// frame reaches the canvas (the "black flash": nvim's default dark
 	// colorscheme painting before the theme lands), a dark sample shows up.
+	// It also flags the "white flash": any frame where the box is visible
+	// (opacity > 0) while the canvas has no pixels yet.
 	evalString(t, ctx, `(() => {
 		window.paintSamples = [];
+		window.sawVisibleEmpty = false;
 		(function poll() {
-			const c = document.querySelector('[data-nvim-overlay] canvas');
-			if (c) {
-				try {
-					const d = c.getContext('2d').getImageData(8, c.height - 8, 1, 1).data;
-					if (d[3] > 0) {
-						const key = d[0] + ',' + d[1] + ',' + d[2];
-						if (window.paintSamples.indexOf(key) < 0) window.paintSamples.push(key);
-					}
-				} catch (e) {}
+			const box = document.querySelector('[data-nvim-overlay]');
+			if (box) {
+				let painted = false;
+				const c = box.querySelector('canvas');
+				if (c) {
+					try {
+						const d = c.getContext('2d').getImageData(8, c.height - 8, 1, 1).data;
+						if (d[3] > 0) {
+							painted = true;
+							const key = d[0] + ',' + d[1] + ',' + d[2];
+							if (window.paintSamples.indexOf(key) < 0) window.paintSamples.push(key);
+						}
+					} catch (e) {}
+				}
+				if (!painted && getComputedStyle(box).opacity !== '0') window.sawVisibleEmpty = true;
 			}
 			if (!window.paintStop) requestAnimationFrame(poll);
 		})();
@@ -299,6 +308,14 @@ func TestTextareaRoundTrip(t *testing.T) {
 	trigger(t, ctx)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-overlay]')`, "overlay to appear", 20*time.Second)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "session ready (engine attached, buffer loaded)", 60*time.Second)
+	waitFor(t, ctx, `getComputedStyle(document.querySelector('[data-nvim-overlay]')).opacity === '1'`,
+		"overlay revealed after the first painted frame", 10*time.Second)
+	// The probe watched every frame since before the trigger: the box must
+	// never have been visible while the canvas was still empty (the "white
+	// flash" -- a bare theme-colored rectangle covering the textarea).
+	if evalString(t, ctx, `String(window.sawVisibleEmpty)`) != "false" {
+		t.Fatal("overlay was visible before the canvas had content (white flash)")
+	}
 
 	// ---- theme contract: overlay replicates the textarea's colors ----------
 	// The empty right margin must be the textarea's background (#f5f0e8, a
