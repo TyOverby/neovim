@@ -207,6 +207,11 @@ int sms_marker_overlap(win_T *wp, int extra2)
     return 0;
   }
 
+  // No overlap when the marker is disabled with 'fillchars' "firstline:".
+  if (wp->w_p_fcs_chars.firstline == NUL) {
+    return 0;
+  }
+
   // Overlap when 'list' and 'listchars' "precedes" are set is 1.
   if (wp->w_p_list && wp->w_p_lcs_chars.prec) {
     return 1;

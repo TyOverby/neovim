@@ -327,6 +327,8 @@ OPTIONS
 • 'complete' allows limiting matches for sources using "{flag}^<limit>".
 • 'completeopt' flag "nearest" sorts completion results by distance to cursor.
 • 'diffanchors' specifies addresses to anchor a diff.
+• 'fillchars' "firstline" item changes (or, with an empty value, disables) the
+  "<<<" marker shown when the first screen line is not the start of a line.
 • 'diffopt' `inline:` configures diff highlighting for changes within a line.
 • 'diffopt' with `inline:word` now automatically merges adjacent diff blocks
   separated by gaps and punctuation by 5 bytes to improve readability.
