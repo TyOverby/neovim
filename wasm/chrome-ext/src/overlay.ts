@@ -361,14 +361,16 @@
         })
         .then(function () {
           if (done) { return; }
-          // The engine is themed; NOW attach the UI. The grid uses the
-          // textarea's own font. Cells are monospace-advance (the renderer's
-          // cell width comes from the font's reference glyph), so a
-          // proportional textarea font renders one glyph per fixed cell --
-          // faithful for the monospace fonts textareas that host code use.
+          // The engine is themed; NOW attach the UI. The grid renders one
+          // glyph per fixed-advance cell, so it needs a monospace font;
+          // heuristic: adopt the textarea's own stack only when it smells
+          // monospace (a fallback naming mono/courier/consolas/menlo/monaco
+          // -- if one entry is monospace the rest are too), else use a
+          // standard monospace stack. The SIZE is copied either way.
+          const MONO_STACK = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace';
+          const taFont = taStyle.fontFamily || '';
           ui = NeovimUI.mount_into(nvim, canvas, {
-            font_family: taStyle.fontFamily ||
-              'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
+            font_family: /mono|courier|consol|menlo|monaco/i.test(taFont) ? taFont : MONO_STACK,
             font_size: parseFloat(taStyle.fontSize) || 13,
             default_fg: theme.fg,
             default_bg: theme.bg,
