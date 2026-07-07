@@ -186,17 +186,31 @@
       // resizable, the native resize handle -- `resize` does nothing on a
       // <canvas> (replaced element), so it must live on the div; the box's
       // resizer corner stays grabbable over the child canvas (like a
-      // scrollbar, it belongs to the box's own hit-test layer). No border /
-      // border-radius: the overlay is a bare grid, only a drop shadow marks
-      // it as floating.
+      // scrollbar, it belongs to the box's own hit-test layer).
       box.style.cssText =
         'position:fixed;z-index:2147483646;box-sizing:border-box;' +
-        'background:' + bgCss + ';border:none;' +
-        'box-shadow:0 4px 24px rgba(0,0,0,0.5);overflow:hidden;padding:0;margin:0;';
-      // Mirror the textarea's resizability (resize needs overflow!=visible,
-      // set above). Dragging the handle writes inline width/height on the
-      // box; the observer below pushes that onto the textarea.
-      box.style.resize = getComputedStyle(ta).resize || 'none';
+        'background:' + bgCss + ';overflow:hidden;padding:0;margin:0;';
+      // Replicate the textarea's box styling so the overlay is a visual
+      // stand-in, not a floating panel: padding and border (the canvas fills
+      // the CONTENT box, so the grid is inset exactly like the textarea's
+      // text), border radius, and resizability (resize needs
+      // overflow!=visible, set above; dragging the handle writes inline
+      // width/height on the box and the observer below pushes that onto the
+      // textarea).
+      const taStyle = getComputedStyle(ta);
+      const COPY_PROPS = [
+        'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+        'border-top-width', 'border-top-style', 'border-top-color',
+        'border-right-width', 'border-right-style', 'border-right-color',
+        'border-bottom-width', 'border-bottom-style', 'border-bottom-color',
+        'border-left-width', 'border-left-style', 'border-left-color',
+        'border-top-left-radius', 'border-top-right-radius',
+        'border-bottom-right-radius', 'border-bottom-left-radius',
+      ];
+      for (let i = 0; i < COPY_PROPS.length; i++) {
+        box.style.setProperty(COPY_PROPS[i], taStyle.getPropertyValue(COPY_PROPS[i]));
+      }
+      box.style.resize = taStyle.resize || 'none';
       const canvas = document.createElement('canvas');
       canvas.style.cssText = 'display:block;width:100%;height:100%;outline:none;';
       box.appendChild(canvas);
@@ -284,9 +298,14 @@
         transport: transport,
         MessagePack: (globalThis as any).MessagePack,
       });
+      // The grid uses the textarea's own font. Cells are monospace-advance
+      // (the renderer's cell width comes from the font's reference glyph), so
+      // a proportional textarea font renders one glyph per fixed cell --
+      // faithful for the monospace fonts textareas that host code use.
       const ui = NeovimUI.mount_into(nvim, canvas, {
-        font_family: 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
-        font_size: 13,
+        font_family: taStyle.fontFamily ||
+          'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace',
+        font_size: parseFloat(taStyle.fontSize) || 13,
         default_fg: theme.fg,
         default_bg: theme.bg,
       });

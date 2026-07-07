@@ -44,7 +44,7 @@ const pageHTML = `<!doctype html>
 <title>textarea host</title>
 <body>
   <h1>test page</h1>
-  <textarea id="ta" style="width:420px;height:180px;color:#204060;background:#f5f0e8">hello from the page</textarea>
+  <textarea id="ta" style="width:420px;height:180px;color:#204060;background:#f5f0e8;padding:6px;border:3px solid #888;border-radius:5px;font-family:monospace;font-size:15px">hello from the page</textarea>
   <script>
     // Count the framework-visible write-backs (overlay dispatches input events
     // through the native value setter).
@@ -296,9 +296,20 @@ func TestTextareaRoundTrip(t *testing.T) {
 	// ---- size contract: overlay == textarea, resize propagates back --------
 	waitFor(t, ctx, `(() => {
 		const ta = document.getElementById('ta').getBoundingClientRect();
-		const r = document.querySelector('[data-nvim-overlay] canvas').getBoundingClientRect();
+		const r = document.querySelector('[data-nvim-overlay]').getBoundingClientRect();
 		return ta.width > 400 && Math.abs(r.width - ta.width) < 2 && Math.abs(r.height - ta.height) < 2;
 	})()`, "overlay sized to the textarea", 5*time.Second)
+	// Box styling replicated: padding/border/radius copied, no drop shadow;
+	// the canvas fills the CONTENT box (textarea rect minus 2x(6px padding +
+	// 3px border) = -18), so the grid is inset like the textarea's text.
+	waitFor(t, ctx, `(() => {
+		const cs = getComputedStyle(document.querySelector('[data-nvim-overlay]'));
+		const cv = document.querySelector('[data-nvim-overlay] canvas').getBoundingClientRect();
+		const ta = document.getElementById('ta').getBoundingClientRect();
+		return cs.paddingTop === '6px' && cs.borderTopWidth === '3px' &&
+			cs.borderTopLeftRadius === '5px' && cs.boxShadow === 'none' &&
+			Math.abs(cv.width - (ta.width - 18)) < 2 && Math.abs(cv.height - (ta.height - 18)) < 2;
+	})()`, "textarea box styles replicated (padding/border/radius, no shadow)", 5*time.Second)
 	waitFor(t, ctx, `getComputedStyle(document.querySelector('[data-nvim-overlay]')).resize === 'both'`,
 		"overlay resizable like the textarea (resize:both on the box; a <canvas> can't carry resize)", 5*time.Second)
 	// REALLY drag the native resize handle (grab the box's bottom-right
