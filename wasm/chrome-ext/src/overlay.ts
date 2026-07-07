@@ -33,7 +33,24 @@
     // textarea focuses its session instead of double-opening.
     const sessions = new Map<HTMLTextAreaElement, { focus(): void }>();
 
-    const MIN_W = 480, MIN_H = 240, MARGIN = 8;
+    // Tiny floor so a degenerate textarea still yields a paintable grid; the
+    // overlay otherwise matches the textarea's size exactly.
+    const MIN_W = 60, MIN_H = 40, MARGIN = 8;
+
+    // Set the textarea's OUTER (border-box) size to w x h CSS px, honoring its
+    // box-sizing -- the same thing the native corner-drag does.
+    function setTextareaSize(ta: HTMLTextAreaElement, w: number, h: number): void {
+      const cs = getComputedStyle(ta);
+      let dw = 0, dh = 0;
+      if (cs.boxSizing !== 'border-box') {
+        dw = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) +
+             (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+        dh = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) +
+             (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+      }
+      ta.style.width = Math.max(0, w - dw) + 'px';
+      ta.style.height = Math.max(0, h - dh) + 'px';
+    }
 
     // Set a textarea's value the way frameworks expect: through the native
     // setter (React et al. patch the prototype accessor to track edits), then
@@ -92,19 +109,30 @@
       // to the page): present = session open, data-nvim-ready = buffer loaded
       // and writable. The e2e drives the extension through these.
       box.setAttribute('data-nvim-overlay', '');
+      // The box shrink-wraps the canvas (auto size); the CANVAS carries the
+      // explicit pixel size and, when the textarea is resizable, the native
+      // resize handle -- putting the handle on the canvas itself keeps it on
+      // top (a handle on the box would be covered by the canvas).
       box.style.cssText =
         'position:fixed;z-index:2147483646;box-sizing:border-box;' +
         'background:#000;border:1px solid #555;border-radius:4px;' +
         'box-shadow:0 4px 24px rgba(0,0,0,0.5);overflow:hidden;padding:0;margin:0;';
       const canvas = document.createElement('canvas');
-      canvas.style.cssText = 'display:block;width:100%;height:100%;outline:none;';
+      canvas.style.cssText = 'display:block;outline:none;overflow:hidden;';
+      // Mirror the textarea's resizability (resize needs overflow!=visible,
+      // set above). Dragging the handle writes inline width/height on the
+      // canvas; the observer below pushes that onto the textarea.
+      canvas.style.resize = getComputedStyle(ta).resize || 'none';
       box.appendChild(canvas);
 
-      // Cover the textarea, with a floor so tiny textareas still yield a
-      // usable grid, clamped into the viewport. Re-run on scroll/resize (the
-      // canvas is position:fixed, so ancestor scrolling moves the textarea
-      // out from under it otherwise). mount_into's ResizeObserver picks up
-      // any size change and reflows the grid.
+      // SIZE CONTRACT: overlay == textarea. reposition() sizes the canvas to
+      // the textarea's border-box rect (floored/viewport-clamped) and pins the
+      // box over it; it re-runs on scroll/resize and whenever the TEXTAREA's
+      // size changes (page scripts, our own propagation below). `lastSet`
+      // remembers what reposition wrote so canvasRO can tell a user drag from
+      // a programmatic write. mount_into's own ResizeObserver reflows the grid
+      // on any canvas size change.
+      const lastSet = { w: -1, h: -1 };
       function reposition(): void {
         const r = ta.getBoundingClientRect();
         const vw = window.innerWidth, vh = window.innerHeight;
@@ -114,13 +142,31 @@
         const top = Math.max(MARGIN, Math.min(r.top, vh - bh - MARGIN));
         box.style.left = left + 'px';
         box.style.top = top + 'px';
-        box.style.width = bw + 'px';
-        box.style.height = bh + 'px';
+        if (Math.abs(bw - lastSet.w) >= 1 || Math.abs(bh - lastSet.h) >= 1) {
+          lastSet.w = bw; lastSet.h = bh;
+          canvas.style.width = bw + 'px';
+          canvas.style.height = bh + 'px';
+        }
       }
       reposition();
       document.body.appendChild(box);
       window.addEventListener('scroll', reposition, true);
       window.addEventListener('resize', reposition);
+
+      // Canvas size changed away from what reposition wrote => the user
+      // dragged the resize handle (or a script resized us): push the new size
+      // onto the textarea. Its own observer then re-runs reposition, which
+      // converges (sizes equal -> no further writes).
+      const canvasRO = new ResizeObserver(function () {
+        const r = canvas.getBoundingClientRect();
+        if (!(r.width > 0) || !(r.height > 0)) { return; }
+        if (Math.abs(r.width - lastSet.w) < 1 && Math.abs(r.height - lastSet.h) < 1) { return; }
+        lastSet.w = r.width; lastSet.h = r.height;
+        setTextareaSize(ta, r.width, r.height);
+      });
+      canvasRO.observe(canvas);
+      const taRO = new ResizeObserver(function () { reposition(); });
+      taRO.observe(ta);
 
       // Keep bubbling keys/clicks inside the overlay: without this, keydowns
       // that mount_into forwards to nvim ALSO bubble to the page's document-
@@ -174,6 +220,8 @@
         sessions.delete(ta);
         try { ui.dispose(); } catch (_e) {}
         try { nvim.dispose(); } catch (_e) {}
+        canvasRO.disconnect();
+        taRO.disconnect();
         window.removeEventListener('scroll', reposition, true);
         window.removeEventListener('resize', reposition);
         box.remove();

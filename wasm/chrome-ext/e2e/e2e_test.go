@@ -35,6 +35,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/extensions"
 	"github.com/chromedp/cdproto/input"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
 
@@ -43,7 +44,7 @@ const pageHTML = `<!doctype html>
 <title>textarea host</title>
 <body>
   <h1>test page</h1>
-  <textarea id="ta" rows="8" cols="60">hello from the page</textarea>
+  <textarea id="ta" style="width:420px;height:180px">hello from the page</textarea>
   <script>
     // Count the framework-visible write-backs (overlay dispatches input events
     // through the native value setter).
@@ -182,6 +183,15 @@ func waitFor(t *testing.T, ctx context.Context, expr, what string, timeout time.
 	}
 }
 
+func evalBool(t *testing.T, ctx context.Context, expr string) bool {
+	t.Helper()
+	var b bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(expr, &b)); err != nil {
+		t.Fatalf("evaluating %s: %v", expr, err)
+	}
+	return b
+}
+
 func evalString(t *testing.T, ctx context.Context, expr string) string {
 	t.Helper()
 	var s string
@@ -222,6 +232,11 @@ func TestTextareaRoundTrip(t *testing.T) {
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(srv.URL),
 		chromedp.WaitVisible("#ta", chromedp.ByID),
+		// Make the tab VISIBLE: chromedp's target starts hidden in headless,
+		// and Chrome parks rendering frames for hidden pages -- ResizeObserver
+		// callbacks (the resize-propagation seam) and rAF paints starve until
+		// the page is visible.
+		chromedp.ActionFunc(func(ctx context.Context) error { return page.BringToFront().Do(ctx) }),
 		chromedp.Focus("#ta", chromedp.ByID),
 	); err != nil {
 		t.Fatal(err)
@@ -234,6 +249,27 @@ func TestTextareaRoundTrip(t *testing.T) {
 	trigger(t, ctx)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-overlay]')`, "overlay to appear", 20*time.Second)
 	waitFor(t, ctx, `!!document.querySelector('[data-nvim-ready]')`, "session ready (engine attached, buffer loaded)", 60*time.Second)
+
+	// ---- size contract: overlay == textarea, resize propagates back --------
+	waitFor(t, ctx, `(() => {
+		const ta = document.getElementById('ta').getBoundingClientRect();
+		const r = document.querySelector('[data-nvim-overlay] canvas').getBoundingClientRect();
+		return ta.width > 400 && Math.abs(r.width - ta.width) < 2 && Math.abs(r.height - ta.height) < 2;
+	})()`, "overlay sized to the textarea", 5*time.Second)
+	waitFor(t, ctx, `getComputedStyle(document.querySelector('[data-nvim-overlay] canvas')).resize === 'both'`,
+		"overlay resizable like the textarea (resize:both)", 5*time.Second)
+	// Resize the nvim canvas (what the native corner-drag does: inline px) and
+	// expect the textarea to follow.
+	if !evalBool(t, ctx, `(() => {
+		const c = document.querySelector('[data-nvim-overlay] canvas');
+		c.style.width = '560px'; c.style.height = '320px'; return true;
+	})()`) {
+		t.Fatal("resizing overlay canvas failed")
+	}
+	waitFor(t, ctx, `(() => {
+		const r = document.getElementById('ta').getBoundingClientRect();
+		return Math.abs(r.width - 560) < 3 && Math.abs(r.height - 320) < 3;
+	})()`, "textarea to follow the overlay resize (560x320)", 5*time.Second)
 
 	// Replace the buffer: ggdG then insert; Esc; :w -> textarea updates, overlay stays.
 	typeKeys(t, ctx, "ggdG")

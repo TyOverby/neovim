@@ -9,6 +9,11 @@ back into the textarea (dispatching `input`/`change` through the native value
 setter, so React-style frameworks notice). `:wq` / `ZZ` writes and closes the
 overlay; `:q!` closes without writing. Focus returns to the textarea.
 
+The overlay matches the textarea's size exactly and follows it if the page
+resizes it. If the textarea is resizable (CSS `resize`), the overlay grows the
+same native resize handle — dragging it resizes the underlying textarea in
+lockstep, and the grid reflows live.
+
 ```sh
 wasm/build-deps.sh && wasm/build-nvim.sh     # the engine (once)
 wasm/chrome-ext/build-ext.sh                 # assembles _ext/
