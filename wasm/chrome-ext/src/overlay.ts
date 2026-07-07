@@ -133,6 +133,10 @@
     //     overlay, quit-without-write means "throw my edits away" (`:q!`
     //     semantics). Writes happen before the quit stage, so `:wq`/`ZZ`
     //     still push first.
+    //   * navigate by DISPLAY line: textarea content is often one long
+    //     soft-wrapped line, where plain j/k would jump a whole paragraph --
+    //     remap j/k (normal+visual) and the arrow keys (incl. insert mode)
+    //     to gj/gk.
     //   * soft-wrap long lines, textarea-style; no statusline and no
     //     end-of-buffer tildes (laststatus=0, fillchars eob:space) so the
     //     overlay reads as "the textarea, but nvim" rather than a full editor
@@ -154,6 +158,12 @@
       'vim.o.laststatus = 0',
       'vim.o.cmdheight = 0',
       "vim.opt.fillchars:append({ eob = ' ' })",
+      "vim.keymap.set({ 'n', 'v' }, 'j', 'gj')",
+      "vim.keymap.set({ 'n', 'v' }, 'k', 'gk')",
+      "vim.keymap.set('n', '<Up>', 'gk')",
+      "vim.keymap.set('n', '<Down>', 'gj')",
+      "vim.keymap.set('i', '<Up>', '<C-o>gk')",
+      "vim.keymap.set('i', '<Down>', '<C-o>gj')",
       "vim.api.nvim_create_autocmd('BufWriteCmd', {",
       '  buffer = buf,',
       '  callback = function()',
