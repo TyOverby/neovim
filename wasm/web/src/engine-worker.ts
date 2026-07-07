@@ -1,0 +1,401 @@
+// wasm/web/src/engine-worker.ts - Neovim engine endpoint, run in a Web Worker.
+//
+// The browser analogue of wasm/worker.js. Hosts the Neovim engine wasm
+// (`nvim --embed`) directly in this Worker and backs its stdin/stdout (fd 0/1)
+// with a postMessage channel to the page (wasm/nvim_io.js installs the stream
+// ops). The page and the engine only ever exchange messages -- no shared memory,
+// so the page needs no COOP/COEP / cross-origin isolation.
+//
+// Protocol with the page:
+//   page -> worker:  first message {args, env, cwd, filesystem, plugins} (init);
+//                    then ArrayBuffers (RPC input)
+//   worker -> page:  ArrayBuffers (RPC output); {kind:'booting'|'stdout'|'stderr'
+//                    |'exit'} status objects
+//
+// Runtime VARIANTS (the create({plugins}) option): nvim.wasm is runtime-agnostic,
+// so the runtime ships as a separate file_packager data package per variant
+// (nvim-<variant>.data + nvim-<variant>.data.js loader). The loader unpacks the
+// runtime into MEMFS at /usr/share/nvim/runtime and, crucially, registers a
+// run-dependency (addRunDependency / preRun) on `self.Module`, so nvim's main()
+// waits for the data before it runs. We MUST importScripts the loader BEFORE
+// nvim.js, and self.Module must already exist so the loader's
+// `var Module = typeof Module != 'undefined' ? Module : {}` binds to OUR Module
+// (the same one nvim.js then uses) rather than a throwaway object.
+//
+// Compiled (by wasm/web/build-ts.sh) to a classic worker script engine-worker.js
+// — it stays importScripts-loadable and module-wrapper-free.
+'use strict';
+
+// `self` carries a pile of dynamic __nvim* config globals (read by pre.js) plus
+// Emscripten's Module and the importScripted proxy client/reconnect helpers.
+const S: any = self as any;
+
+const VARIANTS: Record<string, number> = { full: 1, core: 1, minimal: 1 };
+let started = false;
+
+onmessage = function (e: MessageEvent) {
+  if (!started) {
+    started = true;
+    const init = e.data || {};
+    const args = init.args || [];
+
+    // The channel object wasm/nvim_io.js reads (Module.nvimChannel).
+    const channel = {
+      inQueue: [] as any[],
+      closed: false,
+      notify: null as null | (() => void),
+      postOutput: function (u8: Uint8Array) { (postMessage as any)(u8.buffer, [u8.buffer]); },
+    };
+    S.__nvimChannel = channel;
+    S.__nvimArgs = ['--embed'].concat(args);
+
+    // create() runtime config (env/cwd/filesystem) travels in the same init
+    // message and is handed to the engine via the __nvim* globals pre.js reads,
+    // mirroring the Node host (wasm/worker.js) exactly.
+    if (init.env) { S.__nvimEnv = init.env; }
+    if (init.filesystem) { S.__nvimFiles = init.filesystem; }
+    if (typeof init.cwd === 'string') { S.__nvimCwd = init.cwd; }
+
+    // Runtime-fetched tree-sitter grammars (create({parsers})): install the
+    // hook wasm/nvim_ts_dl.js consults when language.add() finds no parser
+    // file. Resolution: urls[lang] first, else baseUrl/<lang>.wasm. Returning
+    // null keeps nvim's usual "No parser for language" error. Absent config =>
+    // no hook => byte-for-byte current behavior (additive/opt-in).
+    if (init.parsers && (init.parsers.baseUrl || init.parsers.urls)) {
+      const parsers = init.parsers;
+      S.__nvimParserFetch = async function (lang: string): Promise<Uint8Array | null> {
+        const url = (parsers.urls && parsers.urls[lang]) ||
+          (parsers.baseUrl ? parsers.baseUrl.replace(/\/+$/, '') + '/' + lang + '.wasm' : null);
+        if (!url) { return null; }
+        const resp = await fetch(url);
+        if (!resp.ok) { return null; }
+        return new Uint8Array(await resp.arrayBuffer());
+      };
+    }
+
+    // Surface engine stdout/stderr + exit back to the page. Set BEFORE boot so the
+    // engine's own prints are captured even on the deferred-boot (proxy) path.
+    S.Module = S.Module || {};
+    S.Module.print = function (s: string) { try { postMessage({ kind: 'stdout', text: s }); } catch (_e) {} };
+    S.Module.printErr = function (s: string) { try { postMessage({ kind: 'stderr', text: s }); } catch (_e) {} };
+    S.Module.onExit = function () { try { postMessage({ kind: 'exit' }); } catch (_e) {} };
+
+    // Runtime variant: default 'full'. create() already validates this, but guard
+    // here too since the worker can be driven directly.
+    const variant = init.plugins || 'full';
+
+    // bootEngine loads the variant's data package + nvim.js (which runs main()).
+    // Idempotent: the proxy path can race several boot signals (hello / failed
+    // connect / backstop timer) and only the first one boots.
+    let booted = false;
+    function bootEngine() {
+      if (booted) { return; }
+      booted = true;
+      if (!VARIANTS[variant]) {
+        postMessage({ kind: 'error', error: "unknown plugins variant '" + variant +
+          "' (expected 'full', 'core', or 'minimal')" });
+        return;
+      }
+      postMessage({ kind: 'booting' });
+      // Load the variant's data-package loader FIRST (it registers a run-dependency
+      // on self.Module + a preRun that unpacks the runtime into MEMFS), THEN nvim.js
+      // (which sees the dependency and waits for the data before main()). Both
+      // resolve relative to this worker's URL, i.e. under the bundle's baseUrl.
+      //
+      // The data-package loader is generated by wasm/build-nvim.sh (file_packager).
+      // If the build is stale (predates the runtime-variants change) the file is
+      // absent and importScripts throws an opaque NetworkError -- catch it and post
+      // an actionable message instead of letting the worker die silently.
+      try {
+        importScripts('nvim-' + variant + '.data.js');
+      } catch (err: any) {
+        postMessage({ kind: 'error', error:
+          "failed to load the runtime package 'nvim-" + variant + ".data.js' (" +
+          (err && err.message || err) + "). The wasm build is likely stale -- run " +
+          "wasm/build-nvim.sh to (re)generate the per-variant runtime data packages " +
+          "next to nvim.js." });
+        return;
+      }
+      importScripts('nvim.js');   // boots the engine; main() runs the libuv loop
+    }
+
+    // Stage 4 (additive/opt-in): if the page passed a `proxy` config, open the
+    // engine's OWN WebSocket to the IO-proxy server, wrap it as a transport, run
+    // the shared proxy client over it, send the hello handshake, and stash the
+    // client at globalThis.__nvimProxy so the js-libraries can find it. When
+    // init.proxy is ABSENT we boot immediately -- no connection, current behavior.
+    //
+    // With a proxy we DEFER boot until the first hello settles, so the server's
+    // reported identity (the proxied user -> $USER, read by pre.js) is in place
+    // before the engine's main() runs. A boot signal fires on: (a) a successful
+    // hello (we have the user); (b) a failed first connect (server down -> boot
+    // degraded, no user); (c) a backstop timer (a socket that opens but never
+    // acks). A connection failure must NOT crash the worker; bootEngine() is
+    // idempotent so whichever fires first wins.
+    if (init.proxy && init.proxy.url) {
+      const bootBackstop = setTimeout(function () {
+        try { postMessage({ kind: 'stderr', text: 'proxy: no hello within timeout; booting without server identity' }); } catch (_e) {}
+        bootSignal();
+      }, 8000);
+      const hasUserCwd = (typeof init.cwd === 'string');
+      function bootSignal(helloResult?: any) {
+        if (helloResult && typeof helloResult.user === 'string' && helloResult.user) {
+          S.__nvimProxyUser = helloResult.user;   // pre.js reads this for $USER
+        }
+        // The server's filesystem is mounted at the engine's root; the SHADOW
+        // list is the set of MEMFS overlay subtrees served locally instead of
+        // proxied. Base: the packaged runtime + device/proc pseudo-files. What
+        // else is shadowed depends on the --rc mode and the hello's identity:
+        //   remote — $HOME is the IO host's home (helloResult.home): nvim loads
+        //            the box's config + plugins live; nothing more is shadowed.
+        //   local  — $HOME is the box's, but $HOME/.config/nvim is SHADOWED to
+        //            the seeded laptop config (served from MEMFS): remap the
+        //            seed onto that dir and shadow it.
+        //   builtin (or no home known) — $HOME stays the MEMFS /root: shadow it
+        //            so the fake home never round-trips to the server.
+        // pre.js reads __nvimProxyHome / __nvimCwd before main().
+        const shadows = ['/usr/share/nvim', '/dev', '/proc'];
+        const rc = init.proxy.rc;
+        const home = (helloResult && typeof helloResult.home === 'string') ? helloResult.home : '';
+        if ((rc === 'remote' || rc === 'local') && home) {
+          S.__nvimProxyHome = home;
+          if (rc === 'local') {
+            const shadow = home + '/.config/nvim';
+            shadows.push(shadow);
+            const FROM = '/root/.config/nvim';   // where the server keyed the seed
+            if (S.__nvimFiles) {
+              const remapped: Record<string, any> = {};
+              for (const k in S.__nvimFiles) {
+                if (!Object.prototype.hasOwnProperty.call(S.__nvimFiles, k)) { continue; }
+                remapped[k.indexOf(FROM) === 0 ? shadow + k.slice(FROM.length) : k] = S.__nvimFiles[k];
+              }
+              S.__nvimFiles = remapped;
+            }
+          }
+        } else {
+          shadows.push('/root');
+          if ((rc === 'remote' || rc === 'local') && helloResult && !S.__nvimProxyHome) {
+            try { postMessage({ kind: 'stderr', text: 'proxy: --rc ' + rc + ' but the server reported no home; $HOME stays /root' +
+              (rc === 'remote' ? ', config not loaded' : ' (seeded config still loads)') }); } catch (_e) {}
+          }
+        }
+        S.__nvimProxyShadows = shadows;
+        // Land the editor in the server's working dir (the project dir tvim was
+        // started in / the remote's login dir) unless the page supplied a cwd.
+        // pre.js chdirs into it (creating the MEMFS stub chain) before main().
+        if (!hasUserCwd && helloResult && typeof helloResult.cwd === 'string' && helloResult.cwd) {
+          S.__nvimCwd = helloResult.cwd;
+        }
+        clearTimeout(bootBackstop);
+        bootEngine();
+      }
+      try { setupProxy(init.proxy, bootSignal); }
+      catch (err: any) {
+        try { postMessage({ kind: 'stderr', text: 'proxy setup failed: ' + (err && err.message || err) }); } catch (_e) {}
+        clearTimeout(bootBackstop);
+        bootEngine();
+      }
+    } else {
+      bootEngine();
+    }
+    return;
+  }
+
+  // After init, every message is RPC input bytes (a transferred ArrayBuffer).
+  const ch = S.__nvimChannel;
+  ch.inQueue.push({ buf: new Uint8Array(e.data), off: 0 });
+  if (ch.notify) { ch.notify(); }
+};
+
+// ---------------------------------------------------------------------------
+// Performance-panel instrumentation for the IO proxy.
+//
+// Chrome's DevTools extensibility API renders performance entries carrying a
+// `detail.devtools` payload in the Performance panel: measures tagged
+// `dataType:'track-entry'` land on a named CUSTOM TRACK (ours: "IO proxy",
+// group "tvim", shown under this worker), and marks tagged `dataType:'marker'`
+// render in the Timings track (the API does not place marks on custom tracks).
+// So: request/response pairs (distinct start/end) -> measures on the track;
+// one-shot events (server pushes, connection status) -> marks.
+//
+// Everything is guarded so a browser without the options-object performance
+// API just skips the instrumentation; entries in a non-Chrome browser are
+// plain User Timing entries (still visible in its profiler, minus the track).
+// ---------------------------------------------------------------------------
+
+function ioPerfNow(): number {
+  return (S.performance && typeof S.performance.now === 'function') ? S.performance.now() : -1;
+}
+
+// A measure on the custom "IO proxy" track (an entry with a start + duration).
+function ioPerfMeasure(name: string, start: number, color: string, props: Array<[string, string]>): void {
+  try {
+    S.performance.measure(name, {
+      start: start,
+      end: S.performance.now(),
+      detail: { devtools: {
+        dataType: 'track-entry', track: 'IO proxy', trackGroup: 'tvim',
+        color: color, tooltipText: name, properties: props,
+      } },
+    });
+  } catch (_e) { /* no options-object measure / no perf API: skip */ }
+}
+
+// A mark for instantaneous events (renders in the Timings track).
+function ioPerfMark(name: string, color: string, props: Array<[string, string]>): void {
+  try {
+    S.performance.mark(name, {
+      detail: { devtools: { dataType: 'marker', color: color, tooltipText: name, properties: props } },
+    });
+  } catch (_e) { /* skip */ }
+}
+
+// Color per method family so the track reads at a glance; failures are red.
+function ioPerfColor(method: string, failed: boolean): string {
+  if (failed) { return 'error'; }
+  if (method.indexOf('fs.') === 0) { return 'primary'; }
+  if (method.indexOf('proc.') === 0) { return 'secondary'; }
+  if (method.indexOf('pty.') === 0) { return 'secondary-light'; }
+  if (method.indexOf('sock.') === 0) { return 'tertiary'; }
+  return 'primary-dark';
+}
+
+// One short line identifying the request's target: the path for fs ops,
+// argv[0] for spawns, host:service for DNS/connect, else the server-side id.
+function ioPerfTarget(params: any): string {
+  if (!params || typeof params !== 'object') { return ''; }
+  if (typeof params.path === 'string') { return params.path; }
+  if (typeof params.from === 'string' && typeof params.to === 'string') {
+    return params.from + ' -> ' + params.to;
+  }
+  if (params.argv && params.argv.length) { return String(params.argv[0]); }
+  if (typeof params.host === 'string') {
+    return params.host + (params.service != null ? ':' + params.service : '');
+  }
+  const id = params.id != null ? params.id
+    : params.handle != null ? params.handle
+    : params.connId != null ? params.connId
+    : params.listenerId != null ? params.listenerId : null;
+  return id != null ? ('#' + id) : '';
+}
+
+// Wrap the ReconnectingProxy facade so every proxied IO request/push emits a
+// performance entry. Returns the wrapped facade (or the original when the
+// performance API is unavailable); the js-libraries use it transparently —
+// request/onPush/isConnected/close is their whole surface (plus the
+// __nvimPushChain expando they keep on the facade object, which works the
+// same on the wrapper).
+function instrumentProxyPerf(facade: any): any {
+  if (ioPerfNow() < 0) { return facade; }
+  return {
+    request: function (method: string, params?: any, payload?: any) {
+      const start = ioPerfNow();
+      const sent = payload ? ((payload.byteLength != null ? payload.byteLength : payload.length) | 0) : 0;
+      const target = ioPerfTarget(params);
+      const p = facade.request(method, params, payload);
+      const props: Array<[string, string]> = [['method', method]];
+      if (target) { props.push(['target', target]); }
+      if (params && typeof params === 'object') {
+        try { props.push(['params', JSON.stringify(params).slice(0, 200)]); } catch (_e) {}
+      }
+      if (sent) { props.push(['sent bytes', String(sent)]); }
+      p.then(function (resp: any) {
+        const got = (resp && resp.payload) ? resp.payload.byteLength : 0;
+        if (got) { props.push(['received bytes', String(got)]); }
+        const bytes = sent || got;
+        ioPerfMeasure(
+          method + (target ? ' ' + target : '') + (bytes ? ' (' + bytes + 'B)' : ''),
+          start, ioPerfColor(method, false), props);
+      }, function (err: any) {
+        props.push(['error', String(err && err.message || err)]);
+        ioPerfMeasure(method + (target ? ' ' + target : '') + ' FAILED',
+          start, ioPerfColor(method, true), props);
+      });
+      return p;
+    },
+    onPush: function (fn: any) {
+      facade.onPush(function (method: string, params: any, payload: Uint8Array) {
+        const bytes = payload ? payload.byteLength : 0;
+        const props: Array<[string, string]> = [['method', method]];
+        if (params && typeof params === 'object') {
+          try { props.push(['params', JSON.stringify(params).slice(0, 200)]); } catch (_e) {}
+        }
+        if (bytes) { props.push(['bytes', String(bytes)]); }
+        ioPerfMark('push ' + method + (bytes ? ' (' + bytes + 'B)' : ''),
+          ioPerfColor(method, false), props);
+        fn(method, params, payload);
+      });
+    },
+    isConnected: function () { return facade.isConnected(); },
+    close: function () { return facade.close(); },
+  };
+}
+
+// Stage 4: open the IO-proxy WebSocket and wire the shared proxy client. The
+// client lives in wasm/proxy-client.js, importScripted into this worker (it sets
+// self.ProxyClient). build-site.sh / build-lib.sh copy it next to nvim.js so it
+// resolves at the bundle root, exactly like nvim.js. Connection failures are
+// surfaced as a stderr status (the engine keeps running; no IO depends on it in
+// Phase 1).
+// `bootSignal(helloResult)` (optional) lets the caller defer the engine boot
+// until the proxy's identity is known: it is called with the hello ack's result
+// on each successful (re)connect, and with no argument on the first disconnect
+// (server unreachable) so the caller can boot degraded rather than wait forever.
+function setupProxy(proxy: any, bootSignal?: (helloResult?: any) => void) {
+  bootSignal = bootSignal || function () {};
+  importScripts('proxy-client.js');     // sets self.ProxyClient
+  importScripts('proxy-reconnect.js');  // sets self.ProxyReconnect (stage 5)
+
+  // Stage 5 (durable PTYs): the session id carried in the /proxy URL (?session=)
+  // routes this tab's :terminal shells to the session-host daemon so they survive
+  // a transport drop. The host app passes a STABLE per-project id (proxy.session,
+  // persisted in localStorage) so a full reload reconnects to the same session and
+  // can rehydrate its terminals. If none was provided (library use without a host,
+  // or localStorage blocked) we mint an ephemeral per-load id: durable across
+  // reconnects, but not across a reload.
+  S.__nvimSession = (typeof proxy.session === 'string' && proxy.session)
+    ? proxy.session
+    : ((S.crypto && S.crypto.randomUUID)
+        ? S.crypto.randomUUID()
+        : ('s-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
+
+  // Stage 5: a RECONNECTING facade (wasm/proxy-reconnect.js) — a stable object the
+  // js-libraries find at self.__nvimProxy. It delegates `request` to the current
+  // live client (fast-rejecting during an outage so suspended syscalls return
+  // -EIO instead of hanging), preserves the push router across reconnects, and
+  // re-dials with backoff after a drop. The engine itself never restarts — only
+  // the wire reconnects, so buffers/undo survive a blip (see docs/history/stage5.md §6).
+  S.__nvimProxy = instrumentProxyPerf(S.ProxyReconnect.createReconnectingProxy({
+    ProxyClient: S.ProxyClient,
+    dial: function () {
+      const url = proxy.url + (proxy.url.indexOf('?') >= 0 ? '&' : '?') +
+        'session=' + encodeURIComponent(S.__nvimSession);
+      const ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+      return ws;
+    },
+    // nvimSocket goes in the hello so the SERVER knows nvim's RPC socket path and
+    // can export $NVIM to spawned children (app.js serverstart()s on this path).
+    helloParams: { nvimSocket: proxy.nvimSocket },
+    // Carries the hello ack's result (incl. the proxied `user` -> $USER) to the
+    // deferred-boot logic above on every successful (re)connect.
+    onHello: function (result: any) { try { bootSignal!(result); } catch (_e) {} },
+    onStatus: function (ev: any) {
+      // Connection lifecycle is instantaneous (no start/end pair) -> marks.
+      ioPerfMark('proxy ' + ev.kind, ev.kind === 'connected' ? 'primary' : 'error',
+        [['kind', ev.kind]].concat(ev.delay != null ? [['delay ms', String(ev.delay)]] : []) as Array<[string, string]>);
+      try {
+        if (ev.kind === 'connected') {
+          postMessage({ kind: 'stdout', text: 'proxy: connected to ' + proxy.url });
+        } else if (ev.kind === 'disconnected') {
+          // First disconnect with no prior hello == server unreachable: release the
+          // deferred boot so the editor still loads (degraded), rather than hang.
+          bootSignal!();
+          postMessage({ kind: 'stderr', text: 'proxy: connection lost — in-flight IO failed; reconnecting…' });
+        } else if (ev.kind === 'reconnecting') {
+          postMessage({ kind: 'stderr', text: 'proxy: reconnecting in ' + ev.delay + 'ms' });
+        }
+      } catch (_e) {}
+    },
+  }));
+}

@@ -1,0 +1,4 @@
+# Built binaries (go build -o tvim ./cmd/tvim)
+/tvim
+/cmd/tvim/tvim
+/dist/

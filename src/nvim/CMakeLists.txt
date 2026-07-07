@@ -769,6 +769,161 @@ if(STATIC_BUILD)
 endif()
 target_link_libraries(nvim_bin PRIVATE main_lib PUBLIC libuv)
 
+# ---------------------------------------------------------------------------
+# Emscripten / WebAssembly build glue.
+#
+# Keeps all wasm-specific sources/flags in one guarded block. These files live
+# under <repo>/wasm/ (outside the globbed source dirs) so they never affect a
+# native build. See wasm/ for the full porting notes.
+# ---------------------------------------------------------------------------
+if(EMSCRIPTEN)
+  target_sources(nvim_bin PRIVATE
+    ${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c)
+  # Bundled tree-sitter grammars. Natively these are the dlopen()able
+  # lib/nvim/parser/<lang>.so modules; wasm has no dlopen, so the same parser
+  # sources (cross-compiled to static archives by wasm/build-deps.sh -- CMake
+  # demotes their MODULE targets to static under emscripten) are linked
+  # straight into the binary and registered by name via
+  # vim._ts_add_language_builtin (treesitter.c). Keep this list in sync with
+  # builtin_langs[] there and the parser list in cmake.deps.
+  foreach(TS_PARSER c lua markdown markdown_inline query vim vimdoc)
+    target_link_libraries(nvim_bin PRIVATE ${DEPS_PREFIX}/lib/${TS_PARSER}.a)
+  endforeach()
+  # -fPIC: the engine is linked -sMAIN_MODULE=2 (below) so THIRD-PARTY
+  # tree-sitter grammars -- emscripten side modules, the artifact
+  # `tree-sitter build --wasm` publishes -- can be dlopen'd at runtime. A main
+  # module is itself relocatable, so every object linked into it must be PIC
+  # (the deps archives are too: wasm/build-deps.sh adds -fPIC to EMCC_CFLAGS).
+  target_compile_options(nvim_bin PRIVATE -fPIC)
+  # Stage 4 / Phase 4: uv_stubs.c's __wrap_uv_spawn replicates real uv_spawn's
+  # uv_process_t handle bookkeeping (uv__handle_init / uv__handle_start /
+  # uv__queue_*), which lives in libuv's INTERNAL header uv-common.h. Scope that
+  # internal include dir to THIS ONE translation unit only (it is not on nvim's
+  # normal include path). wasm/build-deps.sh vendors uv-common.h (+ queue.h /
+  # strscpy.h) into .deps-wasm/usr/include/libuv-src; we point here (not at the
+  # libuv build/source tree) because CI caches only usr/, so the build tree may
+  # be absent on a deps-cache hit.
+  set_source_files_properties(${PROJECT_SOURCE_DIR}/wasm/uv_stubs.c PROPERTIES
+    INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/.deps-wasm/usr/include/libuv-src)
+  target_link_options(nvim_bin PRIVATE
+    # Stage 4 / Phase 4 (additive, opt-in): intercept uv_spawn / uv_process_kill
+    # so LSP servers + vim.system() + any luv subprocess run on the IO-proxy
+    # SERVER. The real implementations remain reachable as __real_uv_spawn /
+    # __real_uv_process_kill; uv_stubs.c's __wrap_* falls through to them when no
+    # proxy is active (ENOSYS, exactly as today). Wasm-only; native build untouched.
+    -Wl,--wrap=uv_spawn
+    -Wl,--wrap=uv_process_kill
+    # Stage 4 / TCP socket proxy (additive, opt-in): intercept uv_tcp_connect /
+    # uv_getaddrinfo / uv_freeaddrinfo so outbound TCP connections + DNS run on
+    # the IO-proxy SERVER. The real implementations remain reachable as
+    # __real_uv_*; uv_stubs.c's __wrap_* falls through to them when no proxy is
+    # active (unchanged wasm no-network behavior). Wasm-only; native untouched.
+    -Wl,--wrap=uv_tcp_connect
+    -Wl,--wrap=uv_getaddrinfo
+    -Wl,--wrap=uv_freeaddrinfo
+    # Unix-domain (pipe) sockets: sockconnect('pipe', path) + vim.uv.new_pipe()
+    # :connect / pipe_connect2 connect to a UNIX socket on the server, over the
+    # SAME virtual-fd backing + connect-result drain as the TCP wraps above.
+    -Wl,--wrap=uv_pipe_connect
+    -Wl,--wrap=uv_pipe_connect2
+    # Inbound listen/accept: serverstart() / luv s:bind()+s:listen()+s:accept().
+    # bind stores the addr, listen round-trips the server (net.createServer),
+    # accept pops a server-side connection onto a virtual fd, getsockname reports
+    # the real bound port, and uv_close tears down our listener. Same virtual-fd
+    # data path + connect-cb drain as the connect wraps. (uv_close is a transparent
+    # pass-through for every non-listener handle.)
+    -Wl,--wrap=uv_tcp_bind
+    -Wl,--wrap=uv_pipe_bind
+    -Wl,--wrap=uv_listen
+    -Wl,--wrap=uv_accept
+    -Wl,--wrap=uv_tcp_getsockname
+    -Wl,--wrap=uv_close
+    # JSPI: lets blocking wasm code (the libuv event loop waiting on input)
+    # suspend on async JS promises via WebAssembly stack-switching.
+    -sJSPI
+    # Wasm-native setjmp/longjmp: the default emscripten model uses JS invoke_*
+    # trampolines whose JS stack frames break JSPI suspension. Must match the
+    # model the deps were built with (see wasm/build-deps.sh).
+    -sSUPPORT_LONGJMP=wasm
+    # Filesystem: use MEMFS (the default in-memory FS) with a NODEFS mount of the
+    # host filesystem (set up in wasm/pre.js). Unlike NODERAWFS, this keeps fd 0/1
+    # as first-class *virtual* streams, which is what lets wasm/nvim_io.js back
+    # them with the postMessage RPC channel (the engine runs in a worker with no
+    # real stdin/stdout). NODEFS still gives access to $VIMRUNTIME and real files.
+    # See wasm/stage2.md.
+    -sFORCE_FILESYSTEM=1
+    -lnodefs.js
+    -sALLOW_MEMORY_GROWTH=1
+    # nvim recurses deeply (regex, syntax); the 64KB default stack is too small.
+    -sSTACK_SIZE=8MB
+    -sEXIT_RUNTIME=1
+    # Run in Node (worker_thread engine / builtin-TUI client) AND in the browser
+    # (Web Worker engine driven by a pure-JS UI on the page). One binary, both.
+    -sENVIRONMENT=node,web,worker
+    # NOTE: the $VIMRUNTIME is intentionally NOT baked in here with --preload-file.
+    # nvim.wasm is RUNTIME-AGNOSTIC: --preload-file only ever emitted a separate
+    # nvim.data + a data-package loader baked into nvim.js, never anything in the
+    # .wasm. The runtime is now packaged OUT-OF-BAND by wasm/build-nvim.sh, which
+    # runs emscripten's file_packager over a staged runtime subtree to produce one
+    # (nvim-<variant>.data + nvim-<variant>.data.js loader) pair PER variant
+    # (full/core/minimal), all sharing this one nvim.wasm. A host loads the chosen
+    # variant's loader before nvim.js (browser: engine-worker.js importScripts; Node:
+    # see wasm/worker.js), so main() waits on the data via a run-dependency. This
+    # makes runtime variants free (no per-variant relink). See wasm/README.md.
+    # Runs before everything (incl. the data-package loader): point locateFile at
+    # nvim.js's dir under Node so nvim.data resolves from any cwd. --pre-js is too
+    # late for this (the loader computes the path at the very top).
+    --extern-pre-js=${PROJECT_SOURCE_DIR}/wasm/extern-pre.js
+    # Boot-time JS that configures argv, the postMessage channel globals,
+    # $VIMRUNTIME and the environment (Emscripten does not inherit the host env).
+    --pre-js=${PROJECT_SOURCE_DIR}/wasm/pre.js
+    # Custom I/O glue: stdin/poll integration that suspends via JSPI (see file).
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_io.js
+    # Stage 4 / Phase 2 (additive, opt-in): async server-backed filesystem
+    # syscalls scoped to a proxy mount prefix. With no proxy mount configured
+    # (globalThis.__nvimProxy / __nvimProxyMount), every override delegates to the
+    # default behavior, so MEMFS/NODEFS IO is byte-for-byte unchanged. See file.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js
+    # Stage 4 / Phase 3 (additive, opt-in): the IO-proxy process-spawn backend's
+    # JS half -- the virtual stdio fd table + spawn/stdin/stdout/stderr/exit
+    # routing for src/nvim/event/proxy_proc.c. With no proxy configured the C
+    # backend is never taken, so none of this runs. See the file header.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js
+    # Stage 4 / TCP socket proxy (additive, opt-in): the JS half of the socket
+    # wraps -- a virtual bidirectional pollable fd backing each uv_tcp_t plus the
+    # sock.connect/write/close/getaddrinfo routing + server pushes. With no proxy
+    # configured the C wraps fall through to __real_uv_*, so none of this runs.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js
+    # Dynamic tree-sitter grammars (additive, opt-in): the host-fetch hook
+    # language.add() falls back to when no parser file exists anywhere --
+    # lets a browser page fetch() grammar .wasm side modules at runtime
+    # (create({parsers})). With no hook installed it returns 0 synchronously
+    # and the usual "No parser for language" error is unchanged. See file.
+    --js-library=${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js
+    # Dynamic tree-sitter grammars: link as an emscripten MAIN MODULE so
+    # dlopen() (nvim's existing parser loader, load_language_from_object) can
+    # load grammar side modules at runtime. =2 keeps dead-code elimination (=1
+    # would export all of libc and grow the binary further); the cost is that
+    # symbols a side module imports must be EXPLICITLY kept alive via
+    # EXPORTED_FUNCTIONS below. Costs ~0.9MB (+13%) on nvim.wasm. Grammar
+    # parser.c only ever calls the allocator; external scanners may use the
+    # ctype/wctype/mem/str families -- the curated list below covers what
+    # scanners commonly need. An unresolved side-module import does NOT fail
+    # dlopen: it becomes a lazy stub that throws "TypeError: resolved is not a
+    # function" AT FIRST CALL -- if a grammar hits that, extend this list.
+    -sMAIN_MODULE=2
+    "SHELL:-sEXPORTED_FUNCTIONS=_main,_malloc,_calloc,_realloc,_free,_abort,_memcpy,_memmove,_memset,_memcmp,_memchr,_strlen,_strcmp,_strncmp,_strchr,_strcpy,_strncpy,_isalnum,_isalpha,_isdigit,_isspace,_isxdigit,_islower,_isupper,_ispunct,_tolower,_toupper,_iswalnum,_iswalpha,_iswdigit,_iswspace,_iswxdigit,_iswlower,_iswupper,_iswpunct,_iswblank,_towlower,_towupper"
+    # NB: EXPORTED_FUNCTIONS replaces emcc's default export set (hence _main),
+    # but EMSCRIPTEN_KEEPALIVE entries (e.g. proxy_proc.c's
+    # _nvim_proxy_proc_on_exit, which the proc-proxy js-library calls) are
+    # still exported independently of this list -- verified by the proxy e2e.
+    # We only need a few runtime methods the js-libraries use to pass
+    # the handle pointer + read strings.
+    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,stringToUTF8,lengthBytesUTF8,getValue,setValue)
+  set_target_properties(nvim_bin PROPERTIES LINK_DEPENDS
+    "${PROJECT_SOURCE_DIR}/wasm/nvim_io.js;${PROJECT_SOURCE_DIR}/wasm/nvim_fs_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_proc_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_sock_proxy.js;${PROJECT_SOURCE_DIR}/wasm/nvim_ts_dl.js;${PROJECT_SOURCE_DIR}/wasm/pre.js;${PROJECT_SOURCE_DIR}/wasm/extern-pre.js")
+endif()
+
 install_helper(TARGETS nvim_bin)
 if(MSVC)
   install(FILES $<TARGET_PDB_FILE:nvim_bin> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)

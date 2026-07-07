@@ -1,0 +1,137 @@
+# Build the WebAssembly port once, then fan out: deploy the browser grid UI
+# (wasm/web/) to GitHub Pages AND cross-compile the `tvim` standalone-app server
+# (wasm/tvim/) with that same bundle embedded. See wasm/README.md, wasm/stage3.md
+# (browser UI) and wasm/stage5.md (tvim server) for the architecture.
+#
+# The expensive wasm compile + site assembly lives in a shared composite action
+# (.github/actions/build-wasm); the `build` job runs it ONCE and publishes the
+# assembled site as an artifact that both downstream jobs consume — Pages uploads
+# it, and `build-tvim` embeds it into the Go binary (-tags embed_assets).
+#
+# Pages setup (one-time, in the repo): Settings -> Pages -> Build and deployment
+#   -> Source: "GitHub Actions".
+name: Deploy wasm to Pages + build tvim
+
+on:
+  push:
+    branches: [wasm-build]
+    # Only rebuild when something that affects the wasm build/site/server changes.
+    paths:
+      - 'wasm/**'
+      - 'src/**'
+      - 'cmake.deps/**'
+      - 'cmake/**'
+      - 'runtime/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/deploy-wasm-pages.yml'
+      - '.github/actions/build-wasm/**'
+  workflow_dispatch:
+
+# Needed by actions/deploy-pages (OIDC) and to publish the Pages artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a newer push cancel an in-flight build.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # Cross-compile nvim to wasm and assemble the static site ONCE. The site is
+  # published two ways: as the Pages artifact (for `deploy`) and as a regular
+  # artifact named `wasm-site` (for `build-tvim` to embed into the Go binary).
+  build:
+    runs-on: ubuntu-latest
+    env:
+      EM_VERSION: 3.1.69
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wasm + assemble site
+        uses: ./.github/actions/build-wasm
+        with:
+          em-version: ${{ env.EM_VERSION }}
+          site-dir: _site
+
+      # For the Pages deploy.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      # For the tvim cross-compile (embedded via -tags embed_assets). A plain
+      # artifact (not the Pages one) so build-tvim can download it standalone.
+      - name: Upload site artifact (for tvim embed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-site
+          path: _site
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # Cross-compile the tvim Go server for each supported host, with the wasm
+  # bundle baked in (-tags embed_assets reads wasm/tvim/server/site/). Windows is
+  # excluded: the server uses Unix-only syscalls (Stat_t, Flock, Setsid, ...).
+  build-tvim:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm/tvim/go.mod
+          cache-dependency-path: wasm/tvim/go.sum
+
+      # The same assembled site the Pages job built — drop it into the embed dir
+      # so `-tags embed_assets` (`//go:embed all:site`) bakes it into the binary.
+      - name: Download wasm site bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-site
+          path: wasm/tvim/server/site
+
+      # Gzip the large assets in place (raw dropped) so the binary embeds the
+      # compressed bytes and serves them with Content-Encoding: gzip. Shrinks the
+      # binary ~47MB -> ~20MB and the wasm/.data downloads to ~26%.
+      - name: Precompress embedded assets
+        working-directory: wasm/tvim
+        run: ./precompress.sh server/site
+
+      - name: Cross-compile tvim
+        working-directory: wasm/tvim
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out="tvim-${GOOS}-${GOARCH}"
+          go build -mod=readonly -tags embed_assets -trimpath -o "dist/${out}" ./cmd/tvim
+          ls -l "dist/${out}"
+
+      - name: Upload tvim binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: wasm/tvim/dist/tvim-${{ matrix.goos }}-${{ matrix.goarch }}
+          retention-days: 7
