@@ -397,11 +397,14 @@
       sessions.set(ta, { focus: function () { canvas.focus(); } });
     }
 
-    w.__nvimOverlay = { open: open };
+    w.__nvimOverlay = {
+      open: open,
+      // The activation entry point (background.ts calls this after injecting):
+      // open on the currently focused textarea, if any.
+      openActive: function () {
+        const el: any = document.activeElement;
+        if (el instanceof HTMLTextAreaElement && !el.disabled) { open(el); }
+      },
+    };
   }
-
-  // First injection: open on the target the trigger recorded.
-  const pending = w.__nvimPendingTarget;
-  w.__nvimPendingTarget = null;
-  if (pending) { w.__nvimOverlay.open(pending); }
 })();

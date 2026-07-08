@@ -3,7 +3,9 @@
 A Chrome (MV3) extension that temporarily replaces a focused `<textarea>` on
 any page with the WebAssembly Neovim editor from this repo.
 
-**Use it:** focus a textarea, press **Ctrl+Shift+.** — a Neovim canvas overlays
+**Use it:** focus a textarea, press **Ctrl+Shift+.** (a Chrome extension
+shortcut — rebind it at chrome://extensions/shortcuts; clicking the toolbar
+icon works too) — a Neovim canvas overlays
 the textarea with its content loaded into the buffer. `:w` writes the buffer
 back into the textarea (dispatching `input`/`change` through the native value
 setter, so React-style frameworks notice). `:wq` / `ZZ` writes and closes the
@@ -52,11 +54,12 @@ Everything heavy is the existing library stack, unmodified: `neovim.js`
 extension contributes plumbing:
 
 ```
-page (content-script world)          extension
+user gesture                         extension
 ┌─────────────────────────┐   ┌──────────────────────────────────────┐
-│ trigger.js  (~1KB, every │   │ background.js (MV3 service worker):  │
-│ page): Ctrl+Shift+. on a ├──►│ ensures the offscreen document +     │
-│ textarea -> activate     │   │ injects the overlay stack on demand  │
+│ Ctrl+Shift+. (a chrome.  │   │ background.js (MV3 service worker):  │
+│ commands shortcut) or    ├──►│ ensures the offscreen document,      │
+│ the toolbar action --    │   │ probes frames for the focused        │
+│ grants activeTab         │   │ textarea, injects the overlay stack  │
 ├─────────────────────────┤   ├──────────────────────────────────────┤
 │ overlay.js + libs        │   │ offscreen.html/js (persistent):      │
 │ (injected on demand):    │   │ hosts the engine Web Workers, keeps  │
@@ -67,6 +70,14 @@ page (content-script world)          extension
 
 Design decisions, and why:
 
+* **activeTab, not host permissions.** The extension declares no host
+  permissions and injects no content scripts: it cannot read or touch any
+  page until the user invokes it, and then only THAT tab. Both activation
+  gestures (the `chrome.commands` shortcut and the toolbar action) grant
+  `activeTab`, which is all `chrome.scripting.executeScript` needs. The
+  trade-offs: textareas inside cross-origin iframes are out of reach
+  (activeTab covers frames the extension can see, not foreign origins), and
+  the shortcut is browser-global rather than an in-page listener.
 * **The engine workers live in an offscreen document.** MV3 service workers
   are ephemeral (killed after ~30s idle) and cannot spawn `Worker`s; a
   `chrome.offscreen` document is the extension's one persistent context that
@@ -107,8 +118,8 @@ Design decisions, and why:
 | File | Role |
 |---|---|
 | `manifest.json` | MV3 manifest. `wasm-unsafe-eval` CSP for extension pages; `minimum_chrome_version: 137` (JSPI on by default). |
-| `src/trigger.ts` | Always-injected content script: the keybinding listener, nothing else. |
-| `src/background.ts` | Service worker: offscreen-document lifecycle + on-demand injection of the overlay stack (`chrome.scripting`). |
+| `src/background.ts` | Service worker: offscreen-document lifecycle, the activation path (frame probe + on-demand injection via `chrome.scripting`), command/action listeners. |
+| `src/trigger.ts` | In-page keybinding trigger, NOT in the production manifest: the e2e patches it in as a content script because synthesized key events cannot fire browser-level command shortcuts. |
 | `src/offscreen.ts` | Engine host: warm pool, Port↔worker bridging, the persistent config store (IndexedDB) + default `init.vim`. |
 | `src/ext-engine-worker.ts` | Engine worker entry: config-persistence FS hooks around the stock `engine-worker.js`. |
 | `src/overlay.ts` | The session: overlay DOM, Port `Transport`, buffer load, `BufWriteCmd` write-back, teardown. |
@@ -127,6 +138,11 @@ cd wasm/chrome-ext/e2e && go test -v      # skips without Chrome or _ext/
 The e2e loads the unpacked extension via the CDP `Extensions.loadUnpacked`
 command with `--enable-unsafe-extension-debugging` — branded Google Chrome
 ≥ 137 removed the `--load-extension` flag (still passed, for Chromium builds).
+It runs against a manifest-PATCHED copy of `_ext/` (adding `trigger.js` as a
+content script + host permissions): synthesized key events reach the renderer
+but not the browser's accelerator layer, so the production activation (the
+`chrome.commands` shortcut) cannot fire headlessly; the patched trigger sends
+the same message and exercises the same service-worker `activate()` path.
 It drives the full flow with trusted synthesized input: trigger chord, edit,
 `:w` live write-back (asserting the page saw `input` events), `:wq` teardown +
 focus restore, then a second session (asserting the pre-warmed engine attaches
@@ -134,16 +150,15 @@ fast) closed with `:q!` (asserting no write-back).
 
 ## Caveats / future work
 
-* **Keybinding is fixed** (Ctrl+Shift+., matched on `KeyboardEvent.code ==
-  'Period'`). An options page could make it configurable.
 * **Page capture-phase key listeners** registered above the canvas still see
   keystrokes before us (platform limit); bubble-phase page hotkeys are
   stopped at the canvas.
 * **Config persists, but there's no network or shell** — `~/.config/nvim` is
   durable (hand-written config, small colorschemes/plugins pasted as files
   under it load fine), but plugin managers that shell out or fetch can't run.
-* Textareas inside cross-origin iframes work (the trigger runs `all_frames`),
-  but the overlay is confined to that iframe's viewport.
+* Textareas inside cross-origin iframes are not reachable (the price of the
+  activeTab-only permission model); same-origin iframes work, with the
+  overlay confined to that iframe's viewport.
 * `<input type="text">` and `contenteditable` are not handled (textareas only).
 * Session state (registers, `:` history) does not persist across sessions —
   each session is a fresh engine. The system clipboard (`"+`, and

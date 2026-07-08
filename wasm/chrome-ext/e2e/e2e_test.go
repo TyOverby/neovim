@@ -65,9 +65,9 @@ func chromeFound() (string, error) {
 	return "", fmt.Errorf("no chrome")
 }
 
-// extDir returns the unpacked extension: NVIM_EXT_DIR if set, else the
-// default build-ext.sh output (wasm/chrome-ext/_ext). Skips if absent.
-func extDir(t *testing.T) string {
+// prodExtDir returns the PRODUCTION unpacked extension: NVIM_EXT_DIR if set,
+// else the default build-ext.sh output (wasm/chrome-ext/_ext). Skips if absent.
+func prodExtDir(t *testing.T) string {
 	if d := os.Getenv("NVIM_EXT_DIR"); d != "" {
 		if _, err := os.Stat(filepath.Join(d, "manifest.json")); err != nil {
 			t.Skipf("NVIM_EXT_DIR=%s has no manifest.json: %v", d, err)
@@ -84,6 +84,59 @@ func extDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return abs
+}
+
+// extDir returns a TEST build: the production extension copied to a temp dir
+// with the manifest patched to add a content-script trigger + host
+// permissions. Synthesized CDP key events reach the renderer but never the
+// browser's accelerator layer, so the production activation (a
+// chrome.commands shortcut granting activeTab) cannot fire headlessly; the
+// patched-in trigger.js (shipped in the bundle for exactly this) sends the
+// same 'nvim-activate' message and exercises the same service-worker
+// activate() path from there on.
+func extDir(t *testing.T) string {
+	src := prodExtDir(t)
+	dst := t.TempDir()
+	if err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dst, rel), b, 0o644)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mpath := filepath.Join(dst, "manifest.json")
+	raw, err := os.ReadFile(mpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["host_permissions"] = []any{"<all_urls>"}
+	m["content_scripts"] = []any{map[string]any{
+		"matches":    []any{"<all_urls>"},
+		"js":         []any{"trigger.js"},
+		"all_frames": true,
+		"run_at":     "document_idle",
+	}}
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mpath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dst
 }
 
 // newChromeWithExt launches headless Chrome and loads the unpacked extension.

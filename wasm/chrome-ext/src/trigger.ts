@@ -1,14 +1,16 @@
-// wasm/chrome-ext/src/trigger.ts - the always-injected content script.
+// wasm/chrome-ext/src/trigger.ts - the in-page activation trigger.
 //
-// Kept deliberately tiny (every page loads it): it only listens for the
-// activation keybinding on a focused <textarea> and asks the service worker to
-// inject the real overlay stack (background.ts -> chrome.scripting). Repeat
-// activations in a frame that already has the stack call the overlay directly
-// (with a fire-and-forget 'nvim-ensure' so the engine host exists even if the
-// browser reclaimed it).
+// NOT part of the production manifest: production activation is the
+// chrome.commands keyboard shortcut (+ toolbar action), which grants
+// activeTab -- no content scripts, no host permissions. This script exists
+// for the e2e, whose synthesized key events reach the renderer but not the
+// browser's accelerator layer, so browser-level commands never fire: the
+// test build patches the manifest to register this as a content script, and
+// the keydown here sends the same activation message the command handler
+// path uses (background.ts activate()).
 //
-// Keybinding: Ctrl+Shift+. ("Period" by KeyboardEvent.code, so it's layout-
-// independent and unaffected by what character Shift produces).
+// Keybinding: Ctrl+Shift+. ("Period" by KeyboardEvent.code, matching the
+// production command's default).
 'use strict';
 
 (function () {
@@ -30,16 +32,6 @@
     e.preventDefault();
     e.stopImmediatePropagation();
 
-    if (w.__nvimOverlay) {
-      // Stack already injected here: open directly, but ping the worker so the
-      // offscreen engine host is (re)created if the browser reclaimed it.
-      try { chrome.runtime.sendMessage({ type: 'nvim-ensure' }, function () { void chrome.runtime.lastError; }); }
-      catch (_e) { /* extension reloaded under us; the open below still works if the host lives */ }
-      w.__nvimOverlay.open(el);
-      return;
-    }
-
-    w.__nvimPendingTarget = el;
     try {
       chrome.runtime.sendMessage({ type: 'nvim-activate' }, function (resp: any) {
         void chrome.runtime.lastError;

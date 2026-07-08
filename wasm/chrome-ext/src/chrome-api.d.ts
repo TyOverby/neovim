@@ -45,9 +45,15 @@ declare const chrome: {
   };
   scripting: {
     executeScript(opts: {
-      target: { tabId: number; frameIds?: number[] };
+      target: { tabId: number; frameIds?: number[]; allFrames?: boolean };
       files?: string[];
-      func?: () => void;
-    }): Promise<any>;
+      func?: () => any;
+    }): Promise<Array<{ frameId?: number; result?: any }>>;
+  };
+  commands: {
+    onCommand: { addListener(fn: (command: string, tab?: { id?: number }) => void): void };
+  };
+  action: {
+    onClicked: { addListener(fn: (tab?: { id?: number }) => void): void };
   };
 };
